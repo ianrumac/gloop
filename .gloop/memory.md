@@ -1,0 +1,3 @@
+The project structure includes bin/, src/core/ with core files like core.ts (interpreter), ui.ts, memory.ts, system.ts, headless.ts, task-mode.ts, context-manager.ts; likely src/ai/, src/tools/; .gloop/ for memory and custom tools; docs/ for spec.
+
+README.md updated to reflect current project structure: bin/launcher.ts as main binary, full src/ breakdown, added shell.ts mention, architecture tree, concise features list.

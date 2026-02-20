@@ -1,0 +1,28 @@
+{
+  "name": "gloop",
+  "module": "bin/index.ts",
+  "type": "module",
+  "bin": {
+    "gloop": "./bin/launcher.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/react": "^19.2.13",
+    "eslint": "^10.0.0",
+    "prettier": "^3.8.1"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@openrouter/sdk": "^0.8.0",
+    "ink": "^6.6.0",
+    "ink-spinner": "^5.0.0",
+    "ink-text-input": "^6.0.0",
+    "marked": "^17.0.1",
+    "marked-terminal": "^7.3.0",
+    "react": "^19.2.4",
+    "zod": "^3.23.8"
+  },
+  "private": true
+}

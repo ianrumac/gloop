@@ -1,0 +1,163 @@
+@import "tailwindcss";
+
+@theme {
+  --font-family-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-family-mono: 'IBM Plex Mono', ui-monospace, 'Cascadia Code', 'Source Code Pro', monospace;
+
+  /* Classic Bauhaus/Braun color palette */
+  --color-background: #F4F4F0;
+  --color-foreground: #111111;
+  --color-muted: #EAEADF;
+  --color-muted-foreground: #666666;
+  --color-border: #111111; /* Brutalist sharp borders */
+  --color-input: #E2E2D8;
+  
+  --color-primary: #111111;
+  --color-primary-foreground: #F4F4F0;
+  
+  --color-accent: #FF5900;
+  --color-accent-foreground: #FFFFFF;
+
+  --color-bauhaus-red: #E12120;
+  --color-bauhaus-blue: #1A3668;
+  --color-bauhaus-yellow: #F0B323;
+
+  --radius: 0px; /* Sharp corners */
+}
+
+@layer base {
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-family-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    overflow-x: hidden;
+  }
+  
+  ::selection {
+    background-color: var(--color-accent);
+    color: var(--color-accent-foreground);
+  }
+
+  /* Structural borders everywhere */
+  section {
+    position: relative;
+  }
+}
+
+@layer utilities {
+  .hero-grid {
+    display: grid;
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    gap: 1.5rem;
+  }
+
+  .tech-grid {
+    background-size: 32px 32px;
+    background-image: 
+      linear-gradient(to right, rgba(17, 17, 17, 0.08) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(17, 17, 17, 0.08) 1px, transparent 1px);
+  }
+
+  .scanline {
+    background: linear-gradient(
+      to bottom,
+      rgba(255,255,255,0),
+      rgba(255,255,255,0) 50%, 
+      rgba(0,0,0,0.03) 50%,
+      rgba(0,0,0,0.03)
+    );
+    background-size: 100% 4px;
+    pointer-events: none;
+  }
+
+  .typing-cursor::after {
+    content: '█';
+    animation: blink 1s step-start infinite;
+    color: var(--color-accent);
+    margin-left: 8px;
+  }
+
+  .marquee-content {
+    display: flex;
+    animation: marquee 20s linear infinite;
+  }
+}
+
+/* Code syntax highlighting - designed for dark background (#111111) */
+.code-keyword {
+  color: #FF5900; /* Orange - keywords like type, function, return */
+}
+
+.code-type {
+  color: #F0B323; /* Yellow - types like Form, World, string */
+}
+
+.code-string {
+  color: #E12120; /* Red - string literals */
+}
+
+.code-comment {
+  color: #555555; /* Dark gray - comments */
+}
+
+.code-ident {
+  color: #888888; /* Medium gray - identifiers like tag, name, input */
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(30px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes marquee {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+
+.animate-fade-up {
+  animation: fade-up 1s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  opacity: 0;
+}
+
+.delay-100 { animation-delay: 100ms; }
+.delay-200 { animation-delay: 200ms; }
+.delay-300 { animation-delay: 300ms; }
+.delay-400 { animation-delay: 400ms; }
+
+/* In dark mode, invert */
+@media (prefers-color-scheme: dark) {
+  @theme {
+    --color-background: #0A0A0A;
+    --color-foreground: #F4F4F0;
+    --color-muted: #1A1A1A;
+    --color-muted-foreground: #8F8F8C;
+    --color-border: #F4F4F0;
+    --color-primary: #F4F4F0;
+    --color-primary-foreground: #0A0A0A;
+    --color-accent: #FF5900;
+  }
+  
+  @layer utilities {
+    .tech-grid {
+      background-image: 
+        linear-gradient(to right, rgba(244, 244, 240, 0.08) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(244, 244, 240, 0.08) 1px, transparent 1px);
+    }
+    
+    .scanline {
+      background: linear-gradient(
+        to bottom,
+        rgba(0,0,0,0),
+        rgba(0,0,0,0) 50%,
+        rgba(255,255,255,0.02) 50%,
+        rgba(255,255,255,0.02)
+      );
+    }
+  }
+}
