@@ -64,17 +64,18 @@ class MockProvider implements AIProvider {
 }
 
 describe("manageContextFork", () => {
-  test("prunes messages marked for deletion", async () => {
+  test("prunes messages and injects summary", async () => {
     const provider = new MockProvider([
       { toolCalls: [tc("c1", "DeleteMessages", { indexes: "1,2" })] },
-      { toolCalls: [tc("c2", "CompleteTask", { summary: "Pruned 2 messages" })] },
+      { toolCalls: [tc("c2", "Summarize", { summary: "User asked about dark mode. Assistant explained the toggle implementation." })] },
+      { toolCalls: [tc("c3", "CompleteTask", { summary: "Pruned 2 messages" })] },
     ]);
 
     const convo = new AIConversation(provider, "m", "main system");
     convo.setHistory([
-      { role: "system", content: "system prompt" },       // #0 — never deleted
-      { role: "user", content: "old question" },           // #1 — will be deleted
-      { role: "assistant", content: "old answer" },        // #2 — will be deleted
+      { role: "system", content: "system prompt" },       // #0
+      { role: "user", content: "old question" },           // #1 — deleted
+      { role: "assistant", content: "old answer" },        // #2 — deleted
       { role: "user", content: "current question" },       // #3 — kept
       { role: "assistant", content: "current answer" },    // #4 — kept
     ]);
@@ -82,11 +83,39 @@ describe("manageContextFork", () => {
     const result = await manageContextFork(convo, "remove old stuff");
 
     expect(result).toContain("removed 2");
+    expect(result).toContain("summary");
     const remaining = convo.getHistory();
-    expect(remaining).toHaveLength(3);
+    // system + summary + 2 kept = 4
+    expect(remaining).toHaveLength(4);
+    expect(remaining[0].content).toBe("system prompt");
+    expect(remaining[1].content).toContain("[This is a summary of conversation history up to this point]");
+    expect(remaining[1].content).toContain("dark mode");
+    expect(remaining[1].role).toBe("user");
+    expect(remaining[2].content).toBe("current question");
+    expect(remaining[3].content).toBe("current answer");
+  });
+
+  test("prunes without summary when Summarize not called", async () => {
+    const provider = new MockProvider([
+      { toolCalls: [tc("c1", "DeleteMessages", { indexes: "1,2" })] },
+      { toolCalls: [tc("c2", "CompleteTask", { summary: "Pruned 2 messages" })] },
+    ]);
+
+    const convo = new AIConversation(provider, "m", "main system");
+    convo.setHistory([
+      { role: "system", content: "system prompt" },
+      { role: "user", content: "old question" },
+      { role: "assistant", content: "old answer" },
+      { role: "user", content: "current question" },
+    ]);
+
+    await manageContextFork(convo, "remove old stuff");
+
+    const remaining = convo.getHistory();
+    // system + current = 2 (no summary injected)
+    expect(remaining).toHaveLength(2);
     expect(remaining[0].content).toBe("system prompt");
     expect(remaining[1].content).toBe("current question");
-    expect(remaining[2].content).toBe("current answer");
   });
 
   test("cannot delete system message (index 0)", async () => {
@@ -104,7 +133,7 @@ describe("manageContextFork", () => {
     await manageContextFork(convo, "prune");
 
     const remaining = convo.getHistory();
-    // Only index 1 should be deleted, not 0
+    // Only index 1 deleted, system kept
     expect(remaining).toHaveLength(1);
     expect(remaining[0].content).toBe("system");
   });
@@ -122,7 +151,7 @@ describe("manageContextFork", () => {
 
     const result = await manageContextFork(convo, "check history");
 
-    expect(result).toContain("removed 0");
+    expect(result).toContain("no messages pruned");
     expect(convo.getHistory()).toHaveLength(2);
   });
 
@@ -140,14 +169,14 @@ describe("manageContextFork", () => {
 
     await manageContextFork(convo, "review");
 
-    // The fork should have seen the message — we check the result is reasonable
     expect(convo.getHistory()).toHaveLength(2); // No deletions
   });
 
-  test("returns summary string", async () => {
+  test("returns summary string with removed count", async () => {
     const provider = new MockProvider([
       { toolCalls: [tc("c1", "DeleteMessages", { indexes: "1" })] },
-      { toolCalls: [tc("c2", "CompleteTask", { summary: "cleaned up" })] },
+      { toolCalls: [tc("c2", "Summarize", { summary: "Old message was about setup." })] },
+      { toolCalls: [tc("c3", "CompleteTask", { summary: "cleaned up" })] },
     ]);
 
     const convo = new AIConversation(provider, "m");
@@ -178,7 +207,7 @@ describe("manageContextFork", () => {
 
     await manageContextFork(convo, "prune");
 
-    // Index 0 protected (system), 99/100 out of bounds, only 1 deleted
+    // Index 0 protected, 99/100 OOB, only 1 deleted
     expect(convo.getHistory()).toHaveLength(1);
     expect(convo.getHistory()[0].content).toBe("system");
   });
@@ -186,7 +215,8 @@ describe("manageContextFork", () => {
   test("duplicate indexes only delete once", async () => {
     const provider = new MockProvider([
       { toolCalls: [tc("c1", "DeleteMessages", { indexes: "1,1,1" })] },
-      { toolCalls: [tc("c2", "CompleteTask", { summary: "done" })] },
+      { toolCalls: [tc("c2", "Summarize", { summary: "Removed a duplicate user msg." })] },
+      { toolCalls: [tc("c3", "CompleteTask", { summary: "done" })] },
     ]);
 
     const convo = new AIConversation(provider, "m");
@@ -198,15 +228,17 @@ describe("manageContextFork", () => {
 
     const result = await manageContextFork(convo, "prune");
 
-    expect(convo.getHistory()).toHaveLength(2);
-    expect(result).toContain("removed 1"); // Set deduplicates
+    // system + summary + keep = 3
+    expect(convo.getHistory()).toHaveLength(3);
+    expect(result).toContain("removed 1");
   });
 
   test("multiple DeleteMessages calls accumulate", async () => {
     const provider = new MockProvider([
       { toolCalls: [tc("c1", "DeleteMessages", { indexes: "1" })] },
       { toolCalls: [tc("c2", "DeleteMessages", { indexes: "2" })] },
-      { toolCalls: [tc("c3", "CompleteTask", { summary: "done" })] },
+      { toolCalls: [tc("c3", "Summarize", { summary: "Removed two old messages." })] },
+      { toolCalls: [tc("c4", "CompleteTask", { summary: "done" })] },
     ]);
 
     const convo = new AIConversation(provider, "m");
@@ -219,9 +251,11 @@ describe("manageContextFork", () => {
 
     await manageContextFork(convo, "prune");
 
-    expect(convo.getHistory()).toHaveLength(2);
+    // system + summary + keep = 3
+    expect(convo.getHistory()).toHaveLength(3);
     expect(convo.getHistory()[0].content).toBe("system");
-    expect(convo.getHistory()[1].content).toBe("keep");
+    expect(convo.getHistory()[1].content).toContain("summary of conversation history");
+    expect(convo.getHistory()[2].content).toBe("keep");
   });
 
   test("invalid index strings are filtered", async () => {
@@ -239,8 +273,53 @@ describe("manageContextFork", () => {
 
     await manageContextFork(convo, "prune");
 
-    // Only index 1 is valid
+    // system + keep = 2 (no summary since Summarize wasn't called)
     expect(convo.getHistory()).toHaveLength(2);
     expect(convo.getHistory()[1].content).toBe("keep");
+  });
+
+  test("summary message has correct format", async () => {
+    const provider = new MockProvider([
+      { toolCalls: [tc("c1", "DeleteMessages", { indexes: "1" })] },
+      { toolCalls: [tc("c2", "Summarize", { summary: "Key facts:\n- User wants dark mode\n- API key is set up" })] },
+      { toolCalls: [tc("c3", "CompleteTask", { summary: "done" })] },
+    ]);
+
+    const convo = new AIConversation(provider, "m");
+    convo.setHistory([
+      { role: "system", content: "sys" },
+      { role: "user", content: "old stuff" },
+      { role: "user", content: "current" },
+    ]);
+
+    await manageContextFork(convo, "prune");
+
+    const summaryMsg = convo.getHistory()[1];
+    expect(summaryMsg.role).toBe("user");
+    expect(summaryMsg.content).toMatch(/^\[This is a summary of conversation history up to this point\]/);
+    expect(summaryMsg.content).toContain("dark mode");
+    expect(summaryMsg.content).toContain("API key");
+  });
+
+  test("empty Summarize text does not inject message", async () => {
+    const provider = new MockProvider([
+      { toolCalls: [tc("c1", "DeleteMessages", { indexes: "1" })] },
+      { toolCalls: [tc("c2", "Summarize", { summary: "" })] },
+      { toolCalls: [tc("c3", "CompleteTask", { summary: "done" })] },
+    ]);
+
+    const convo = new AIConversation(provider, "m");
+    convo.setHistory([
+      { role: "system", content: "sys" },
+      { role: "user", content: "old" },
+      { role: "user", content: "current" },
+    ]);
+
+    await manageContextFork(convo, "prune");
+
+    // system + current = 2, no summary injected
+    expect(convo.getHistory()).toHaveLength(2);
+    expect(convo.getHistory()[0].content).toBe("sys");
+    expect(convo.getHistory()[1].content).toBe("current");
   });
 });
