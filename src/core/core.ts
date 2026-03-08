@@ -9,6 +9,7 @@
  */
 
 import type { AIConversation } from "../ai/index.ts";
+import type { ToolMode, JsonToolCall } from "../ai/types.ts";
 import type { ToolRegistry } from "../tools/registry.ts";
 import type { ToolCall, ToolResult } from "../tools/types.ts";
 import { debugLogRaw } from "./debug.ts";
@@ -102,6 +103,7 @@ export interface World {
   convo: AIConversation;
   registry: ToolRegistry;
   toolCalls: number;
+  toolMode: ToolMode;
   signal?: AbortSignal;
 }
 
@@ -109,10 +111,16 @@ export class AbortError extends Error {
   constructor() { super("Interrupted by user"); this.name = "AbortError"; }
 }
 
-export const mkWorld = (convo: AIConversation, registry: ToolRegistry, signal?: AbortSignal): World => ({
+export const mkWorld = (
+  convo: AIConversation,
+  registry: ToolRegistry,
+  signal?: AbortSignal,
+  toolMode: ToolMode = "xml",
+): World => ({
   convo,
   registry,
   toolCalls: 0,
+  toolMode,
   signal,
 });
 
@@ -142,7 +150,7 @@ export interface Effects {
 // PARSER — Transform LLM output into Forms
 // ============================================================================
 
-import { parseResponse, requiresConfirmation } from "../tools/index.ts";
+import { parseResponse, requiresConfirmation, jsonToolCallsToToolCalls } from "../tools/index.ts";
 import { parseGloopTaskBashCommand } from "./task-mode.ts";
 
 /** SpawnResult → synthetic ToolResult for feeding back to the LLM */
@@ -172,7 +180,7 @@ function asSpawnTask(call: ToolCall): string | null {
   return req ? req.task : null;
 }
 
-/** Parse LLM response text and construct the appropriate Form */
+/** Parse LLM response text and construct the appropriate Form (XML mode) */
 export function parseToForm(text: string): Form {
   const parsed = parseResponse(text);
 
@@ -187,27 +195,30 @@ export function parseToForm(text: string): Form {
   // No tool calls → just memory ops (if any)
   if (parsed.toolCalls.length === 0) return withMemory(Nil);
 
+  return withMemory(toolCallsToForm(parsed.toolCalls));
+}
+
+/** Build a Form from a list of ToolCalls (shared by XML and JSON modes) */
+export function toolCallsToForm(toolCalls: ToolCall[]): Form {
+  if (toolCalls.length === 0) return Nil;
+
   // Separate control forms from regular calls
-  const completeCall = parsed.toolCalls.find(c => c.name === "CompleteTask");
-  const rebootCall = parsed.toolCalls.find(c => c.name === "Reboot");
-  const regularCalls = parsed.toolCalls.filter(
+  const completeCall = toolCalls.find(c => c.name === "CompleteTask");
+  const rebootCall = toolCalls.find(c => c.name === "Reboot");
+  const regularCalls = toolCalls.filter(
     c => c.name !== "CompleteTask" && c.name !== "Reboot"
   );
 
   // Terminal forms: reboot / complete (optionally preceded by tool invocations)
   if (rebootCall) {
     const reason = rebootCall.rawArgs[0] ?? "Reboot requested";
-    return withMemory(
-      regularCalls.length > 0 ? Invoke(regularCalls, () => Reboot(reason)) : Reboot(reason)
-    );
+    return regularCalls.length > 0 ? Invoke(regularCalls, () => Reboot(reason)) : Reboot(reason);
   }
   if (completeCall) {
     const summary = completeCall.rawArgs[0] ?? "Task complete";
-    return withMemory(
-      regularCalls.length > 0 ? Invoke(regularCalls, () => Done(summary)) : Done(summary)
-    );
+    return regularCalls.length > 0 ? Invoke(regularCalls, () => Done(summary)) : Done(summary);
   }
-  if (regularCalls.length === 0) return withMemory(Nil);
+  if (regularCalls.length === 0) return Nil;
 
   // Partition regular calls into plain tools and spawn tasks
   const plainCalls: ToolCall[] = [];
@@ -220,18 +231,18 @@ export function parseToForm(text: string): Form {
 
   // No spawns: invoke tools, think with results
   if (spawnTasks.length === 0) {
-    return withMemory(Invoke(regularCalls, (results) => Think(formatResults(results))));
+    return Invoke(regularCalls, (results) => Think(formatResults(results)));
   }
 
   // Mixed or all-spawn: invoke plain tools first (if any), then fold spawns, then think
   if (plainCalls.length > 0) {
-    return withMemory(Invoke(plainCalls, (toolResults) =>
+    return Invoke(plainCalls, (toolResults) =>
       chainSpawns(spawnTasks, Think(formatResults(toolResults)))
-    ));
+    );
   }
 
   // All spawns: fold into a chain that collects results then thinks
-  return withMemory(chainSpawns(spawnTasks, Think("")));
+  return chainSpawns(spawnTasks, Think(""));
 }
 
 function formatResults(results: ToolResult[]): string {
@@ -351,6 +362,18 @@ async function evalThink(
   world: World,
   fx: Effects
 ): Promise<void> {
+  if (world.toolMode === "json") {
+    return evalThinkJson(input, world, fx);
+  }
+  return evalThinkXml(input, world, fx);
+}
+
+/** Think in XML mode: parse tool calls from XML tags in response text */
+async function evalThinkXml(
+  input: string,
+  world: World,
+  fx: Effects
+): Promise<void> {
   let fullText = "";
   const filter = new StreamFilter(text => fx.streamChunk(text));
   debugLogRaw("LLM_INPUT_RAW", input);
@@ -417,6 +440,97 @@ async function evalThink(
   // Parse response into a Form and evaluate it
   const nextForm = parseToForm(fullText);
   return eval_(nextForm, world, fx);
+}
+
+/** Think in JSON mode: tools are forwarded to OpenRouter, tool_calls come back in deltas */
+async function evalThinkJson(
+  input: string,
+  world: World,
+  fx: Effects
+): Promise<void> {
+  let fullText = "";
+  const accumulatedToolCalls: Map<number, { id: string; name: string; arguments: string }> = new Map();
+  debugLogRaw("LLM_INPUT_RAW", input);
+
+  // Set tools on the conversation for this request
+  const jsonTools = world.registry.toJsonTools();
+  world.convo.setJsonTools(jsonTools);
+
+  const iter = world.convo.stream(input)[Symbol.asyncIterator]();
+
+  // Build an abort promise that rejects when signal fires
+  const abortPromise = world.signal
+    ? new Promise<never>((_, reject) => {
+        if (world.signal!.aborted) { reject(new AbortError()); return; }
+        world.signal!.addEventListener("abort", () => reject(new AbortError()), { once: true });
+      })
+    : null;
+
+  try {
+    while (true) {
+      const next = iter.next();
+      const { done, value: chunk } = abortPromise
+        ? await Promise.race([next, abortPromise])
+        : await next;
+      if (done) break;
+
+      // Stream text content to user
+      if (chunk.delta.content) {
+        fx.streamChunk(chunk.delta.content);
+        fullText += chunk.delta.content;
+      }
+
+      // Accumulate tool calls from deltas (streamed incrementally)
+      if (chunk.delta.toolCalls) {
+        for (const tc of chunk.delta.toolCalls) {
+          // Tool calls stream with an index; each delta may add to name or arguments
+          const idx = accumulatedToolCalls.size; // Use next available index
+          const existing = accumulatedToolCalls.get(idx);
+          if (existing) {
+            if (tc.function.name) existing.name += tc.function.name;
+            if (tc.function.arguments) existing.arguments += tc.function.arguments;
+          } else {
+            accumulatedToolCalls.set(idx, {
+              id: tc.id || `call_${idx}`,
+              name: tc.function.name || "",
+              arguments: tc.function.arguments || "",
+            });
+          }
+        }
+      }
+    }
+  } catch (err) {
+    if (err instanceof AbortError) {
+      iter.return!(undefined as any).catch(() => {});
+      if (fullText) {
+        const h = world.convo.getHistory();
+        h.push({ role: "assistant", content: fullText });
+        world.convo.setHistory(h);
+      }
+      throw err;
+    }
+    throw err;
+  }
+
+  fx.streamDone();
+  debugLogRaw("LLM_OUTPUT_RAW", fullText);
+
+  // Convert accumulated tool calls to gloop's ToolCall format
+  const jsonCalls: JsonToolCall[] = [...accumulatedToolCalls.values()].map(tc => ({
+    id: tc.id,
+    type: "function" as const,
+    function: { name: tc.name, arguments: tc.arguments },
+  }));
+
+  if (jsonCalls.length > 0) {
+    const toolCalls = jsonToolCallsToToolCalls(jsonCalls);
+    debugLogRaw("JSON_TOOL_CALLS", JSON.stringify(toolCalls));
+    const nextForm = toolCallsToForm(toolCalls);
+    return eval_(nextForm, world, fx);
+  }
+
+  // No tool calls — done with this turn
+  return;
 }
 
 /** Invoke: execute tools (with confirmation), then continue */

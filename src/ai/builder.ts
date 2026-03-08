@@ -6,6 +6,8 @@ import type {
   Message,
   ProviderRouting,
   Lazy,
+  JsonTool,
+  ToolChoice,
 } from "./types.ts";
 
 function resolve<T>(value: Lazy<T>): T {
@@ -24,6 +26,8 @@ export class AIBuilder {
     stop: Lazy<string[]>;
     seed: Lazy<number>;
     provider: Lazy<ProviderRouting>;
+    tools: Lazy<JsonTool[]>;
+    toolChoice: Lazy<ToolChoice>;
   }> = {};
   private _messages: (Message | Lazy<Message[]>)[] = [];
 
@@ -64,6 +68,16 @@ export class AIBuilder {
 
   providerRouting(value: Lazy<ProviderRouting>): this {
     this.config.provider = value;
+    return this;
+  }
+
+  tools(value: Lazy<JsonTool[]>): this {
+    this.config.tools = value;
+    return this;
+  }
+
+  toolChoice(value: Lazy<ToolChoice>): this {
+    this.config.toolChoice = value;
     return this;
   }
 
@@ -153,8 +167,10 @@ export class AIBuilder {
     const stop = this.config.stop !== undefined ? resolve(this.config.stop) : undefined;
     const seed = this.config.seed !== undefined ? resolve(this.config.seed) : undefined;
     const provider = this.config.provider !== undefined ? resolve(this.config.provider) : undefined;
+    const tools = this.config.tools !== undefined ? resolve(this.config.tools) : undefined;
+    const toolChoice = this.config.toolChoice !== undefined ? resolve(this.config.toolChoice) : undefined;
 
-    return { model, messages, temperature, maxTokens, topP, frequencyPenalty, presencePenalty, stop, seed, provider };
+    return { model, messages, temperature, maxTokens, topP, frequencyPenalty, presencePenalty, stop, seed, provider, tools, toolChoice };
   }
 }
 
@@ -189,6 +205,7 @@ export class AIConversation {
   private systemPrompt?: string;
   private history: Message[] = [];
   private routing?: ProviderRouting;
+  private jsonTools?: JsonTool[];
 
   constructor(provider: AIProvider, modelId: string, systemPrompt?: string) {
     this.provider = provider;
@@ -202,6 +219,7 @@ export class AIConversation {
     const builder = new AIBuilder(this.provider, this.modelId);
     if (this.systemPrompt) builder.system(this.systemPrompt);
     if (this.routing) builder.providerRouting(this.routing);
+    if (this.jsonTools) builder.tools(this.jsonTools);
     builder.messages(this.history);
 
     const response = await builder.query();
@@ -217,6 +235,7 @@ export class AIConversation {
     const builder = new AIBuilder(this.provider, this.modelId);
     if (this.systemPrompt) builder.system(this.systemPrompt);
     if (this.routing) builder.providerRouting(this.routing);
+    if (this.jsonTools) builder.tools(this.jsonTools);
     builder.messages(this.history);
 
     let fullContent = "";
@@ -261,6 +280,18 @@ export class AIConversation {
 
   setProviderRouting(routing: ProviderRouting): this {
     this.routing = routing;
+    return this;
+  }
+
+  /** Set JSON tools to forward to the provider (for native tool calling) */
+  setJsonTools(tools: JsonTool[]): this {
+    this.jsonTools = tools.length > 0 ? tools : undefined;
+    return this;
+  }
+
+  /** Clear JSON tools */
+  clearJsonTools(): this {
+    this.jsonTools = undefined;
     return this;
   }
 

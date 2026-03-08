@@ -14,6 +14,44 @@ export interface ProviderRouting {
   preferredMaxLatency?: number | { p50?: number; p75?: number; p90?: number; p99?: number };
 }
 
+// ---- JSON tool calling types (OpenRouter native format) ----
+
+/** Tool mode: "json" uses native OpenRouter tool calling, "xml" uses XML in system prompt */
+export type ToolMode = "json" | "xml";
+
+export interface JsonToolParameter {
+  type: string;
+  description?: string;
+  enum?: string[];
+}
+
+export interface JsonToolFunction {
+  name: string;
+  description: string;
+  parameters: {
+    type: "object";
+    properties: Record<string, JsonToolParameter>;
+    required?: string[];
+  };
+}
+
+export interface JsonTool {
+  type: "function";
+  function: JsonToolFunction;
+}
+
+export type ToolChoice = "auto" | "none" | "required" | { type: "function"; function: { name: string } };
+
+/** A tool call returned by the model in JSON mode */
+export interface JsonToolCall {
+  id: string;
+  type: "function";
+  function: {
+    name: string;
+    arguments: string; // JSON-encoded arguments
+  };
+}
+
 export interface AIRequestConfig {
   model: string;
   messages: Message[];
@@ -25,13 +63,16 @@ export interface AIRequestConfig {
   stop?: string[];
   seed?: number;
   provider?: ProviderRouting;
+  tools?: JsonTool[];
+  toolChoice?: ToolChoice;
 }
 
 export interface AIResponse {
   id: string;
   model: string;
   content: string | null;
-  finishReason: "stop" | "length" | "content_filter" | null;
+  finishReason: "stop" | "length" | "content_filter" | "tool_calls" | null;
+  toolCalls?: JsonToolCall[];
   usage?: {
     promptTokens: number;
     completionTokens: number;
@@ -44,8 +85,9 @@ export interface AIStreamChunk {
   model: string;
   delta: {
     content?: string;
+    toolCalls?: JsonToolCall[];
   };
-  finishReason: "stop" | "length" | "content_filter" | null;
+  finishReason: "stop" | "length" | "content_filter" | "tool_calls" | null;
   usage?: {
     promptTokens: number;
     completionTokens: number;

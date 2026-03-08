@@ -8,6 +8,12 @@ export type {
   MessageRole,
   ProviderRouting,
   Lazy,
+  ToolMode,
+  JsonTool,
+  JsonToolCall,
+  JsonToolFunction,
+  JsonToolParameter,
+  ToolChoice,
 } from "./types.ts";
 
 export { AI, AIBuilder, AIConversation } from "./builder.ts";

@@ -1,4 +1,5 @@
 import type { ToolCall, ParsedResponse } from "./types.ts";
+import type { JsonToolCall } from "../ai/types.ts";
 
 /**
  * Parse model response text for tool calls, remember/forget blocks.
@@ -223,4 +224,32 @@ export function parseArguments(argsStr: string): string[] {
   }
 
   return args;
+}
+
+/**
+ * Convert JSON tool calls (from OpenRouter native tool calling) into gloop's ToolCall format.
+ * Maps JSON arguments (key-value pairs) to positional rawArgs (values in key order).
+ */
+export function jsonToolCallsToToolCalls(jsonCalls: JsonToolCall[]): ToolCall[] {
+  return jsonCalls.map((jc) => {
+    const rawArgs: string[] = [];
+    try {
+      const parsed = JSON.parse(jc.function.arguments);
+      if (typeof parsed === "object" && parsed !== null) {
+        for (const value of Object.values(parsed)) {
+          rawArgs.push(String(value));
+        }
+      }
+    } catch {
+      // If arguments aren't valid JSON, treat whole string as single arg
+      if (jc.function.arguments) {
+        rawArgs.push(jc.function.arguments);
+      }
+    }
+
+    return {
+      name: jc.function.name,
+      rawArgs,
+    };
+  });
 }

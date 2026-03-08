@@ -1,4 +1,5 @@
 import type { ToolDefinition } from "./types.ts";
+import type { JsonTool } from "../ai/types.ts";
 
 export class ToolRegistry {
   private tools = new Map<string, ToolDefinition>();
@@ -45,5 +46,34 @@ export class ToolRegistry {
       );
     }
     return `<tools>\n${lines.join("\n")}\n</tools>`;
+  }
+
+  /** Convert all tool definitions to OpenRouter's JSON tool calling format */
+  toJsonTools(): JsonTool[] {
+    return this.getAll().map((tool) => {
+      const properties: Record<string, { type: string; description: string }> = {};
+      const required: string[] = [];
+
+      for (const arg of tool.arguments) {
+        properties[arg.name] = {
+          type: "string",
+          description: arg.description,
+        };
+        required.push(arg.name);
+      }
+
+      return {
+        type: "function" as const,
+        function: {
+          name: tool.name,
+          description: tool.description,
+          parameters: {
+            type: "object" as const,
+            properties,
+            ...(required.length > 0 && { required }),
+          },
+        },
+      };
+    });
   }
 }
