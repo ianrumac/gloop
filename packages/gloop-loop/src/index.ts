@@ -21,6 +21,7 @@ export type {
 } from "./ai/types.ts";
 
 export { AI, AIBuilder, AIConversation } from "./ai/builder.ts";
+export { OpenRouterProvider } from "./ai/provider.ts";
 
 // --- Tool layer: registry, types, parsing, validation ---
 export type {
@@ -33,6 +34,10 @@ export type {
 export { ToolRegistry } from "./tools/registry.ts";
 export { jsonToolCallsToToolCalls } from "./tools/parser.ts";
 export { requiresConfirmation } from "./tools/validator.ts";
+
+// --- Builtin tools: portable tool implementations ---
+export type { BuiltinIO, ShellResult, BuiltinOptions } from "./tools/builtins.ts";
+export { registerBuiltins, formatShellResult } from "./tools/builtins.ts";
 
 // --- Core loop: forms, interpreter, runner ---
 export type {
