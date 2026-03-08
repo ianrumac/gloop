@@ -276,6 +276,46 @@ describe("toolCallsToForm", () => {
       expect(next.tag).toBe("reboot");
     }
   });
+
+  test("Bash gloop --task creates spawn form", () => {
+    const form = toolCallsToForm([
+      { name: "Bash", rawArgs: ['gloop --task "fix tests"'] },
+    ]);
+    // Spawn tasks are folded into a chain: Spawn → Emit → Think
+    expect(form.tag).toBe("spawn");
+  });
+
+  test("mixed spawn and regular tools — invoke plain first", () => {
+    const form = toolCallsToForm([
+      { name: "Echo", rawArgs: ["work"] },
+      { name: "Bash", rawArgs: ['gloop --task "subtask"'] },
+    ]);
+    // Plain tools are invoked first, then spawns
+    expect(form.tag).toBe("invoke");
+    if (form.tag === "invoke") {
+      expect(form.calls).toHaveLength(1);
+      expect(form.calls[0].name).toBe("Echo");
+    }
+  });
+
+  test("CompleteTask with default summary", () => {
+    const form = toolCallsToForm([{ name: "CompleteTask", rawArgs: [] }]);
+    expect(form.tag).toBe("done");
+    if (form.tag === "done") expect(form.summary).toBe("Task complete");
+  });
+
+  test("Reboot with default reason", () => {
+    const form = toolCallsToForm([{ name: "Reboot", rawArgs: [] }]);
+    expect(form.tag).toBe("reboot");
+    if (form.tag === "reboot") expect(form.reason).toBe("Reboot requested");
+  });
+
+  test("only control tools (no regular) returns nil", () => {
+    // Edge case: if somehow regularCalls is empty after filtering
+    // CompleteTask and Reboot are filtered out; if nothing remains, should still work
+    const form = toolCallsToForm([{ name: "CompleteTask", rawArgs: ["done"] }]);
+    expect(form.tag).toBe("done");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -843,5 +883,110 @@ describe("run — agent loop", () => {
     const world = mkWorld(convo, registry, abort.signal);
 
     await expect(run("test", world, fx)).rejects.toThrow(AbortError);
+  });
+
+  test("auto-prune triggers after 50 tool calls", async () => {
+    // Build a provider that responds to 51 single-tool calls, then a final text
+    const responses: MockResponse[] = [];
+    for (let i = 0; i < 51; i++) {
+      responses.push({ toolCalls: [tc(`c${i}`, "Echo", { text: `${i}` })] });
+    }
+    responses.push({ text: "Done after 51 calls." });
+
+    const provider = new MockProvider(responses);
+    const convo = new AIConversation(provider, "m");
+    const registry = createTestRegistry();
+    const { fx, events } = createRecordingFx();
+    const world = mkWorld(convo, registry);
+
+    await run("trigger auto-prune", world, fx);
+
+    // ManageContext should appear in tool_start events from auto-prune
+    const manageStarts = events.filter(
+      e => e.type === "tool_start" && e.name === "ManageContext"
+    );
+    expect(manageStarts.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("unknown tool returns error and continues", async () => {
+    const provider = new MockProvider([
+      { toolCalls: [tc("c1", "NonExistent", { x: "y" })] },
+      { text: "Recovered." },
+    ]);
+    const convo = new AIConversation(provider, "m");
+    const registry = createTestRegistry();
+    const { fx, events, streamedText } = createRecordingFx();
+    const world = mkWorld(convo, registry);
+
+    await run("call unknown", world, fx);
+
+    const toolDone = events.find(
+      e => e.type === "tool_done" && e.name === "NonExistent"
+    ) as any;
+    expect(toolDone).toBeTruthy();
+    expect(toolDone.success).toBe(false);
+    expect(toolDone.output).toContain("Unknown tool");
+
+    expect(streamedText[streamedText.length - 1]).toBe("Recovered.");
+  });
+
+  test("Bash rm command triggers confirmation via requiresConfirmation", async () => {
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "Bash",
+      description: "Execute shell command",
+      arguments: [{ name: "command", description: "command" }],
+      execute: async (args) => `ran: ${args.command}`,
+    });
+    registry.register({
+      name: "CompleteTask",
+      description: "Complete",
+      arguments: [{ name: "summary", description: "s" }],
+      execute: async (args) => args.summary ?? "",
+    });
+
+    const provider = new MockProvider([
+      { toolCalls: [tc("c1", "Bash", { command: "rm -rf /tmp/stuff" })] },
+      { text: "Cleaned." },
+    ]);
+    const convo = new AIConversation(provider, "m");
+    const { fx, events } = createRecordingFx({ confirmResult: true });
+    const world = mkWorld(convo, registry);
+
+    await run("clean up", world, fx);
+
+    const confirmEvent = events.find(e => e.type === "confirm") as any;
+    expect(confirmEvent).toBeTruthy();
+    expect(confirmEvent.command).toContain("rm -rf");
+  });
+
+  test("Bash rm denied stops execution of that tool", async () => {
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "Bash",
+      description: "Execute shell command",
+      arguments: [{ name: "command", description: "command" }],
+      execute: async (args) => `ran: ${args.command}`,
+    });
+    registry.register({
+      name: "CompleteTask",
+      description: "Complete",
+      arguments: [{ name: "summary", description: "s" }],
+      execute: async (args) => args.summary ?? "",
+    });
+
+    const provider = new MockProvider([
+      { toolCalls: [tc("c1", "Bash", { command: "rm important.txt" })] },
+      { text: "OK, skipped." },
+    ]);
+    const convo = new AIConversation(provider, "m");
+    const { fx, events } = createRecordingFx({ confirmResult: false });
+    const world = mkWorld(convo, registry);
+
+    await run("delete", world, fx);
+
+    const toolDone = events.find(e => e.type === "tool_done" && e.name === "Bash") as any;
+    expect(toolDone.success).toBe(false);
+    expect(toolDone.output).toContain("denied");
   });
 });

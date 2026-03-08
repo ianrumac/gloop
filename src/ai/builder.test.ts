@@ -391,4 +391,55 @@ describe("AIConversation", () => {
     expect(history).toHaveLength(6);
     expect(history.map(m => m.content)).toEqual(["q1", "r1", "q2", "r2", "q3", "r3"]);
   });
+
+  test("setJsonTools forwards tools to provider", async () => {
+    const provider = new MockProvider(["ok"]);
+    const convo = new AIConversation(provider, "m");
+    convo.setJsonTools([{
+      type: "function",
+      function: {
+        name: "TestTool",
+        description: "A test tool",
+        parameters: { type: "object", properties: { arg: { type: "string" } }, required: ["arg"] },
+      },
+    }]);
+    await convo.send("use tool");
+    expect(provider.lastConfig!.tools).toBeDefined();
+    expect(provider.lastConfig!.tools![0].function.name).toBe("TestTool");
+  });
+
+  test("clearJsonTools removes tools from requests", async () => {
+    const provider = new MockProvider(["ok", "ok"]);
+    const convo = new AIConversation(provider, "m");
+    convo.setJsonTools([{
+      type: "function",
+      function: {
+        name: "Tool",
+        description: "desc",
+        parameters: { type: "object", properties: {} },
+      },
+    }]);
+    await convo.send("first");
+    expect(provider.lastConfig!.tools).toBeDefined();
+
+    convo.clearJsonTools();
+    await convo.send("second");
+    expect(provider.lastConfig!.tools).toBeUndefined();
+  });
+
+  test("setJsonTools with empty array clears tools", async () => {
+    const provider = new MockProvider(["ok"]);
+    const convo = new AIConversation(provider, "m");
+    convo.setJsonTools([]);
+    await convo.send("test");
+    expect(provider.lastConfig!.tools).toBeUndefined();
+  });
+
+  test("stream() return value has cancel function", () => {
+    const provider = new MockProvider(["text"]);
+    const convo = new AIConversation(provider, "m");
+    const result = convo.stream("test");
+    expect(typeof result.cancel).toBe("function");
+    expect(result.toolCalls).toBeInstanceOf(Promise);
+  });
 });

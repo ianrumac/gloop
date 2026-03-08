@@ -43,4 +43,40 @@ describe("requiresConfirmation", () => {
       requiresConfirmation({ name: "Bash", rawArgs: ["echo inform"] })
     ).toBeNull();
   });
+
+  test("returns the command string when dangerous", () => {
+    const result = requiresConfirmation({ name: "Bash", rawArgs: ["rm -rf /tmp"] });
+    expect(result).toBe("rm -rf /tmp");
+  });
+
+  test("handles empty rawArgs", () => {
+    expect(
+      requiresConfirmation({ name: "Bash", rawArgs: [] })
+    ).toBeNull();
+  });
+
+  test("rm in a pipe still flags", () => {
+    expect(
+      requiresConfirmation({ name: "Bash", rawArgs: ["find . | xargs rm -f"] })
+    ).not.toBeNull();
+  });
+
+  test("rm at end of command", () => {
+    expect(
+      requiresConfirmation({ name: "Bash", rawArgs: ["sudo rm file.txt"] })
+    ).not.toBeNull();
+  });
+
+  test("rmdir with path", () => {
+    expect(
+      requiresConfirmation({ name: "Bash", rawArgs: ["rmdir -p a/b/c"] })
+    ).not.toBeNull();
+  });
+
+  test("git rm is flagged (contains word rm)", () => {
+    // git rm contains \brm\b so it triggers
+    expect(
+      requiresConfirmation({ name: "Bash", rawArgs: ["git rm file.txt"] })
+    ).not.toBeNull();
+  });
 });

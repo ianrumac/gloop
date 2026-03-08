@@ -163,4 +163,84 @@ describe("manageContextFork", () => {
     expect(result).toContain("removed");
     expect(result).toContain("remaining");
   });
+
+  test("out-of-bounds indexes are ignored", async () => {
+    const provider = new MockProvider([
+      { toolCalls: [tc("c1", "DeleteMessages", { indexes: "0,1,99,100" })] },
+      { toolCalls: [tc("c2", "CompleteTask", { summary: "done" })] },
+    ]);
+
+    const convo = new AIConversation(provider, "m");
+    convo.setHistory([
+      { role: "system", content: "system" },
+      { role: "user", content: "msg" },
+    ]);
+
+    await manageContextFork(convo, "prune");
+
+    // Index 0 protected (system), 99/100 out of bounds, only 1 deleted
+    expect(convo.getHistory()).toHaveLength(1);
+    expect(convo.getHistory()[0].content).toBe("system");
+  });
+
+  test("duplicate indexes only delete once", async () => {
+    const provider = new MockProvider([
+      { toolCalls: [tc("c1", "DeleteMessages", { indexes: "1,1,1" })] },
+      { toolCalls: [tc("c2", "CompleteTask", { summary: "done" })] },
+    ]);
+
+    const convo = new AIConversation(provider, "m");
+    convo.setHistory([
+      { role: "system", content: "system" },
+      { role: "user", content: "to delete" },
+      { role: "assistant", content: "keep" },
+    ]);
+
+    const result = await manageContextFork(convo, "prune");
+
+    expect(convo.getHistory()).toHaveLength(2);
+    expect(result).toContain("removed 1"); // Set deduplicates
+  });
+
+  test("multiple DeleteMessages calls accumulate", async () => {
+    const provider = new MockProvider([
+      { toolCalls: [tc("c1", "DeleteMessages", { indexes: "1" })] },
+      { toolCalls: [tc("c2", "DeleteMessages", { indexes: "2" })] },
+      { toolCalls: [tc("c3", "CompleteTask", { summary: "done" })] },
+    ]);
+
+    const convo = new AIConversation(provider, "m");
+    convo.setHistory([
+      { role: "system", content: "system" },
+      { role: "user", content: "old 1" },
+      { role: "assistant", content: "old 2" },
+      { role: "user", content: "keep" },
+    ]);
+
+    await manageContextFork(convo, "prune");
+
+    expect(convo.getHistory()).toHaveLength(2);
+    expect(convo.getHistory()[0].content).toBe("system");
+    expect(convo.getHistory()[1].content).toBe("keep");
+  });
+
+  test("invalid index strings are filtered", async () => {
+    const provider = new MockProvider([
+      { toolCalls: [tc("c1", "DeleteMessages", { indexes: "abc,1,xyz" })] },
+      { toolCalls: [tc("c2", "CompleteTask", { summary: "done" })] },
+    ]);
+
+    const convo = new AIConversation(provider, "m");
+    convo.setHistory([
+      { role: "system", content: "sys" },
+      { role: "user", content: "delete me" },
+      { role: "assistant", content: "keep" },
+    ]);
+
+    await manageContextFork(convo, "prune");
+
+    // Only index 1 is valid
+    expect(convo.getHistory()).toHaveLength(2);
+    expect(convo.getHistory()[1].content).toBe("keep");
+  });
 });
