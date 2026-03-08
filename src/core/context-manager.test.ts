@@ -3,9 +3,8 @@ import type {
   AIProvider,
   AIRequestConfig,
   AIResponse,
-  AIStreamChunk,
   JsonToolCall,
-  ToolCallDelta,
+  StreamResult,
 } from "../ai/types.ts";
 import { AIConversation } from "../ai/builder.ts";
 import { manageContextFork } from "./context-manager.ts";
@@ -48,38 +47,19 @@ class MockProvider implements AIProvider {
     };
   }
 
-  async *stream(config: AIRequestConfig): AsyncGenerator<AIStreamChunk, void, unknown> {
+  stream(config: AIRequestConfig): StreamResult {
     const resp = this.responses[this.callIndex++] ?? {};
-
-    if (resp.text) {
-      for (let i = 0; i < resp.text.length; i += 10) {
-        yield {
-          id: "mock",
-          model: "mock",
-          delta: { content: resp.text.slice(i, i + 10) },
-          finishReason: null,
-        };
+    const text = resp.text ?? "";
+    const textStream: AsyncIterableIterator<string> = (async function* () {
+      for (let i = 0; i < text.length; i += 10) {
+        yield text.slice(i, i + 10);
       }
-    }
-
-    if (resp.toolCalls) {
-      const deltas: ToolCallDelta[] = resp.toolCalls.map((t, i) => ({
-        index: i,
-        id: t.id,
-        function: {
-          name: t.function.name,
-          arguments: t.function.arguments,
-        },
-      }));
-      yield {
-        id: "mock",
-        model: "mock",
-        delta: { toolCalls: deltas },
-        finishReason: "tool_calls",
-      };
-    } else {
-      yield { id: "mock", model: "mock", delta: {}, finishReason: "stop" };
-    }
+    })();
+    return {
+      textStream,
+      toolCalls: Promise.resolve(resp.toolCalls ?? []),
+      cancel: async () => {},
+    };
   }
 }
 

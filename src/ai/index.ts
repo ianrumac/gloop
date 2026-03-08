@@ -3,7 +3,7 @@ export type {
   AIProviderConfig,
   AIRequestConfig,
   AIResponse,
-  AIStreamChunk,
+  StreamResult,
   Message,
   MessageRole,
   ProviderRouting,
@@ -13,7 +13,6 @@ export type {
   JsonToolFunction,
   JsonToolParameter,
   ToolChoice,
-  ToolCallDelta,
 } from "./types.ts";
 
 export { AI, AIBuilder, AIConversation } from "./builder.ts";

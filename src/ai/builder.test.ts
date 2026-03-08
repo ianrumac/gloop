@@ -4,7 +4,7 @@ import type {
   AIProvider,
   AIRequestConfig,
   AIResponse,
-  AIStreamChunk,
+  StreamResult,
 } from "./types.ts";
 
 // ---------------------------------------------------------------------------
@@ -27,22 +27,18 @@ class MockProvider implements AIProvider {
     return { id: "mock-id", model: config.model, content, finishReason: "stop" };
   }
 
-  async *stream(config: AIRequestConfig): AsyncGenerator<AIStreamChunk, void, unknown> {
+  stream(config: AIRequestConfig): StreamResult {
     this.lastConfig = config;
     const content = this.responses[this.callIndex++] ?? "";
-    for (let i = 0; i < content.length; i += 5) {
-      yield {
-        id: "mock-id",
-        model: config.model,
-        delta: { content: content.slice(i, i + 5) },
-        finishReason: null,
-      };
-    }
-    yield {
-      id: "mock-id",
-      model: config.model,
-      delta: {},
-      finishReason: "stop",
+    const textStream: AsyncIterableIterator<string> = (async function* () {
+      for (let i = 0; i < content.length; i += 5) {
+        yield content.slice(i, i + 5);
+      }
+    })();
+    return {
+      textStream,
+      toolCalls: Promise.resolve([]),
+      cancel: async () => {},
     };
   }
 }
@@ -159,9 +155,10 @@ describe("AIBuilder", () => {
     const builder = new AIBuilder(provider, "m");
     builder.prompt("test");
 
+    const result = builder.stream();
     const chunks: string[] = [];
-    for await (const chunk of builder.stream()) {
-      if (chunk.delta.content) chunks.push(chunk.delta.content);
+    for await (const chunk of result.textStream) {
+      chunks.push(chunk);
     }
 
     expect(chunks.join("")).toBe("hello world");
@@ -271,11 +268,9 @@ describe("AIConversation", () => {
     const convo = new AIConversation(provider, "m");
 
     const chunks: string[] = [];
-    const gen = convo.stream("test");
-    let result = await gen.next();
-    while (!result.done) {
-      if (result.value.delta.content) chunks.push(result.value.delta.content);
-      result = await gen.next();
+    const result = convo.stream("test");
+    for await (const chunk of result.textStream) {
+      chunks.push(chunk);
     }
 
     expect(chunks.join("")).toBe("stream text");
@@ -289,10 +284,9 @@ describe("AIConversation", () => {
     const provider = new MockProvider([""]);
     const convo = new AIConversation(provider, "m");
 
-    const gen = convo.stream("test");
-    let result = await gen.next();
-    while (!result.done) {
-      result = await gen.next();
+    const result = convo.stream("test");
+    for await (const _chunk of result.textStream) {
+      // consume stream
     }
 
     // Only user message, no empty assistant message
@@ -370,7 +364,10 @@ describe("AIConversation", () => {
       async complete(): Promise<AIResponse> {
         return { id: "x", model: "m", content: null, finishReason: "stop" };
       },
-      async *stream(): AsyncGenerator<AIStreamChunk, void, unknown> {},
+      stream(): StreamResult {
+        const textStream: AsyncIterableIterator<string> = (async function* () {})();
+        return { textStream, toolCalls: Promise.resolve([]), cancel: async () => {} };
+      },
     };
 
     const convo = new AIConversation(provider, "m");

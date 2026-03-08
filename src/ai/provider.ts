@@ -1,11 +1,30 @@
-import { OpenRouter } from "@openrouter/sdk";
+import { OpenRouter, fromChatMessages, tool } from "@openrouter/sdk";
+import { z } from "zod";
 import type {
   AIProvider,
   AIProviderConfig,
   AIRequestConfig,
   AIResponse,
-  AIStreamChunk,
+  JsonTool,
+  JsonToolCall,
+  StreamResult,
 } from "./types.ts";
+
+/** Convert our JsonTool definitions to SDK ManualTool objects for callModel() */
+function toSdkTools(jsonTools: JsonTool[]) {
+  return jsonTools.map((jt) => {
+    const shape: Record<string, z.ZodString> = {};
+    for (const [name, param] of Object.entries(jt.function.parameters.properties)) {
+      shape[name] = z.string().describe(param.description ?? "");
+    }
+    return tool({
+      name: jt.function.name,
+      description: jt.function.description,
+      inputSchema: z.object(shape),
+      execute: false as const,
+    });
+  });
+}
 
 export class OpenRouterProvider implements AIProvider {
   readonly name = "openrouter";
@@ -16,116 +35,104 @@ export class OpenRouterProvider implements AIProvider {
   }
 
   async complete(config: AIRequestConfig): Promise<AIResponse> {
-    const response = await this.client.chat.send({
-      chatGenerationParams: {
-        model: config.model,
-        messages: config.messages.map((m) => ({ role: m.role, content: m.content })),
-        stream: false,
-        ...(config.temperature !== undefined && { temperature: config.temperature }),
-        ...(config.maxTokens !== undefined && { maxTokens: config.maxTokens }),
-        ...(config.topP !== undefined && { topP: config.topP }),
-        ...(config.frequencyPenalty !== undefined && { frequencyPenalty: config.frequencyPenalty }),
-        ...(config.presencePenalty !== undefined && { presencePenalty: config.presencePenalty }),
-        ...(config.stop !== undefined && { stop: config.stop }),
-        ...(config.seed !== undefined && { seed: config.seed }),
-        ...(config.provider && { provider: config.provider }),
-        ...(config.tools && { tools: config.tools }),
-        ...(config.toolChoice !== undefined && { tool_choice: config.toolChoice }),
-      },
+    const sdkTools = config.tools ? toSdkTools(config.tools) : undefined;
+    const input = fromChatMessages(
+      config.messages.map((m) => ({ role: m.role, content: m.content }))
+    );
+
+    const result = this.client.callModel({
+      model: config.model,
+      input,
+      ...(sdkTools?.length && { tools: sdkTools }),
+      ...(config.temperature !== undefined && { temperature: config.temperature }),
+      ...(config.maxTokens !== undefined && { maxOutputTokens: config.maxTokens }),
+      ...(config.topP !== undefined && { topP: config.topP }),
+      ...(config.frequencyPenalty !== undefined && { frequencyPenalty: config.frequencyPenalty }),
+      ...(config.presencePenalty !== undefined && { presencePenalty: config.presencePenalty }),
+      ...(config.provider && { provider: config.provider }),
+      ...(config.toolChoice !== undefined && { toolChoice: config.toolChoice }),
     });
 
-    const choice = response.choices?.[0];
-    // SDK types: choice.message.toolCalls is ChatMessageToolCall[] — properly typed
-    const sdkToolCalls = choice?.message?.toolCalls;
+    const [text, response] = await Promise.all([
+      result.getText(),
+      result.getResponse(),
+    ]);
+
+    const toolCalls = extractToolCalls(response.output ?? []);
 
     return {
-      id: response.id,
-      model: response.model,
-      content: typeof choice?.message?.content === "string" ? choice.message.content : null,
-      finishReason: this.parseFinishReason(choice?.finishReason ?? null),
-      ...(sdkToolCalls?.length && {
-        toolCalls: sdkToolCalls.map(tc => ({
-          id: tc.id,
-          type: "function" as const,
-          function: {
-            name: tc.function.name,
-            arguments: tc.function.arguments,
-          },
-        })),
+      id: response.id ?? "",
+      model: response.model ?? config.model,
+      content: text || null,
+      finishReason: toolCalls.length > 0 ? "tool_calls" : "stop",
+      ...(toolCalls.length > 0 && { toolCalls }),
+      ...(response.usage && {
+        usage: {
+          promptTokens: response.usage.inputTokens ?? 0,
+          completionTokens: response.usage.outputTokens ?? 0,
+          totalTokens: (response.usage.inputTokens ?? 0) + (response.usage.outputTokens ?? 0),
+        },
       }),
-      usage: response.usage
-        ? {
-            promptTokens: response.usage.promptTokens,
-            completionTokens: response.usage.completionTokens,
-            totalTokens: response.usage.totalTokens,
-          }
-        : undefined,
     };
   }
 
-  async *stream(config: AIRequestConfig): AsyncGenerator<AIStreamChunk, void, unknown> {
-    const response = await this.client.chat.send({
-      chatGenerationParams: {
-        model: config.model,
-        messages: config.messages.map((m) => ({ role: m.role, content: m.content })),
-        stream: true,
-        ...(config.temperature !== undefined && { temperature: config.temperature }),
-        ...(config.maxTokens !== undefined && { maxTokens: config.maxTokens }),
-        ...(config.topP !== undefined && { topP: config.topP }),
-        ...(config.frequencyPenalty !== undefined && { frequencyPenalty: config.frequencyPenalty }),
-        ...(config.presencePenalty !== undefined && { presencePenalty: config.presencePenalty }),
-        ...(config.stop !== undefined && { stop: config.stop }),
-        ...(config.seed !== undefined && { seed: config.seed }),
-        ...(config.provider && { provider: config.provider }),
-        ...(config.tools && { tools: config.tools }),
-        ...(config.toolChoice !== undefined && { tool_choice: config.toolChoice }),
-      },
+  stream(config: AIRequestConfig): StreamResult {
+    const sdkTools = config.tools ? toSdkTools(config.tools) : undefined;
+    const input = fromChatMessages(
+      config.messages.map((m) => ({ role: m.role, content: m.content }))
+    );
+
+    const result = this.client.callModel({
+      model: config.model,
+      input,
+      ...(sdkTools?.length && { tools: sdkTools }),
+      ...(config.temperature !== undefined && { temperature: config.temperature }),
+      ...(config.maxTokens !== undefined && { maxOutputTokens: config.maxTokens }),
+      ...(config.topP !== undefined && { topP: config.topP }),
+      ...(config.frequencyPenalty !== undefined && { frequencyPenalty: config.frequencyPenalty }),
+      ...(config.presencePenalty !== undefined && { presencePenalty: config.presencePenalty }),
+      ...(config.provider && { provider: config.provider }),
+      ...(config.toolChoice !== undefined && { toolChoice: config.toolChoice }),
     });
 
-    for await (const chunk of response) {
-      const choice = chunk.choices?.[0];
-      const delta = choice?.delta;
-      // SDK types: delta.toolCalls is ChatStreamingMessageToolCall[] — properly typed
-      // Each has: index, id?, type?, function?: { name?, arguments? }
-      const sdkToolCalls = delta?.toolCalls;
+    const textStream = result.getTextStream();
 
-      yield {
-        id: chunk.id,
-        model: chunk.model,
-        delta: {
-          content: delta?.content ?? undefined,
-          ...(sdkToolCalls?.length && {
-            toolCalls: sdkToolCalls.map(tc => ({
-              index: tc.index,
-              id: tc.id,
-              function: {
-                name: tc.function?.name,
-                arguments: tc.function?.arguments,
-              },
-            })),
-          }),
+    // Tool calls are extracted from the final response after streaming completes
+    const toolCalls = result.getResponse().then((response) =>
+      extractToolCalls(response.output ?? [])
+    );
+
+    return {
+      textStream,
+      toolCalls,
+      cancel: () => result.cancel(),
+    };
+  }
+}
+
+/** Extract JsonToolCall[] from response output items */
+function extractToolCalls(output: unknown[]): JsonToolCall[] {
+  const calls: JsonToolCall[] = [];
+  for (const item of output) {
+    if (
+      typeof item === "object" &&
+      item !== null &&
+      "type" in item &&
+      (item as { type: string }).type === "function_call" &&
+      "name" in item &&
+      "arguments" in item &&
+      "callId" in item
+    ) {
+      const fc = item as { name: string; arguments: string; callId: string };
+      calls.push({
+        id: fc.callId,
+        type: "function",
+        function: {
+          name: fc.name,
+          arguments: fc.arguments,
         },
-        finishReason: this.parseFinishReason(
-          typeof choice?.finishReason === "string" ? choice.finishReason : null
-        ),
-        ...(chunk.usage && {
-          usage: {
-            promptTokens: chunk.usage.promptTokens,
-            completionTokens: chunk.usage.completionTokens,
-            totalTokens: chunk.usage.totalTokens,
-          },
-        }),
-      };
+      });
     }
   }
-
-  private parseFinishReason(reason: string | null): AIResponse["finishReason"] {
-    switch (reason) {
-      case "stop": return "stop";
-      case "length": return "length";
-      case "content_filter": return "content_filter";
-      case "tool_calls": return "tool_calls";
-      default: return null;
-    }
-  }
+  return calls;
 }

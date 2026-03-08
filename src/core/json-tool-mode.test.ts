@@ -3,9 +3,8 @@ import type {
   AIProvider,
   AIRequestConfig,
   AIResponse,
-  AIStreamChunk,
   JsonToolCall,
-  ToolCallDelta,
+  StreamResult,
 } from "../ai/types.ts";
 import { AIConversation } from "../ai/builder.ts";
 import { ToolRegistry } from "../tools/registry.ts";
@@ -19,7 +18,7 @@ import {
 } from "./core.ts";
 
 // ---------------------------------------------------------------------------
-// Mock provider that returns JSON tool calls in stream
+// Mock provider that returns StreamResult from stream()
 // ---------------------------------------------------------------------------
 
 interface MockResponse {
@@ -49,46 +48,22 @@ class JsonMockProvider implements AIProvider {
     };
   }
 
-  async *stream(config: AIRequestConfig): AsyncGenerator<AIStreamChunk, void, unknown> {
+  stream(config: AIRequestConfig): StreamResult {
     this.calls.push(config);
     const resp = this.responses[this.callIndex++] ?? {};
 
-    // Stream text content first
-    if (resp.text) {
-      for (let i = 0; i < resp.text.length; i += 5) {
-        yield {
-          id: "mock",
-          model: "mock",
-          delta: { content: resp.text.slice(i, i + 5) },
-          finishReason: null,
-        };
+    const text = resp.text ?? "";
+    const textStream: AsyncIterableIterator<string> = (async function* () {
+      for (let i = 0; i < text.length; i += 5) {
+        yield text.slice(i, i + 5);
       }
-    }
+    })();
 
-    // Then stream tool calls as ToolCallDelta (with index)
-    if (resp.toolCalls) {
-      const deltas: ToolCallDelta[] = resp.toolCalls.map((tc, i) => ({
-        index: i,
-        id: tc.id,
-        function: {
-          name: tc.function.name,
-          arguments: tc.function.arguments,
-        },
-      }));
-      yield {
-        id: "mock",
-        model: "mock",
-        delta: { toolCalls: deltas },
-        finishReason: "tool_calls",
-      };
-    } else {
-      yield {
-        id: "mock",
-        model: "mock",
-        delta: {},
-        finishReason: "stop",
-      };
-    }
+    return {
+      textStream,
+      toolCalls: Promise.resolve(resp.toolCalls ?? []),
+      cancel: async () => {},
+    };
   }
 }
 

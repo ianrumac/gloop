@@ -49,16 +49,6 @@ export interface JsonToolCall {
   };
 }
 
-/** A streaming tool call delta — partial data that must be accumulated by index */
-export interface ToolCallDelta {
-  index: number;
-  id?: string;
-  function: {
-    name?: string;
-    arguments?: string;
-  };
-}
-
 export interface AIRequestConfig {
   model: string;
   messages: Message[];
@@ -87,25 +77,17 @@ export interface AIResponse {
   };
 }
 
-export interface AIStreamChunk {
-  id: string;
-  model: string;
-  delta: {
-    content?: string;
-    toolCalls?: ToolCallDelta[];
-  };
-  finishReason: "stop" | "length" | "content_filter" | "tool_calls" | null;
-  usage?: {
-    promptTokens: number;
-    completionTokens: number;
-    totalTokens: number;
-  };
+/** Result of a streaming callModel request — provides concurrent text + tool call streams */
+export interface StreamResult {
+  textStream: AsyncIterableIterator<string>;
+  toolCalls: Promise<JsonToolCall[]>;
+  cancel(): Promise<void>;
 }
 
 export interface AIProvider {
   readonly name: string;
   complete(config: AIRequestConfig): Promise<AIResponse>;
-  stream(config: AIRequestConfig): AsyncGenerator<AIStreamChunk, void, unknown>;
+  stream(config: AIRequestConfig): StreamResult;
 }
 
 export interface AIProviderConfig {

@@ -9,7 +9,7 @@
  */
 
 import type { AIConversation } from "../ai/index.ts";
-import type { JsonToolCall, ToolCallDelta } from "../ai/types.ts";
+import type { JsonToolCall } from "../ai/types.ts";
 import type { ToolRegistry } from "../tools/registry.ts";
 import type { ToolCall, ToolResult } from "../tools/types.ts";
 import { debugLogRaw } from "./debug.ts";
@@ -236,39 +236,6 @@ ${r.output}
 }
 
 // ============================================================================
-// TOOL CALL ACCUMULATION — Assemble streaming deltas into complete calls
-// ============================================================================
-
-/** Accumulate streaming tool call deltas by index into complete tool calls */
-function accumulateToolCallDeltas(
-  accumulated: Map<number, { id: string; name: string; arguments: string }>,
-  deltas: ToolCallDelta[]
-): void {
-  for (const tc of deltas) {
-    const existing = accumulated.get(tc.index);
-    if (existing) {
-      if (tc.function.name) existing.name += tc.function.name;
-      if (tc.function.arguments) existing.arguments += tc.function.arguments;
-    } else {
-      accumulated.set(tc.index, {
-        id: tc.id ?? `call_${tc.index}`,
-        name: tc.function.name ?? "",
-        arguments: tc.function.arguments ?? "",
-      });
-    }
-  }
-}
-
-/** Convert accumulated tool call map to JsonToolCall array */
-function finalizeToolCalls(accumulated: Map<number, { id: string; name: string; arguments: string }>): JsonToolCall[] {
-  return [...accumulated.values()].map(tc => ({
-    id: tc.id,
-    type: "function" as const,
-    function: { name: tc.name, arguments: tc.arguments },
-  }));
-}
-
-// ============================================================================
 // INTERPRETER — The recursive heart of the agent loop
 // ============================================================================
 
@@ -359,21 +326,23 @@ export async function eval_(
   }
 }
 
-/** Think: stream LLM response, accumulate tool calls, parse into form, recurse */
+/**
+ * Think: stream LLM response via callModel's text/tool streams, then recurse.
+ * Uses the new StreamResult API — no manual delta accumulation needed.
+ */
 async function evalThink(
   input: string,
   world: World,
   fx: Effects
 ): Promise<void> {
   let fullText = "";
-  const accumulated: Map<number, { id: string; name: string; arguments: string }> = new Map();
   debugLogRaw("LLM_INPUT_RAW", input);
 
   // Set tools on the conversation for this request
   const jsonTools = world.registry.toJsonTools();
   world.convo.setJsonTools(jsonTools);
 
-  const iter = world.convo.stream(input)[Symbol.asyncIterator]();
+  const result = world.convo.stream(input);
 
   // Build an abort promise that rejects when signal fires
   const abortPromise = world.signal
@@ -384,27 +353,21 @@ async function evalThink(
     : null;
 
   try {
+    // Stream text content to user
+    const iter = result.textStream[Symbol.asyncIterator]();
     while (true) {
       const next = iter.next();
-      const { done, value: chunk } = abortPromise
+      const { done, value } = abortPromise
         ? await Promise.race([next, abortPromise])
         : await next;
       if (done) break;
 
-      // Stream text content to user
-      if (chunk.delta.content) {
-        fx.streamChunk(chunk.delta.content);
-        fullText += chunk.delta.content;
-      }
-
-      // Accumulate tool call deltas using SDK's index field
-      if (chunk.delta.toolCalls) {
-        accumulateToolCallDeltas(accumulated, chunk.delta.toolCalls);
-      }
+      fx.streamChunk(value);
+      fullText += value;
     }
   } catch (err) {
     if (err instanceof AbortError) {
-      iter.return!(undefined as never).catch(() => {});
+      await result.cancel().catch(() => {});
       if (fullText) {
         const h = world.convo.getHistory();
         h.push({ role: "assistant", content: fullText });
@@ -418,8 +381,8 @@ async function evalThink(
   fx.streamDone();
   debugLogRaw("LLM_OUTPUT_RAW", fullText);
 
-  // Convert accumulated tool calls to gloop's ToolCall format
-  const jsonCalls = finalizeToolCalls(accumulated);
+  // Get completed tool calls from the response (no manual accumulation needed)
+  const jsonCalls = await result.toolCalls;
 
   if (jsonCalls.length > 0) {
     const toolCalls = jsonToolCallsToToolCalls(jsonCalls);

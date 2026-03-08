@@ -2,7 +2,7 @@ import type {
   AIProvider,
   AIRequestConfig,
   AIResponse,
-  AIStreamChunk,
+  StreamResult,
   Message,
   ProviderRouting,
   Lazy,
@@ -121,24 +121,27 @@ export class AIBuilder {
     return this.provider.complete(this.buildConfig());
   }
 
-  stream(): AsyncGenerator<AIStreamChunk, void, unknown> {
+  stream(): StreamResult {
     return this.provider.stream(this.buildConfig());
   }
 
   async streamToCompletion(): Promise<AIResponse> {
+    const result = this.stream();
     let fullContent = "";
-    let lastChunk: AIStreamChunk | null = null;
 
-    for await (const chunk of this.stream()) {
-      lastChunk = chunk;
-      if (chunk.delta.content) fullContent += chunk.delta.content;
+    for await (const delta of result.textStream) {
+      fullContent += delta;
     }
 
+    const toolCalls = await result.toolCalls;
+    const model = this.config.model ? resolve(this.config.model) : "";
+
     return {
-      id: lastChunk?.id ?? "",
-      model: lastChunk?.model ?? (this.config.model ? resolve(this.config.model) : ""),
+      id: "",
+      model,
       content: fullContent || null,
-      finishReason: lastChunk?.finishReason ?? null,
+      finishReason: toolCalls.length > 0 ? "tool_calls" : "stop",
+      ...(toolCalls.length > 0 && { toolCalls }),
     };
   }
 
@@ -229,7 +232,7 @@ export class AIConversation {
     return response;
   }
 
-  async *stream(message: string): AsyncGenerator<AIStreamChunk, AIResponse, unknown> {
+  stream(message: string): StreamResult {
     this.history.push({ role: "user", content: message });
 
     const builder = new AIBuilder(this.provider, this.modelId);
@@ -238,24 +241,36 @@ export class AIConversation {
     if (this.jsonTools) builder.tools(this.jsonTools);
     builder.messages(this.history);
 
+    const result = builder.stream();
+
+    // Wrap the text stream to capture content for conversation history
+    const self = this;
     let fullContent = "";
-    let lastChunk: AIStreamChunk | null = null;
-
-    for await (const chunk of builder.stream()) {
-      lastChunk = chunk;
-      if (chunk.delta.content) fullContent += chunk.delta.content;
-      yield chunk;
-    }
-
-    if (fullContent) {
-      this.history.push({ role: "assistant", content: fullContent });
-    }
+    const wrappedTextStream: AsyncIterableIterator<string> = {
+      [Symbol.asyncIterator]() { return this; },
+      async next() {
+        const { done, value } = await result.textStream.next();
+        if (done) {
+          if (fullContent) {
+            self.history.push({ role: "assistant", content: fullContent });
+          }
+          return { done: true, value: undefined };
+        }
+        fullContent += value;
+        return { done: false, value };
+      },
+      async return(v?: unknown) {
+        if (fullContent) {
+          self.history.push({ role: "assistant", content: fullContent });
+        }
+        return result.textStream.return?.(v) ?? { done: true, value: undefined };
+      },
+    };
 
     return {
-      id: lastChunk?.id ?? "",
-      model: lastChunk?.model ?? this.modelId,
-      content: fullContent || null,
-      finishReason: lastChunk?.finishReason ?? null,
+      textStream: wrappedTextStream,
+      toolCalls: result.toolCalls,
+      cancel: () => result.cancel(),
     };
   }
 
