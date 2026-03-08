@@ -36,7 +36,7 @@ export { jsonToolCallsToToolCalls } from "./tools/parser.ts";
 export { requiresConfirmation } from "./tools/validator.ts";
 
 // --- Builtin tools: portable tool implementations ---
-export type { BuiltinIO, ShellResult, BuiltinOptions } from "./tools/builtins.ts";
+export type { BuiltinIO, ShellResult } from "./tools/builtins.ts";
 export { registerBuiltins, formatShellResult } from "./tools/builtins.ts";
 
 // --- Core loop: forms, interpreter, runner ---
@@ -59,7 +59,6 @@ export {
   Forget,
   Emit,
   Refresh,
-  Reboot,
   Done,
   Seq,
   Nil,

@@ -45,15 +45,6 @@ describe("registerBuiltins", () => {
     expect(names).toContain("ManageContext");
   });
 
-  it("does not register Reboot by default", () => {
-    expect(registry.names()).not.toContain("Reboot");
-  });
-
-  it("registers Reboot when reboot option is true", () => {
-    const r = new ToolRegistry();
-    registerBuiltins(r, mockIO(), { reboot: true });
-    expect(r.names()).toContain("Reboot");
-  });
 });
 
 describe("ReadFile tool", () => {

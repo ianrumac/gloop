@@ -125,7 +125,6 @@ function createRecordingFx(opts?: { confirmResult?: boolean; askAnswer?: string 
     remember: async (content) => { events.push({ type: "remember", content }); },
     forget: async (content) => { events.push({ type: "forget", content }); },
     refreshSystem: async () => { events.push({ type: "system_refreshed" }); },
-    reboot: async () => { throw new Error("unreachable"); },
     manageContext: async () => "pruned",
     complete(summary) { events.push({ type: "complete", summary }); },
     installTool: async () => "installed",

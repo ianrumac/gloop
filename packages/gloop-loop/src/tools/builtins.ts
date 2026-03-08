@@ -27,11 +27,6 @@ export interface BuiltinIO {
   exec(command: string, timeoutMs?: number): Promise<ShellResult>;
 }
 
-export interface BuiltinOptions {
-  /** Whether to include the Reboot tool (gloop-specific). */
-  reboot?: boolean;
-}
-
 // ---------------------------------------------------------------------------
 // formatShellResult — portable shell result formatter
 // ---------------------------------------------------------------------------
@@ -65,7 +60,6 @@ export function formatShellResult(result: ShellResult): string {
 export function registerBuiltins(
   registry: ToolRegistry,
   io: BuiltinIO,
-  options: BuiltinOptions = {},
 ): void {
   registry.register({
     name: "ReadFile",
@@ -226,18 +220,4 @@ export function registerBuiltins(
     ],
     execute: async (args) => args.instructions || "Prune stale messages",
   });
-
-  if (options.reboot) {
-    registry.register({
-      name: "Reboot",
-      description:
-        "Save the current conversation history, restart with fresh code, and resume where you left off. Use this after modifying the agent's own codebase so changes take effect.",
-      arguments: [
-        { name: "reason", description: "Why you are rebooting (shown on resume)" },
-      ],
-      execute: async (args) => {
-        return args.reason || "Rebooting...";
-      },
-    });
-  }
 }

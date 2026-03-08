@@ -29,7 +29,6 @@ export type Form =
   | { tag: "forget"; content: string; then: Form }
   | { tag: "emit"; text: string; then: Form }                // Output text to user
   | { tag: "refresh" }                                       // Refresh system prompt, re-think
-  | { tag: "reboot"; reason: string }                        // Save state and restart process
   | { tag: "done"; summary: string }                         // Terminal form
   | { tag: "seq"; forms: Form[] }                            // Sequence of forms
   | { tag: "nil" }                                            // Terminal no-op (monadic unit)
@@ -75,9 +74,6 @@ export const Emit = (text: string, then: Form): Form =>
 
 export const Refresh = (): Form =>
   ({ tag: "refresh" });
-
-export const Reboot = (reason: string): Form =>
-  ({ tag: "reboot", reason });
 
 export const Done = (summary: string): Form =>
   ({ tag: "done", summary });
@@ -136,7 +132,6 @@ export interface Effects {
   remember: (content: string) => Promise<void>;
   forget: (content: string) => Promise<void>;
   refreshSystem: () => Promise<void>;
-  reboot: (reason: string, convo: AIConversation) => Promise<never>;
   manageContext: (instructions: string) => Promise<string>;
   complete: (summary: string) => void;
   installTool: (source: string) => Promise<string>;
@@ -192,16 +187,11 @@ export function toolCallsToForm(toolCalls: ToolCall[], classifySpawn?: (call: To
 
   // Separate control forms from regular calls
   const completeCall = toolCalls.find(c => c.name === "CompleteTask");
-  const rebootCall = toolCalls.find(c => c.name === "Reboot");
   const regularCalls = toolCalls.filter(
-    c => c.name !== "CompleteTask" && c.name !== "Reboot"
+    c => c.name !== "CompleteTask"
   );
 
-  // Terminal forms: reboot / complete (optionally preceded by tool invocations)
-  if (rebootCall) {
-    const reason = rebootCall.rawArgs[0] ?? "Reboot requested";
-    return regularCalls.length > 0 ? Invoke(regularCalls, () => Reboot(reason)) : Reboot(reason);
-  }
+  // Terminal forms: complete (optionally preceded by tool invocations)
   if (completeCall) {
     const summary = completeCall.rawArgs[0] ?? "Task complete";
     return regularCalls.length > 0 ? Invoke(regularCalls, () => Done(summary)) : Done(summary);
@@ -296,10 +286,6 @@ export async function eval_(
 
     case "refresh":
       await fx.refreshSystem();
-      return;
-
-    case "reboot":
-      await fx.reboot(form.reason, world.convo);
       return;
 
     case "seq":

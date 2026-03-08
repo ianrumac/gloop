@@ -27,7 +27,6 @@ import {
   Confirm,
   Ask,
   Refresh,
-  Reboot,
   Install,
   ListTools,
   Spawn,
@@ -219,7 +218,6 @@ function createRecordingFx(opts?: {
     remember: async (content) => { events.push({ type: "remember", content }); },
     forget: async (content) => { events.push({ type: "forget", content }); },
     refreshSystem: async () => { events.push({ type: "system_refreshed" }); },
-    reboot: async (reason) => { throw new Error(`reboot: ${reason}`); },
     manageContext: async () => "pruned",
     complete(summary) { events.push({ type: "complete", summary }); },
     installTool: async (source) => { events.push({ type: "install", source }); return "installed"; },
@@ -268,24 +266,6 @@ describe("toolCallsToForm", () => {
     }
   });
 
-  test("Reboot call returns Reboot form", () => {
-    const form = toolCallsToForm([{ name: "Reboot", rawArgs: ["code updated"] }]);
-    expect(form.tag).toBe("reboot");
-  });
-
-  test("Reboot with regular tools runs tools first", () => {
-    const form = toolCallsToForm([
-      { name: "Echo", rawArgs: ["save"] },
-      { name: "Reboot", rawArgs: ["update"] },
-    ]);
-    expect(form.tag).toBe("invoke");
-    if (form.tag === "invoke") {
-      expect(form.calls[0].name).toBe("Echo");
-      const next = form.then([]);
-      expect(next.tag).toBe("reboot");
-    }
-  });
-
   test("Bash gloop --task creates spawn form", () => {
     const form = toolCallsToForm(
       [{ name: "Bash", rawArgs: ['gloop --task "fix tests"'] }],
@@ -317,15 +297,9 @@ describe("toolCallsToForm", () => {
     if (form.tag === "done") expect(form.summary).toBe("Task complete");
   });
 
-  test("Reboot with default reason", () => {
-    const form = toolCallsToForm([{ name: "Reboot", rawArgs: [] }]);
-    expect(form.tag).toBe("reboot");
-    if (form.tag === "reboot") expect(form.reason).toBe("Reboot requested");
-  });
-
   test("only control tools (no regular) returns nil", () => {
     // Edge case: if somehow regularCalls is empty after filtering
-    // CompleteTask and Reboot are filtered out; if nothing remains, should still work
+    // CompleteTask is filtered out; if nothing remains, should still work
     const form = toolCallsToForm([{ name: "CompleteTask", rawArgs: ["done"] }]);
     expect(form.tag).toBe("done");
   });
@@ -511,16 +485,6 @@ describe("eval_ — form evaluation", () => {
 
     await eval_(ListTools(), world, fx);
     expect(streamedText).toEqual(["tool list"]);
-  });
-
-  test("Reboot calls fx.reboot", async () => {
-    const provider = new MockProvider([]);
-    const convo = new AIConversation(provider, "m");
-    const registry = createTestRegistry();
-    const { fx } = createRecordingFx();
-    const world = mkWorld(convo, registry);
-
-    await expect(eval_(Reboot("test"), world, fx)).rejects.toThrow("reboot: test");
   });
 
   test("Spawn calls fx.spawn and continues", async () => {

@@ -137,7 +137,6 @@ function createRecordingFx(): {
     remember: async (content) => { events.push({ type: "remember", content }); },
     forget: async (content) => { events.push({ type: "forget", content }); },
     refreshSystem: async () => {},
-    reboot: async () => { throw new Error("reboot"); },
     manageContext: async () => "pruned",
     complete(summary) { events.push({ type: "complete", summary }); },
     installTool: async () => "installed",

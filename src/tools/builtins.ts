@@ -8,6 +8,14 @@ import {
 } from "@anthropic/gloop-loop";
 import { exec as shellExec, formatShellResult as gloopFormatShellResult } from "../../bin/shell.ts";
 
+/** Thrown by the Reboot tool — caught by the outer run loop to trigger process restart. */
+export class RebootError extends Error {
+  constructor(public readonly reason: string) {
+    super(`Reboot: ${reason}`);
+    this.name = "RebootError";
+  }
+}
+
 const BUILTIN_NAMES = new Set(["ReadFile", "WriteFile", "Patch_file", "Bash", "CompleteTask", "Reload", "Reboot", "AskUser", "ManageContext", "Remember", "Forget"]);
 const TOOLS_DIR = join(process.cwd(), ".gloop", "tools");
 
@@ -40,7 +48,22 @@ export interface BuiltinOptions {
 
 export function registerBuiltins(registry: ToolRegistry, options: BuiltinOptions = {}): void {
   // Register all portable builtins from the lib
-  libRegisterBuiltins(registry, bunIO, { reboot: options.clone });
+  libRegisterBuiltins(registry, bunIO);
+
+  // Gloop-specific: Reboot tool (only in clone mode)
+  if (options.clone) {
+    registry.register({
+      name: "Reboot",
+      description:
+        "Save the current conversation history, restart with fresh code, and resume where you left off. Use this after modifying the agent's own codebase so changes take effect.",
+      arguments: [
+        { name: "reason", description: "Why you are rebooting (shown on resume)" },
+      ],
+      execute: async (args) => {
+        throw new RebootError(args.reason || "Reboot requested");
+      },
+    });
+  }
 
   // Gloop-specific: Reload custom tools from .gloop/tools/
   registry.register({
