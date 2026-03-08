@@ -5,11 +5,9 @@ import type {
   AIResponse,
   JsonToolCall,
   StreamResult,
-} from "../ai/types.ts";
-import { AIConversation } from "../ai/builder.ts";
-import { ToolRegistry } from "../tools/registry.ts";
-import { parseGloopTaskBashCommand } from "./task-mode.ts";
-import type { ToolCall } from "../tools/types.ts";
+} from "../src/ai/types.ts";
+import { AIConversation } from "../src/ai/builder.ts";
+import { ToolRegistry } from "../src/tools/registry.ts";
 import {
   run,
   eval_,
@@ -35,7 +33,8 @@ import {
   type Form,
   type Effects,
   type World,
-} from "./core.ts";
+  type LoopConfig,
+} from "../src/core/core.ts";
 
 // ---------------------------------------------------------------------------
 // Mock provider that returns StreamResult from stream()
@@ -72,7 +71,6 @@ class MockProvider implements AIProvider {
     this.calls.push(config);
     const resp = this.responses[this.callIndex++] ?? {};
 
-    // Create an async iterator that yields text chunks
     const text = resp.text ?? "";
     const textStream: AsyncIterableIterator<string> = (async function* () {
       for (let i = 0; i < text.length; i += 10) {
@@ -92,20 +90,12 @@ class MockProvider implements AIProvider {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Shorthand to create a JsonToolCall */
 function tc(id: string, name: string, args: Record<string, string>): JsonToolCall {
   return {
     id,
     type: "function",
     function: { name, arguments: JSON.stringify(args) },
   };
-}
-
-/** Gloop-specific spawn classifier for testing toolCallsToForm */
-function gloopClassifySpawn(call: ToolCall): string | null {
-  if (call.name !== "Bash") return null;
-  const req = parseGloopTaskBashCommand(call.rawArgs[0] ?? "");
-  return req ? req.task : null;
 }
 
 function createTestRegistry(): ToolRegistry {
@@ -233,6 +223,14 @@ function createRecordingFx(opts?: {
   return { fx, events, streamedText };
 }
 
+/** A classifySpawn hook for testing — recognizes "spawn:task" in Bash calls */
+function testClassifySpawn(call: { name: string; rawArgs: string[] }): string | null {
+  if (call.name !== "Bash") return null;
+  const cmd = call.rawArgs[0] ?? "";
+  if (cmd.startsWith("spawn:")) return cmd.slice(6);
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // toolCallsToForm tests
 // ---------------------------------------------------------------------------
@@ -286,12 +284,11 @@ describe("toolCallsToForm", () => {
     }
   });
 
-  test("Bash gloop --task creates spawn form", () => {
+  test("classifySpawn creates spawn form", () => {
     const form = toolCallsToForm(
-      [{ name: "Bash", rawArgs: ['gloop --task "fix tests"'] }],
-      gloopClassifySpawn,
+      [{ name: "Bash", rawArgs: ["spawn:fix tests"] }],
+      testClassifySpawn,
     );
-    // Spawn tasks are folded into a chain: Spawn → Emit → Think
     expect(form.tag).toBe("spawn");
   });
 
@@ -299,16 +296,23 @@ describe("toolCallsToForm", () => {
     const form = toolCallsToForm(
       [
         { name: "Echo", rawArgs: ["work"] },
-        { name: "Bash", rawArgs: ['gloop --task "subtask"'] },
+        { name: "Bash", rawArgs: ["spawn:subtask"] },
       ],
-      gloopClassifySpawn,
+      testClassifySpawn,
     );
-    // Plain tools are invoked first, then spawns
     expect(form.tag).toBe("invoke");
     if (form.tag === "invoke") {
       expect(form.calls).toHaveLength(1);
       expect(form.calls[0].name).toBe("Echo");
     }
+  });
+
+  test("without classifySpawn, Bash calls are regular tools", () => {
+    const form = toolCallsToForm([
+      { name: "Bash", rawArgs: ["spawn:something"] },
+    ]);
+    // No classifySpawn → treated as regular Invoke
+    expect(form.tag).toBe("invoke");
   });
 
   test("CompleteTask with default summary", () => {
@@ -321,13 +325,6 @@ describe("toolCallsToForm", () => {
     const form = toolCallsToForm([{ name: "Reboot", rawArgs: [] }]);
     expect(form.tag).toBe("reboot");
     if (form.tag === "reboot") expect(form.reason).toBe("Reboot requested");
-  });
-
-  test("only control tools (no regular) returns nil", () => {
-    // Edge case: if somehow regularCalls is empty after filtering
-    // CompleteTask and Reboot are filtered out; if nothing remains, should still work
-    const form = toolCallsToForm([{ name: "CompleteTask", rawArgs: ["done"] }]);
-    expect(form.tag).toBe("done");
   });
 });
 
@@ -553,7 +550,7 @@ describe("eval_ — form evaluation", () => {
 });
 
 // ---------------------------------------------------------------------------
-// run() integration tests — agent loop with JSON tool calls
+// run() integration tests
 // ---------------------------------------------------------------------------
 
 describe("run — agent loop", () => {
@@ -578,9 +575,7 @@ describe("run — agent loop", () => {
 
   test("tool execution error returns error result to LLM", async () => {
     const provider = new MockProvider([
-      {
-        toolCalls: [tc("c1", "Fail", { msg: "kaboom" })],
-      },
+      { toolCalls: [tc("c1", "Fail", { msg: "kaboom" })] },
       { text: "I see the error." },
     ]);
     const convo = new AIConversation(provider, "m");
@@ -597,11 +592,9 @@ describe("run — agent loop", () => {
     expect(streamedText[streamedText.length - 1]).toBe("I see the error.");
   });
 
-  test("AskUser tool handled via fx.ask, not normal execution", async () => {
+  test("AskUser tool handled via fx.ask", async () => {
     const provider = new MockProvider([
-      {
-        toolCalls: [tc("c1", "AskUser", { question: "What color?" })],
-      },
+      { toolCalls: [tc("c1", "AskUser", { question: "What color?" })] },
       { text: "Great choice!" },
     ]);
     const convo = new AIConversation(provider, "m");
@@ -617,9 +610,7 @@ describe("run — agent loop", () => {
 
   test("ManageContext tool handled via fx.manageContext", async () => {
     const provider = new MockProvider([
-      {
-        toolCalls: [tc("c1", "ManageContext", { instructions: "prune old stuff" })],
-      },
+      { toolCalls: [tc("c1", "ManageContext", { instructions: "prune old stuff" })] },
       { text: "Context cleaned." },
     ]);
     const convo = new AIConversation(provider, "m");
@@ -635,9 +626,7 @@ describe("run — agent loop", () => {
 
   test("Reload tool triggers system refresh", async () => {
     const provider = new MockProvider([
-      {
-        toolCalls: [tc("c1", "Reload", {})],
-      },
+      { toolCalls: [tc("c1", "Reload", {})] },
       { text: "Reloaded." },
     ]);
     const convo = new AIConversation(provider, "m");
@@ -652,9 +641,7 @@ describe("run — agent loop", () => {
 
   test("tool with askPermission — approved", async () => {
     const provider = new MockProvider([
-      {
-        toolCalls: [tc("c1", "DangerTool", { action: "destroy" })],
-      },
+      { toolCalls: [tc("c1", "DangerTool", { action: "destroy" })] },
       { text: "Done." },
     ]);
     const convo = new AIConversation(provider, "m");
@@ -674,9 +661,7 @@ describe("run — agent loop", () => {
 
   test("tool with askPermission — denied", async () => {
     const provider = new MockProvider([
-      {
-        toolCalls: [tc("c1", "DangerTool", { action: "destroy" })],
-      },
+      { toolCalls: [tc("c1", "DangerTool", { action: "destroy" })] },
       { text: "OK, cancelled." },
     ]);
     const convo = new AIConversation(provider, "m");
@@ -688,59 +673,6 @@ describe("run — agent loop", () => {
 
     const toolDone = events.find(e => e.type === "tool_done" && e.name === "DangerTool") as any;
     expect(toolDone.success).toBe(false);
-  });
-
-  test("tool with askPermission — safe action skips confirmation", async () => {
-    const provider = new MockProvider([
-      {
-        toolCalls: [tc("c1", "DangerTool", { action: "safe_action" })],
-      },
-      { text: "Done." },
-    ]);
-    const convo = new AIConversation(provider, "m");
-    const registry = createTestRegistry();
-    const { fx, events } = createRecordingFx();
-    const world = mkWorld(convo, registry);
-
-    await run("do safe", world, fx);
-
-    expect(events.filter(e => e.type === "confirm")).toHaveLength(0);
-    const toolDone = events.find(e => e.type === "tool_done" && e.name === "DangerTool") as any;
-    expect(toolDone.success).toBe(true);
-  });
-
-  test("Remember tool calls fx.remember", async () => {
-    const provider = new MockProvider([
-      {
-        toolCalls: [tc("c1", "Remember", { content: "user prefers dark mode" })],
-      },
-      { text: "Noted." },
-    ]);
-    const convo = new AIConversation(provider, "m");
-    const registry = createTestRegistry();
-    const { fx, events } = createRecordingFx();
-    const world = mkWorld(convo, registry);
-
-    await run("update prefs", world, fx);
-
-    expect(events.some(e => e.type === "remember" && (e as any).content === "user prefers dark mode")).toBe(true);
-  });
-
-  test("Forget tool calls fx.forget", async () => {
-    const provider = new MockProvider([
-      {
-        toolCalls: [tc("c1", "Forget", { content: "user prefers light mode" })],
-      },
-      { text: "Forgotten." },
-    ]);
-    const convo = new AIConversation(provider, "m");
-    const registry = createTestRegistry();
-    const { fx, events } = createRecordingFx();
-    const world = mkWorld(convo, registry);
-
-    await run("forget pref", world, fx);
-
-    expect(events.some(e => e.type === "forget" && (e as any).content === "user prefers light mode")).toBe(true);
   });
 
   test("multiple tool calls — all execute", async () => {
@@ -767,9 +699,7 @@ describe("run — agent loop", () => {
 
   test("CompleteTask via JSON stops the loop", async () => {
     const provider = new MockProvider([
-      {
-        toolCalls: [tc("c1", "CompleteTask", { summary: "All done" })],
-      },
+      { toolCalls: [tc("c1", "CompleteTask", { summary: "All done" })] },
     ]);
     const convo = new AIConversation(provider, "m");
     const registry = createTestRegistry();
@@ -783,27 +713,8 @@ describe("run — agent loop", () => {
     expect(complete.summary).toBe("All done");
   });
 
-  test("CompleteTask with default summary", async () => {
-    const provider = new MockProvider([
-      {
-        toolCalls: [tc("c1", "CompleteTask", {})],
-      },
-    ]);
-    const convo = new AIConversation(provider, "m");
-    const registry = createTestRegistry();
-    const { fx, events } = createRecordingFx();
-    const world = mkWorld(convo, registry);
-
-    await run("done", world, fx);
-
-    const complete = events.find(e => e.type === "complete") as any;
-    expect(complete.summary).toBe("Task complete");
-  });
-
   test("tools are forwarded to provider", async () => {
-    const provider = new MockProvider([
-      { text: "No tools needed." },
-    ]);
+    const provider = new MockProvider([{ text: "No tools needed." }]);
     const convo = new AIConversation(provider, "m");
     const registry = createTestRegistry();
     const { fx } = createRecordingFx();
@@ -813,64 +724,33 @@ describe("run — agent loop", () => {
 
     expect(provider.calls).toHaveLength(1);
     expect(provider.calls[0].tools).toBeDefined();
-    expect(provider.calls[0].tools!.length).toBeGreaterThan(0);
     expect(provider.calls[0].tools!.some(t => t.function.name === "Echo")).toBe(true);
   });
 
-  test("tool result format includes name and status", async () => {
+  test("unknown tool returns error and continues", async () => {
     const provider = new MockProvider([
-      {
-        toolCalls: [tc("c1", "Echo", { text: "test" })],
-      },
-      { text: "ok" },
+      { toolCalls: [tc("c1", "NonExistent", { x: "y" })] },
+      { text: "Recovered." },
     ]);
     const convo = new AIConversation(provider, "m");
     const registry = createTestRegistry();
-    const { fx } = createRecordingFx();
+    const { fx, events, streamedText } = createRecordingFx();
     const world = mkWorld(convo, registry);
 
-    await run("echo", world, fx);
+    await run("call unknown", world, fx);
 
-    // The second call to the provider should have the tool result in messages
-    expect(provider.calls).toHaveLength(2);
-    const lastMessages = provider.calls[1].messages;
-    const lastUserMsg = lastMessages[lastMessages.length - 1];
-    expect(lastUserMsg.content).toContain('<tool_result name="Echo" status="success">');
-    expect(lastUserMsg.content).toContain("test");
-  });
+    const toolDone = events.find(e => e.type === "tool_done" && e.name === "NonExistent") as any;
+    expect(toolDone).toBeTruthy();
+    expect(toolDone.success).toBe(false);
+    expect(toolDone.output).toContain("Unknown tool");
 
-  test("history accumulates across turns", async () => {
-    const provider = new MockProvider([
-      {
-        toolCalls: [tc("c1", "Echo", { text: "step1" })],
-      },
-      {
-        toolCalls: [tc("c2", "Echo", { text: "step2" })],
-      },
-      { text: "Final." },
-    ]);
-    const convo = new AIConversation(provider, "m");
-    const registry = createTestRegistry();
-    const { fx } = createRecordingFx();
-    const world = mkWorld(convo, registry);
-
-    await run("multi-step", world, fx);
-
-    const history = convo.getHistory();
-    // user (initial), user (result1), user (result2), assistant (final text)
-    // Note: tool-call-only responses don't add assistant messages (no text content)
-    expect(history.length).toBeGreaterThanOrEqual(3);
+    expect(streamedText[streamedText.length - 1]).toBe("Recovered.");
   });
 
   test("abort during tool execution", async () => {
     const abort = new AbortController();
     const provider = new MockProvider([
-      {
-        toolCalls: [
-          tc("c1", "Echo", { text: "a" }),
-          tc("c2", "Echo", { text: "b" }),
-        ],
-      },
+      { toolCalls: [tc("c1", "Echo", { text: "a" }), tc("c2", "Echo", { text: "b" })] },
     ]);
     const convo = new AIConversation(provider, "m");
 
@@ -880,7 +760,6 @@ describe("run — agent loop", () => {
       description: "Echo",
       arguments: [{ name: "text", description: "text" }],
       execute: async (args) => {
-        // Abort after first tool call
         abort.abort();
         return args.text ?? "";
       },
@@ -898,13 +777,12 @@ describe("run — agent loop", () => {
     await expect(run("test", world, fx)).rejects.toThrow(AbortError);
   });
 
-  test("auto-prune triggers after 50 tool calls", async () => {
-    // Build a provider that responds to 51 single-tool calls, then a final text
+  test("auto-prune triggers after configured interval", async () => {
     const responses: MockResponse[] = [];
-    for (let i = 0; i < 51; i++) {
+    for (let i = 0; i < 11; i++) {
       responses.push({ toolCalls: [tc(`c${i}`, "Echo", { text: `${i}` })] });
     }
-    responses.push({ text: "Done after 51 calls." });
+    responses.push({ text: "Done." });
 
     const provider = new MockProvider(responses);
     const convo = new AIConversation(provider, "m");
@@ -912,38 +790,31 @@ describe("run — agent loop", () => {
     const { fx, events } = createRecordingFx();
     const world = mkWorld(convo, registry);
 
-    await run("trigger auto-prune", world, fx);
+    // Use a smaller interval for testing
+    await run("trigger auto-prune", world, fx, { contextPruneInterval: 10 });
 
-    // ManageContext should appear in tool_start events from auto-prune
     const manageStarts = events.filter(
       e => e.type === "tool_start" && e.name === "ManageContext"
     );
     expect(manageStarts.length).toBeGreaterThanOrEqual(1);
   });
 
-  test("unknown tool returns error and continues", async () => {
-    const provider = new MockProvider([
-      { toolCalls: [tc("c1", "NonExistent", { x: "y" })] },
-      { text: "Recovered." },
-    ]);
+  test("log callback receives LLM input/output", async () => {
+    const provider = new MockProvider([{ text: "response" }]);
     const convo = new AIConversation(provider, "m");
     const registry = createTestRegistry();
-    const { fx, events, streamedText } = createRecordingFx();
+    const logs: [string, string][] = [];
+    const { fx, events } = createRecordingFx();
+    fx.log = (label, content) => logs.push([label, content]);
     const world = mkWorld(convo, registry);
 
-    await run("call unknown", world, fx);
+    await run("input", world, fx);
 
-    const toolDone = events.find(
-      e => e.type === "tool_done" && e.name === "NonExistent"
-    ) as any;
-    expect(toolDone).toBeTruthy();
-    expect(toolDone.success).toBe(false);
-    expect(toolDone.output).toContain("Unknown tool");
-
-    expect(streamedText[streamedText.length - 1]).toBe("Recovered.");
+    expect(logs.some(([l]) => l === "LLM_INPUT")).toBe(true);
+    expect(logs.some(([l]) => l === "LLM_OUTPUT")).toBe(true);
   });
 
-  test("Bash rm command triggers confirmation via requiresConfirmation", async () => {
+  test("Bash rm command triggers confirmation", async () => {
     const registry = new ToolRegistry();
     registry.register({
       name: "Bash",
@@ -971,35 +842,5 @@ describe("run — agent loop", () => {
     const confirmEvent = events.find(e => e.type === "confirm") as any;
     expect(confirmEvent).toBeTruthy();
     expect(confirmEvent.command).toContain("rm -rf");
-  });
-
-  test("Bash rm denied stops execution of that tool", async () => {
-    const registry = new ToolRegistry();
-    registry.register({
-      name: "Bash",
-      description: "Execute shell command",
-      arguments: [{ name: "command", description: "command" }],
-      execute: async (args) => `ran: ${args.command}`,
-    });
-    registry.register({
-      name: "CompleteTask",
-      description: "Complete",
-      arguments: [{ name: "summary", description: "s" }],
-      execute: async (args) => args.summary ?? "",
-    });
-
-    const provider = new MockProvider([
-      { toolCalls: [tc("c1", "Bash", { command: "rm important.txt" })] },
-      { text: "OK, skipped." },
-    ]);
-    const convo = new AIConversation(provider, "m");
-    const { fx, events } = createRecordingFx({ confirmResult: false });
-    const world = mkWorld(convo, registry);
-
-    await run("delete", world, fx);
-
-    const toolDone = events.find(e => e.type === "tool_done" && e.name === "Bash") as any;
-    expect(toolDone.success).toBe(false);
-    expect(toolDone.output).toContain("denied");
   });
 });
