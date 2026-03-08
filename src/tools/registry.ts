@@ -32,22 +32,6 @@ export class ToolRegistry {
     this.tools.clear();
   }
 
-  /** Generate tool definitions in the XML format for the system prompt */
-  toDefinitionBlock(): string {
-    const lines: string[] = [];
-    for (const tool of this.tools.values()) {
-      const argsObj: Record<string, string> = {};
-      for (const arg of tool.arguments) {
-        argsObj[arg.name] = arg.description;
-      }
-      const argsJson = JSON.stringify(argsObj);
-      lines.push(
-        `<tool name = "${tool.name}" description = "${tool.description}"${tool.arguments.length ? `, arguments = ${argsJson}` : ""}>`
-      );
-    }
-    return `<tools>\n${lines.join("\n")}\n</tools>`;
-  }
-
   /** Convert all tool definitions to OpenRouter's JSON tool calling format */
   toJsonTools(): JsonTool[] {
     return this.getAll().map((tool) => {

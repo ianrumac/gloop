@@ -77,48 +77,55 @@ describe("ToolRegistry", () => {
     expect(registry.getAll()).toHaveLength(1);
   });
 
-  describe("toDefinitionBlock", () => {
-    test("generates XML for tools with no arguments", () => {
-      const registry = new ToolRegistry();
-      registry.register(makeTool("Reload"));
-      const block = registry.toDefinitionBlock();
-      expect(block).toContain("<tools>");
-      expect(block).toContain("</tools>");
-      expect(block).toContain('name = "Reload"');
-      expect(block).toContain('description = "Reload tool"');
-    });
-
-    test("generates XML with arguments", () => {
+  describe("toJsonTools", () => {
+    test("converts tools to JSON format", () => {
       const registry = new ToolRegistry();
       registry.register(makeTool("ReadFile", ["path"]));
-      const block = registry.toDefinitionBlock();
-      expect(block).toContain("arguments");
-      expect(block).toContain('"path"');
-      expect(block).toContain('"path arg"');
+      const jsonTools = registry.toJsonTools();
+
+      expect(jsonTools).toHaveLength(1);
+      expect(jsonTools[0].type).toBe("function");
+      expect(jsonTools[0].function.name).toBe("ReadFile");
+      expect(jsonTools[0].function.description).toBe("ReadFile tool");
+      expect(jsonTools[0].function.parameters.type).toBe("object");
+      expect(jsonTools[0].function.parameters.properties.path.type).toBe("string");
+      expect(jsonTools[0].function.parameters.required).toEqual(["path"]);
     });
 
-    test("generates XML for multiple tools", () => {
+    test("tool with no arguments has empty properties", () => {
+      const registry = new ToolRegistry();
+      registry.register(makeTool("Reload"));
+      const jsonTools = registry.toJsonTools();
+
+      expect(jsonTools).toHaveLength(1);
+      expect(jsonTools[0].function.parameters.properties).toEqual({});
+      expect(jsonTools[0].function.parameters.required).toBeUndefined();
+    });
+
+    test("multiple tools", () => {
       const registry = new ToolRegistry();
       registry.register(makeTool("A"));
-      registry.register(makeTool("B"));
-      const block = registry.toDefinitionBlock();
-      expect(block).toContain('name = "A"');
-      expect(block).toContain('name = "B"');
+      registry.register(makeTool("B", ["x"]));
+      const jsonTools = registry.toJsonTools();
+
+      expect(jsonTools).toHaveLength(2);
+      expect(jsonTools[0].function.name).toBe("A");
+      expect(jsonTools[1].function.name).toBe("B");
     });
 
-    test("empty registry generates valid XML", () => {
+    test("empty registry returns empty array", () => {
       const registry = new ToolRegistry();
-      const block = registry.toDefinitionBlock();
-      expect(block).toBe("<tools>\n\n</tools>");
+      expect(registry.toJsonTools()).toEqual([]);
     });
 
-    test("tool with multiple arguments generates correct JSON", () => {
+    test("tool with multiple arguments", () => {
       const registry = new ToolRegistry();
       registry.register(makeTool("WriteFile", ["path", "content"]));
-      const block = registry.toDefinitionBlock();
-      // Verify the JSON args object
-      expect(block).toContain('"path":"path arg"');
-      expect(block).toContain('"content":"content arg"');
+      const jsonTools = registry.toJsonTools();
+
+      expect(jsonTools[0].function.parameters.properties).toHaveProperty("path");
+      expect(jsonTools[0].function.parameters.properties).toHaveProperty("content");
+      expect(jsonTools[0].function.parameters.required).toEqual(["path", "content"]);
     });
   });
 });

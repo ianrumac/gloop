@@ -8,7 +8,6 @@
 import React from "react";
 import { render } from "ink";
 import { createAI } from "../src/ai/index.ts";
-import type { ToolMode } from "../src/ai/types.ts";
 import { ToolRegistry, registerBuiltins } from "../src/tools/index.ts";
 import { ensureGloopDir, appendMemory, removeMemory } from "../src/core/memory.ts";
 import { buildSystemPrompt } from "../src/core/system.ts";
@@ -52,10 +51,8 @@ if (taskRequest) {
 const debug = args.includes("--debug");
 const providerIdx = args.indexOf("--provider");
 const providerName = providerIdx !== -1 ? args[providerIdx + 1] : undefined;
-const toolModeIdx = args.indexOf("--tool-mode");
-const toolMode: ToolMode = (toolModeIdx !== -1 && args[toolModeIdx + 1] === "json") ? "json" : "xml";
 const model = args.find((a, i) =>
-  !a.startsWith("--") && i !== providerIdx + 1 && i !== toolModeIdx + 1
+  !a.startsWith("--") && i !== providerIdx + 1
 ) ?? "x-ai/grok-4.1-fast";
 
 if (debug) enableDebug();
@@ -75,9 +72,8 @@ const reloadTool = registry.get("Reload");
 if (reloadTool) await reloadTool.execute({});
 
 // Build system prompt
-let systemPrompt = await buildSystemPrompt(registry, { clone, toolMode });
+let systemPrompt = await buildSystemPrompt({ clone });
 debugLog("SYSTEM", systemPrompt);
-debugLog("TOOL_MODE", toolMode);
 
 const convo = ai.conversation({ system: systemPrompt });
 if (providerName) {
@@ -101,7 +97,7 @@ const { unmount } = render(
     model,
     rebootReason: rebootSession?.reason,
     runAgent: async (input, ui, signal) => {
-      const world = mkWorld(convo, registry, signal, toolMode);
+      const world = mkWorld(convo, registry, signal);
 
       const fx: Effects = {
         streamChunk: ui.onStreamChunk,
@@ -124,7 +120,7 @@ const { unmount } = render(
         },
 
         refreshSystem: async () => {
-          systemPrompt = await buildSystemPrompt(registry, { clone, toolMode });
+          systemPrompt = await buildSystemPrompt({ clone });
           convo.setSystem(systemPrompt);
           ui.onSystemPromptRefreshed();
           debugLog("SYSTEM", "System prompt refreshed");

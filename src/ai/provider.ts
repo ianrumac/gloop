@@ -5,7 +5,6 @@ import type {
   AIRequestConfig,
   AIResponse,
   AIStreamChunk,
-  JsonToolCall,
 } from "./types.ts";
 
 export class OpenRouterProvider implements AIProvider {
@@ -36,14 +35,24 @@ export class OpenRouterProvider implements AIProvider {
     });
 
     const choice = response.choices?.[0];
-    const toolCalls = this.extractToolCalls(choice?.message);
+    // SDK types: choice.message.toolCalls is ChatMessageToolCall[] — properly typed
+    const sdkToolCalls = choice?.message?.toolCalls;
 
     return {
       id: response.id,
       model: response.model,
       content: typeof choice?.message?.content === "string" ? choice.message.content : null,
       finishReason: this.parseFinishReason(choice?.finishReason ?? null),
-      ...(toolCalls.length > 0 && { toolCalls }),
+      ...(sdkToolCalls?.length && {
+        toolCalls: sdkToolCalls.map(tc => ({
+          id: tc.id,
+          type: "function" as const,
+          function: {
+            name: tc.function.name,
+            arguments: tc.function.arguments,
+          },
+        })),
+      }),
       usage: response.usage
         ? {
             promptTokens: response.usage.promptTokens,
@@ -75,14 +84,26 @@ export class OpenRouterProvider implements AIProvider {
 
     for await (const chunk of response) {
       const choice = chunk.choices?.[0];
-      const toolCalls = this.extractToolCalls(choice?.delta);
+      const delta = choice?.delta;
+      // SDK types: delta.toolCalls is ChatStreamingMessageToolCall[] — properly typed
+      // Each has: index, id?, type?, function?: { name?, arguments? }
+      const sdkToolCalls = delta?.toolCalls;
 
       yield {
         id: chunk.id,
         model: chunk.model,
         delta: {
-          content: choice?.delta?.content ?? undefined,
-          ...(toolCalls.length > 0 && { toolCalls }),
+          content: delta?.content ?? undefined,
+          ...(sdkToolCalls?.length && {
+            toolCalls: sdkToolCalls.map(tc => ({
+              index: tc.index,
+              id: tc.id,
+              function: {
+                name: tc.function?.name,
+                arguments: tc.function?.arguments,
+              },
+            })),
+          }),
         },
         finishReason: this.parseFinishReason(
           typeof choice?.finishReason === "string" ? choice.finishReason : null
@@ -96,21 +117,6 @@ export class OpenRouterProvider implements AIProvider {
         }),
       };
     }
-  }
-
-  private extractToolCalls(messageOrDelta: any): JsonToolCall[] {
-    if (!messageOrDelta?.tool_calls) return [];
-    const raw = messageOrDelta.tool_calls;
-    if (!Array.isArray(raw)) return [];
-
-    return raw.map((tc: any) => ({
-      id: tc.id ?? "",
-      type: "function" as const,
-      function: {
-        name: tc.function?.name ?? "",
-        arguments: tc.function?.arguments ?? "{}",
-      },
-    }));
   }
 
   private parseFinishReason(reason: string | null): AIResponse["finishReason"] {

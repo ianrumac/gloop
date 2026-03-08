@@ -7,7 +7,7 @@ import type { ToolDefinition } from "./types.ts";
 import type { ToolRegistry } from "./registry.ts";
 import { exec, formatShellResult } from "../../bin/shell.ts";
 
-const BUILTIN_NAMES = new Set(["ReadFile", "WriteFile", "Patch_file", "Bash", "CompleteTask", "Reload", "Reboot", "AskUser", "ManageContext"]);
+const BUILTIN_NAMES = new Set(["ReadFile", "WriteFile", "Patch_file", "Bash", "CompleteTask", "Reload", "Reboot", "AskUser", "ManageContext", "Remember", "Forget"]);
 const TOOLS_DIR = join(process.cwd(), ".gloop", "tools");
 
 export interface BuiltinOptions {
@@ -234,6 +234,26 @@ export function registerBuiltins(registry: ToolRegistry, options: BuiltinOptions
       }
       return result;
     },
+  });
+
+  registry.register({
+    name: "Remember",
+    description:
+      "Store a short note in persistent memory. Use this to remember things about the system, projects, tools, user preferences, or yourself. Store short notes only — never raw command output, full files, or long logs.",
+    arguments: [
+      { name: "content", description: "The short note to remember" },
+    ],
+    execute: async (args) => args.content || "",
+  });
+
+  registry.register({
+    name: "Forget",
+    description:
+      "Remove a previously stored note from persistent memory. Use this to clear outdated or incorrect information.",
+    arguments: [
+      { name: "content", description: "The note to forget (must match what was previously remembered)" },
+    ],
+    execute: async (args) => args.content || "",
   });
 
   registry.register({

@@ -9,7 +9,7 @@
  */
 
 import type { AIConversation } from "../ai/index.ts";
-import type { ToolMode, JsonToolCall } from "../ai/types.ts";
+import type { JsonToolCall, ToolCallDelta } from "../ai/types.ts";
 import type { ToolRegistry } from "../tools/registry.ts";
 import type { ToolCall, ToolResult } from "../tools/types.ts";
 import { debugLogRaw } from "./debug.ts";
@@ -103,7 +103,6 @@ export interface World {
   convo: AIConversation;
   registry: ToolRegistry;
   toolCalls: number;
-  toolMode: ToolMode;
   signal?: AbortSignal;
 }
 
@@ -115,12 +114,10 @@ export const mkWorld = (
   convo: AIConversation,
   registry: ToolRegistry,
   signal?: AbortSignal,
-  toolMode: ToolMode = "xml",
 ): World => ({
   convo,
   registry,
   toolCalls: 0,
-  toolMode,
   signal,
 });
 
@@ -147,10 +144,10 @@ export interface Effects {
 }
 
 // ============================================================================
-// PARSER — Transform LLM output into Forms
+// TOOL CALL CONVERSION
 // ============================================================================
 
-import { parseResponse, requiresConfirmation, jsonToolCallsToToolCalls } from "../tools/index.ts";
+import { jsonToolCallsToToolCalls } from "../tools/index.ts";
 import { parseGloopTaskBashCommand } from "./task-mode.ts";
 
 /** SpawnResult → synthetic ToolResult for feeding back to the LLM */
@@ -180,25 +177,7 @@ function asSpawnTask(call: ToolCall): string | null {
   return req ? req.task : null;
 }
 
-/** Parse LLM response text and construct the appropriate Form (XML mode) */
-export function parseToForm(text: string): Form {
-  const parsed = parseResponse(text);
-
-  // Memory operations: remember/forget wrapped as a Seq prefix
-  const memoryForms: Form[] = [
-    ...parsed.remembers.map(r => Remember(r, Nil)),
-    ...parsed.forgets.map(f => Forget(f, Nil)),
-  ];
-  const withMemory = (form: Form): Form =>
-    memoryForms.length > 0 ? Seq(...memoryForms, form) : form;
-
-  // No tool calls → just memory ops (if any)
-  if (parsed.toolCalls.length === 0) return withMemory(Nil);
-
-  return withMemory(toolCallsToForm(parsed.toolCalls));
-}
-
-/** Build a Form from a list of ToolCalls (shared by XML and JSON modes) */
+/** Build a Form from a list of ToolCalls */
 export function toolCallsToForm(toolCalls: ToolCall[]): Form {
   if (toolCalls.length === 0) return Nil;
 
@@ -257,19 +236,43 @@ ${r.output}
 }
 
 // ============================================================================
-// STREAM DETECTION — Break early when a complete tool block arrives
+// TOOL CALL ACCUMULATION — Assemble streaming deltas into complete calls
 // ============================================================================
 
-function hasCompleteToolBlock(text: string): boolean {
-  return (text.includes("<tools>") && text.includes("</tools>")) ||
-    (text.includes("<|tool_calls_section_begin|>") && text.includes("<|tool_calls_section_end|>"));
+/** Accumulate streaming tool call deltas by index into complete tool calls */
+function accumulateToolCallDeltas(
+  accumulated: Map<number, { id: string; name: string; arguments: string }>,
+  deltas: ToolCallDelta[]
+): void {
+  for (const tc of deltas) {
+    const existing = accumulated.get(tc.index);
+    if (existing) {
+      if (tc.function.name) existing.name += tc.function.name;
+      if (tc.function.arguments) existing.arguments += tc.function.arguments;
+    } else {
+      accumulated.set(tc.index, {
+        id: tc.id ?? `call_${tc.index}`,
+        name: tc.function.name ?? "",
+        arguments: tc.function.arguments ?? "",
+      });
+    }
+  }
+}
+
+/** Convert accumulated tool call map to JsonToolCall array */
+function finalizeToolCalls(accumulated: Map<number, { id: string; name: string; arguments: string }>): JsonToolCall[] {
+  return [...accumulated.values()].map(tc => ({
+    id: tc.id,
+    type: "function" as const,
+    function: { name: tc.name, arguments: tc.arguments },
+  }));
 }
 
 // ============================================================================
 // INTERPRETER — The recursive heart of the agent loop
 // ============================================================================
 
-import { StreamFilter } from "./ui.ts";
+import { requiresConfirmation } from "../tools/index.ts";
 
 /**
  * eval_ : Form × World × Effects → Promise<void>
@@ -356,100 +359,14 @@ export async function eval_(
   }
 }
 
-/** Think: stream LLM response, parse into form, recurse */
+/** Think: stream LLM response, accumulate tool calls, parse into form, recurse */
 async function evalThink(
   input: string,
   world: World,
   fx: Effects
 ): Promise<void> {
-  if (world.toolMode === "json") {
-    return evalThinkJson(input, world, fx);
-  }
-  return evalThinkXml(input, world, fx);
-}
-
-/** Think in XML mode: parse tool calls from XML tags in response text */
-async function evalThinkXml(
-  input: string,
-  world: World,
-  fx: Effects
-): Promise<void> {
   let fullText = "";
-  const filter = new StreamFilter(text => fx.streamChunk(text));
-  debugLogRaw("LLM_INPUT_RAW", input);
-
-  // Use manual iteration so we can fire-and-forget stream cleanup on early break.
-  // A `for await...break` would call .return() on the generator and block waiting
-  // for the inner HTTP stream to close — which can hang indefinitely.
-  const iter = world.convo.stream(input)[Symbol.asyncIterator]();
-  let brokeEarly = false;
-
-  // Build an abort promise that rejects when signal fires
-  const abortPromise = world.signal
-    ? new Promise<never>((_, reject) => {
-        if (world.signal!.aborted) { reject(new AbortError()); return; }
-        world.signal!.addEventListener("abort", () => reject(new AbortError()), { once: true });
-      })
-    : null;
-
-  try {
-    while (true) {
-      const next = iter.next();
-      const { done, value: chunk } = abortPromise
-        ? await Promise.race([next, abortPromise])
-        : await next;
-      if (done) break;
-      if (chunk.delta.content) {
-        filter.write(chunk.delta.content);
-        fullText += chunk.delta.content;
-      }
-      if (hasCompleteToolBlock(fullText)) {
-        brokeEarly = true;
-        break;
-      }
-    }
-  } catch (err) {
-    if (err instanceof AbortError) {
-      // Aborted mid-stream: push partial response to history, fire-and-forget cleanup
-      iter.return!(undefined as any).catch(() => {});
-      if (fullText) {
-        const h = world.convo.getHistory();
-        h.push({ role: "assistant", content: fullText });
-        world.convo.setHistory(h);
-      }
-      throw err;
-    }
-    throw err;
-  }
-
-  if (brokeEarly) {
-    // Close the stream in the background — don't block on HTTP cleanup
-    iter.return!(undefined as any).catch(() => {});
-    // The generator's history push is unreachable on .return(),
-    // so manually record the partial assistant response
-    if (fullText) {
-      const h = world.convo.getHistory();
-      h.push({ role: "assistant", content: fullText });
-      world.convo.setHistory(h);
-    }
-  }
-  filter.flush();
-  fx.streamDone();
-  debugLogRaw("LLM_OUTPUT_RAW", fullText);
-
-  // Parse response into a Form and evaluate it
-  const nextForm = parseToForm(fullText);
-  return eval_(nextForm, world, fx);
-}
-
-/** Think in JSON mode: tools are forwarded to OpenRouter, tool_calls come back in deltas */
-async function evalThinkJson(
-  input: string,
-  world: World,
-  fx: Effects
-): Promise<void> {
-  let fullText = "";
-  const accumulatedToolCalls: Map<number, { id: string; name: string; arguments: string }> = new Map();
+  const accumulated: Map<number, { id: string; name: string; arguments: string }> = new Map();
   debugLogRaw("LLM_INPUT_RAW", input);
 
   // Set tools on the conversation for this request
@@ -480,28 +397,14 @@ async function evalThinkJson(
         fullText += chunk.delta.content;
       }
 
-      // Accumulate tool calls from deltas (streamed incrementally)
+      // Accumulate tool call deltas using SDK's index field
       if (chunk.delta.toolCalls) {
-        for (const tc of chunk.delta.toolCalls) {
-          // Tool calls stream with an index; each delta may add to name or arguments
-          const idx = accumulatedToolCalls.size; // Use next available index
-          const existing = accumulatedToolCalls.get(idx);
-          if (existing) {
-            if (tc.function.name) existing.name += tc.function.name;
-            if (tc.function.arguments) existing.arguments += tc.function.arguments;
-          } else {
-            accumulatedToolCalls.set(idx, {
-              id: tc.id || `call_${idx}`,
-              name: tc.function.name || "",
-              arguments: tc.function.arguments || "",
-            });
-          }
-        }
+        accumulateToolCallDeltas(accumulated, chunk.delta.toolCalls);
       }
     }
   } catch (err) {
     if (err instanceof AbortError) {
-      iter.return!(undefined as any).catch(() => {});
+      iter.return!(undefined as never).catch(() => {});
       if (fullText) {
         const h = world.convo.getHistory();
         h.push({ role: "assistant", content: fullText });
@@ -516,15 +419,11 @@ async function evalThinkJson(
   debugLogRaw("LLM_OUTPUT_RAW", fullText);
 
   // Convert accumulated tool calls to gloop's ToolCall format
-  const jsonCalls: JsonToolCall[] = [...accumulatedToolCalls.values()].map(tc => ({
-    id: tc.id,
-    type: "function" as const,
-    function: { name: tc.name, arguments: tc.arguments },
-  }));
+  const jsonCalls = finalizeToolCalls(accumulated);
 
   if (jsonCalls.length > 0) {
     const toolCalls = jsonToolCallsToToolCalls(jsonCalls);
-    debugLogRaw("JSON_TOOL_CALLS", JSON.stringify(toolCalls));
+    debugLogRaw("TOOL_CALLS", JSON.stringify(toolCalls));
     const nextForm = toolCallsToForm(toolCalls);
     return eval_(nextForm, world, fx);
   }
@@ -548,6 +447,7 @@ async function evalInvoke(
   // Process each tool call
   for (const call of calls) {
     if (world.signal?.aborted) throw new AbortError();
+
     // Handle AskUser specially
     if (call.name === "AskUser") {
       const question = call.rawArgs[0] ?? "What would you like to do?";
@@ -565,6 +465,26 @@ async function evalInvoke(
       const result = await fx.manageContext(instructions);
       results.push({ name: "ManageContext", output: result, success: true });
       fx.toolDone("ManageContext", true, result);
+      continue;
+    }
+
+    // Handle Remember specially — persist to memory + UI feedback
+    if (call.name === "Remember") {
+      const content = call.rawArgs[0] ?? "";
+      fx.toolStart("Remember", content.substring(0, 60));
+      await fx.remember(content);
+      results.push({ name: "Remember", output: `Remembered: ${content}`, success: true });
+      fx.toolDone("Remember", true, "remembered");
+      continue;
+    }
+
+    // Handle Forget specially — remove from memory + UI feedback
+    if (call.name === "Forget") {
+      const content = call.rawArgs[0] ?? "";
+      fx.toolStart("Forget", content.substring(0, 60));
+      await fx.forget(content);
+      results.push({ name: "Forget", output: `Forgot: ${content}`, success: true });
+      fx.toolDone("Forget", true, "forgotten");
       continue;
     }
 

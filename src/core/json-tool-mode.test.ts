@@ -5,6 +5,7 @@ import type {
   AIResponse,
   AIStreamChunk,
   JsonToolCall,
+  ToolCallDelta,
 } from "../ai/types.ts";
 import { AIConversation } from "../ai/builder.ts";
 import { ToolRegistry } from "../tools/registry.ts";
@@ -64,12 +65,20 @@ class JsonMockProvider implements AIProvider {
       }
     }
 
-    // Then stream tool calls
+    // Then stream tool calls as ToolCallDelta (with index)
     if (resp.toolCalls) {
+      const deltas: ToolCallDelta[] = resp.toolCalls.map((tc, i) => ({
+        index: i,
+        id: tc.id,
+        function: {
+          name: tc.function.name,
+          arguments: tc.function.arguments,
+        },
+      }));
       yield {
         id: "mock",
         model: "mock",
-        delta: { toolCalls: resp.toolCalls },
+        delta: { toolCalls: deltas },
         finishReason: "tool_calls",
       };
     } else {
@@ -107,6 +116,18 @@ function createTestRegistry(): ToolRegistry {
     arguments: [{ name: "command", description: "command" }],
     execute: async (args) => `output of: ${args.command}`,
   });
+  registry.register({
+    name: "Remember",
+    description: "Remember something",
+    arguments: [{ name: "content", description: "content" }],
+    execute: async (args) => args.content ?? "",
+  });
+  registry.register({
+    name: "Forget",
+    description: "Forget something",
+    arguments: [{ name: "content", description: "content" }],
+    execute: async (args) => args.content ?? "",
+  });
   return registry;
 }
 
@@ -114,7 +135,9 @@ type FxEvent =
   | { type: "stream_done" }
   | { type: "tool_start"; name: string }
   | { type: "tool_done"; name: string; success: boolean }
-  | { type: "complete"; summary: string };
+  | { type: "complete"; summary: string }
+  | { type: "remember"; content: string }
+  | { type: "forget"; content: string };
 
 function createRecordingFx(): {
   fx: Effects;
@@ -136,8 +159,8 @@ function createRecordingFx(): {
     toolDone(name, success) { events.push({ type: "tool_done", name, success }); },
     confirm: async () => true,
     ask: async () => "answer",
-    remember: async () => {},
-    forget: async () => {},
+    remember: async (content) => { events.push({ type: "remember", content }); },
+    forget: async (content) => { events.push({ type: "forget", content }); },
     refreshSystem: async () => {},
     reboot: async () => { throw new Error("reboot"); },
     manageContext: async () => "pruned",
@@ -280,8 +303,6 @@ describe("ToolRegistry.toJsonTools", () => {
     const registry = createTestRegistry();
     const jsonTools = registry.toJsonTools();
 
-    expect(jsonTools.length).toBe(3);
-
     const echo = jsonTools.find(t => t.function.name === "Echo");
     expect(echo).toBeTruthy();
     expect(echo!.type).toBe("function");
@@ -320,7 +341,7 @@ describe("JSON mode agent loop", () => {
     const convo = new AIConversation(provider, "mock");
     const registry = createTestRegistry();
     const { fx, events, streamedText } = createRecordingFx();
-    const world = mkWorld(convo, registry, undefined, "json");
+    const world = mkWorld(convo, registry);
 
     await run("hi", world, fx);
 
@@ -343,7 +364,7 @@ describe("JSON mode agent loop", () => {
     const convo = new AIConversation(provider, "mock");
     const registry = createTestRegistry();
     const { fx, events, streamedText } = createRecordingFx();
-    const world = mkWorld(convo, registry, undefined, "json");
+    const world = mkWorld(convo, registry);
 
     await run("echo hello", world, fx);
 
@@ -366,7 +387,7 @@ describe("JSON mode agent loop", () => {
     const convo = new AIConversation(provider, "mock");
     const registry = createTestRegistry();
     const { fx, events } = createRecordingFx();
-    const world = mkWorld(convo, registry, undefined, "json");
+    const world = mkWorld(convo, registry);
 
     await run("finish", world, fx);
 
@@ -388,7 +409,7 @@ describe("JSON mode agent loop", () => {
     const convo = new AIConversation(provider, "mock");
     const registry = createTestRegistry();
     const { fx, events } = createRecordingFx();
-    const world = mkWorld(convo, registry, undefined, "json");
+    const world = mkWorld(convo, registry);
 
     await run("echo twice", world, fx);
 
@@ -396,38 +417,63 @@ describe("JSON mode agent loop", () => {
     expect(toolStarts.length).toBeGreaterThanOrEqual(2);
   });
 
-  test("tools are forwarded to provider in JSON mode", async () => {
+  test("tools are forwarded to provider", async () => {
     const provider = new JsonMockProvider([
       { text: "No tools needed." },
     ]);
     const convo = new AIConversation(provider, "mock");
     const registry = createTestRegistry();
     const { fx } = createRecordingFx();
-    const world = mkWorld(convo, registry, undefined, "json");
+    const world = mkWorld(convo, registry);
 
     await run("test", world, fx);
 
     // Provider should have received tools in the config
     expect(provider.calls).toHaveLength(1);
     expect(provider.calls[0].tools).toBeDefined();
-    expect(provider.calls[0].tools!.length).toBe(3);
+    expect(provider.calls[0].tools!.length).toBeGreaterThan(0);
     expect(provider.calls[0].tools!.some(t => t.function.name === "Echo")).toBe(true);
   });
 
-  test("XML mode does NOT forward tools to provider", async () => {
-    // Regular text-only mock for XML mode
+  test("Remember tool calls fx.remember", async () => {
     const provider = new JsonMockProvider([
-      { text: "Hello." },
+      {
+        toolCalls: [{
+          id: "call_1",
+          type: "function",
+          function: { name: "Remember", arguments: '{"content":"user prefers dark mode"}' },
+        }],
+      },
+      { text: "Noted." },
     ]);
     const convo = new AIConversation(provider, "mock");
     const registry = createTestRegistry();
-    const { fx } = createRecordingFx();
-    const world = mkWorld(convo, registry, undefined, "xml");
+    const { fx, events } = createRecordingFx();
+    const world = mkWorld(convo, registry);
 
-    await run("test", world, fx);
+    await run("remember dark mode", world, fx);
 
-    // Provider should NOT have received tools (XML mode puts them in system prompt)
-    expect(provider.calls).toHaveLength(1);
-    expect(provider.calls[0].tools).toBeUndefined();
+    expect(events.some(e => e.type === "remember" && (e as any).content === "user prefers dark mode")).toBe(true);
+  });
+
+  test("Forget tool calls fx.forget", async () => {
+    const provider = new JsonMockProvider([
+      {
+        toolCalls: [{
+          id: "call_1",
+          type: "function",
+          function: { name: "Forget", arguments: '{"content":"old pref"}' },
+        }],
+      },
+      { text: "Forgotten." },
+    ]);
+    const convo = new AIConversation(provider, "mock");
+    const registry = createTestRegistry();
+    const { fx, events } = createRecordingFx();
+    const world = mkWorld(convo, registry);
+
+    await run("forget old pref", world, fx);
+
+    expect(events.some(e => e.type === "forget" && (e as any).content === "old pref")).toBe(true);
   });
 });

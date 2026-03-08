@@ -4,52 +4,93 @@ import type {
   AIRequestConfig,
   AIResponse,
   AIStreamChunk,
+  JsonToolCall,
+  ToolCallDelta,
 } from "../ai/types.ts";
 import { AIConversation } from "../ai/builder.ts";
 import { manageContextFork } from "./context-manager.ts";
 
 // ---------------------------------------------------------------------------
-// Mock provider for context manager
+// Mock provider for context manager — returns JSON tool calls
 // ---------------------------------------------------------------------------
+
+interface MockResponse {
+  text?: string;
+  toolCalls?: JsonToolCall[];
+}
+
+/** Shorthand to create a JsonToolCall */
+function tc(id: string, name: string, args: Record<string, string>): JsonToolCall {
+  return {
+    id,
+    type: "function",
+    function: { name, arguments: JSON.stringify(args) },
+  };
+}
 
 class MockProvider implements AIProvider {
   readonly name = "mock";
-  private responses: string[];
+  private responses: MockResponse[];
   private callIndex = 0;
 
-  constructor(responses: string[]) {
+  constructor(responses: MockResponse[]) {
     this.responses = responses;
   }
 
   async complete(config: AIRequestConfig): Promise<AIResponse> {
-    const content = this.responses[this.callIndex++] ?? "";
-    return { id: "mock", model: "mock", content, finishReason: "stop" };
+    const resp = this.responses[this.callIndex++] ?? {};
+    return {
+      id: "mock",
+      model: "mock",
+      content: resp.text ?? null,
+      finishReason: resp.toolCalls?.length ? "tool_calls" : "stop",
+      ...(resp.toolCalls && { toolCalls: resp.toolCalls }),
+    };
   }
 
   async *stream(config: AIRequestConfig): AsyncGenerator<AIStreamChunk, void, unknown> {
-    const content = this.responses[this.callIndex++] ?? "";
-    for (let i = 0; i < content.length; i += 10) {
+    const resp = this.responses[this.callIndex++] ?? {};
+
+    if (resp.text) {
+      for (let i = 0; i < resp.text.length; i += 10) {
+        yield {
+          id: "mock",
+          model: "mock",
+          delta: { content: resp.text.slice(i, i + 10) },
+          finishReason: null,
+        };
+      }
+    }
+
+    if (resp.toolCalls) {
+      const deltas: ToolCallDelta[] = resp.toolCalls.map((t, i) => ({
+        index: i,
+        id: t.id,
+        function: {
+          name: t.function.name,
+          arguments: t.function.arguments,
+        },
+      }));
       yield {
         id: "mock",
         model: "mock",
-        delta: { content: content.slice(i, i + 10) },
-        finishReason: null,
+        delta: { toolCalls: deltas },
+        finishReason: "tool_calls",
       };
+    } else {
+      yield { id: "mock", model: "mock", delta: {}, finishReason: "stop" };
     }
-    yield { id: "mock", model: "mock", delta: {}, finishReason: "stop" };
   }
 }
 
 describe("manageContextFork", () => {
   test("prunes messages marked for deletion", async () => {
     const provider = new MockProvider([
-      // The context manager will view some messages and delete them
-      '<tools><tool>DeleteMessages("1,2")</tool></tools>',
-      '<tools><tool>CompleteTask("Pruned 2 messages")</tool></tools>',
+      { toolCalls: [tc("c1", "DeleteMessages", { indexes: "1,2" })] },
+      { toolCalls: [tc("c2", "CompleteTask", { summary: "Pruned 2 messages" })] },
     ]);
 
     const convo = new AIConversation(provider, "m", "main system");
-    // Seed conversation history
     convo.setHistory([
       { role: "system", content: "system prompt" },       // #0 — never deleted
       { role: "user", content: "old question" },           // #1 — will be deleted
@@ -70,8 +111,8 @@ describe("manageContextFork", () => {
 
   test("cannot delete system message (index 0)", async () => {
     const provider = new MockProvider([
-      '<tools><tool>DeleteMessages("0,1")</tool></tools>',
-      '<tools><tool>CompleteTask("done")</tool></tools>',
+      { toolCalls: [tc("c1", "DeleteMessages", { indexes: "0,1" })] },
+      { toolCalls: [tc("c2", "CompleteTask", { summary: "done" })] },
     ]);
 
     const convo = new AIConversation(provider, "m");
@@ -90,7 +131,7 @@ describe("manageContextFork", () => {
 
   test("no deletions keeps all messages", async () => {
     const provider = new MockProvider([
-      '<tools><tool>CompleteTask("nothing to prune")</tool></tools>',
+      { toolCalls: [tc("c1", "CompleteTask", { summary: "nothing to prune" })] },
     ]);
 
     const convo = new AIConversation(provider, "m");
@@ -106,10 +147,9 @@ describe("manageContextFork", () => {
   });
 
   test("ViewMessage returns correct message content", async () => {
-    let viewedContent = "";
     const provider = new MockProvider([
-      '<tools><tool>ViewMessage("1")</tool></tools>',
-      '<tools><tool>CompleteTask("reviewed")</tool></tools>',
+      { toolCalls: [tc("c1", "ViewMessage", { index: "1" })] },
+      { toolCalls: [tc("c2", "CompleteTask", { summary: "reviewed" })] },
     ]);
 
     const convo = new AIConversation(provider, "m");
@@ -126,8 +166,8 @@ describe("manageContextFork", () => {
 
   test("returns summary string", async () => {
     const provider = new MockProvider([
-      '<tools><tool>DeleteMessages("1")</tool></tools>',
-      '<tools><tool>CompleteTask("cleaned up")</tool></tools>',
+      { toolCalls: [tc("c1", "DeleteMessages", { indexes: "1" })] },
+      { toolCalls: [tc("c2", "CompleteTask", { summary: "cleaned up" })] },
     ]);
 
     const convo = new AIConversation(provider, "m");

@@ -22,10 +22,3 @@ export interface ToolResult {
   output: string;
   success: boolean;
 }
-
-export interface ParsedResponse {
-  toolCalls: ToolCall[];
-  remembers: string[];
-  forgets: string[];
-  cleanText: string;
-}

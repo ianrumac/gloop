@@ -20,17 +20,7 @@ Guidelines:
 - When in doubt, keep the message
 - Be aggressive with large tool outputs that are no longer relevant
 
-To use tools, wrap them in a <tools>...</tools> block:
-<tools>
-    <tool>ViewMessage("3")</tool>
-</tools>
-
-Available tools:
-<tools>
-<tool name = "ViewMessage" description = "View the full content of a message by index", arguments = {"index":"Message index to view"}>
-<tool name = "DeleteMessages" description = "Mark messages for deletion by index (comma-separated)", arguments = {"indexes":"Comma-separated message indexes to delete"}>
-<tool name = "CompleteTask" description = "Finish context management with a summary", arguments = {"summary":"Brief summary of what was pruned"}>
-</tools>`;
+Tools are available as function calls. Use them to manage context.`;
 
 export async function manageContextFork(convo: AIConversation, instructions: string): Promise<string> {
   const history = convo.getHistory();

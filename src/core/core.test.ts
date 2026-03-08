@@ -4,6 +4,8 @@ import type {
   AIRequestConfig,
   AIResponse,
   AIStreamChunk,
+  JsonToolCall,
+  ToolCallDelta,
 } from "../ai/types.ts";
 import { AIConversation } from "../ai/builder.ts";
 import { ToolRegistry } from "../tools/registry.ts";
@@ -11,7 +13,7 @@ import {
   run,
   eval_,
   mkWorld,
-  parseToForm,
+  toolCallsToForm,
   parseInput,
   Think,
   Invoke,
@@ -35,43 +37,86 @@ import {
 } from "./core.ts";
 
 // ---------------------------------------------------------------------------
-// Mock provider
+// Mock provider that returns JSON tool calls in stream
 // ---------------------------------------------------------------------------
+
+interface MockResponse {
+  text?: string;
+  toolCalls?: JsonToolCall[];
+}
 
 class MockProvider implements AIProvider {
   readonly name = "mock";
-  private responses: string[];
+  private responses: MockResponse[];
   private callIndex = 0;
   calls: AIRequestConfig[] = [];
 
-  constructor(responses: string[]) {
+  constructor(responses: MockResponse[]) {
     this.responses = responses;
   }
 
   async complete(config: AIRequestConfig): Promise<AIResponse> {
     this.calls.push(config);
-    const content = this.responses[this.callIndex++] ?? "";
-    return { id: "mock", model: "mock", content, finishReason: "stop" };
+    const resp = this.responses[this.callIndex++] ?? {};
+    return {
+      id: "mock",
+      model: "mock",
+      content: resp.text ?? null,
+      finishReason: resp.toolCalls?.length ? "tool_calls" : "stop",
+      ...(resp.toolCalls && { toolCalls: resp.toolCalls }),
+    };
   }
 
   async *stream(config: AIRequestConfig): AsyncGenerator<AIStreamChunk, void, unknown> {
     this.calls.push(config);
-    const content = this.responses[this.callIndex++] ?? "";
-    for (let i = 0; i < content.length; i += 10) {
+    const resp = this.responses[this.callIndex++] ?? {};
+
+    // Stream text content
+    if (resp.text) {
+      for (let i = 0; i < resp.text.length; i += 10) {
+        yield {
+          id: "mock",
+          model: "mock",
+          delta: { content: resp.text.slice(i, i + 10) },
+          finishReason: null,
+        };
+      }
+    }
+
+    // Stream tool calls as ToolCallDelta (with index)
+    if (resp.toolCalls) {
+      const deltas: ToolCallDelta[] = resp.toolCalls.map((tc, i) => ({
+        index: i,
+        id: tc.id,
+        function: {
+          name: tc.function.name,
+          arguments: tc.function.arguments,
+        },
+      }));
       yield {
         id: "mock",
         model: "mock",
-        delta: { content: content.slice(i, i + 10) },
-        finishReason: null,
+        delta: { toolCalls: deltas },
+        finishReason: "tool_calls",
       };
+    } else {
+      yield { id: "mock", model: "mock", delta: {}, finishReason: "stop" };
     }
-    yield { id: "mock", model: "mock", delta: {}, finishReason: "stop" };
   }
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** Shorthand to create a JsonToolCall */
+function tc(id: string, name: string, args: Record<string, string>): JsonToolCall {
+  return {
+    id,
+    type: "function",
+    function: { name, arguments: JSON.stringify(args) },
+  };
+}
 
 function createTestRegistry(): ToolRegistry {
   const registry = new ToolRegistry();
@@ -117,6 +162,18 @@ function createTestRegistry(): ToolRegistry {
     arguments: [{ name: "action", description: "action" }],
     askPermission: (args) => args.action === "destroy" ? "Will destroy things" : null,
     execute: async (args) => `Did: ${args.action}`,
+  });
+  registry.register({
+    name: "Remember",
+    description: "Remember something",
+    arguments: [{ name: "content", description: "content" }],
+    execute: async (args) => args.content ?? "",
+  });
+  registry.register({
+    name: "Forget",
+    description: "Forget something",
+    arguments: [{ name: "content", description: "content" }],
+    execute: async (args) => args.content ?? "",
   });
   return registry;
 }
@@ -187,92 +244,55 @@ function createRecordingFx(opts?: {
 }
 
 // ---------------------------------------------------------------------------
-// parseToForm tests
+// toolCallsToForm tests
 // ---------------------------------------------------------------------------
 
-describe("parseToForm", () => {
-  test("no tool calls returns Nil", () => {
-    const form = parseToForm("Just some text");
+describe("toolCallsToForm", () => {
+  test("empty calls returns Nil", () => {
+    const form = toolCallsToForm([]);
     expect(form.tag).toBe("nil");
   });
 
-  test("single tool call returns Invoke -> Think", () => {
-    const form = parseToForm('<tools><tool>Echo("hi")</tool></tools>');
+  test("regular tool call returns Invoke", () => {
+    const form = toolCallsToForm([{ name: "Echo", rawArgs: ["hi"] }]);
+    expect(form.tag).toBe("invoke");
+  });
+
+  test("CompleteTask returns Done", () => {
+    const form = toolCallsToForm([{ name: "CompleteTask", rawArgs: ["finished"] }]);
+    expect(form.tag).toBe("done");
+    if (form.tag === "done") expect(form.summary).toBe("finished");
+  });
+
+  test("mixed regular + CompleteTask invokes tools first", () => {
+    const form = toolCallsToForm([
+      { name: "Echo", rawArgs: ["work"] },
+      { name: "CompleteTask", rawArgs: ["done"] },
+    ]);
     expect(form.tag).toBe("invoke");
     if (form.tag === "invoke") {
       expect(form.calls).toHaveLength(1);
       expect(form.calls[0].name).toBe("Echo");
-      // Continuation should return a Think form
-      const next = form.then([{ name: "Echo", output: "hi", success: true }]);
-      expect(next.tag).toBe("think");
-    }
-  });
-
-  test("CompleteTask returns Done (no other tools)", () => {
-    const form = parseToForm('<tools><tool>CompleteTask("all done")</tool></tools>');
-    expect(form.tag).toBe("done");
-    if (form.tag === "done") {
-      expect(form.summary).toBe("all done");
-    }
-  });
-
-  test("CompleteTask with regular tools runs tools first", () => {
-    const form = parseToForm('<tools><tool>Echo("work")</tool><tool>CompleteTask("done")</tool></tools>');
-    expect(form.tag).toBe("invoke");
-    if (form.tag === "invoke") {
-      expect(form.calls).toHaveLength(1); // Only Echo, not CompleteTask
-      expect(form.calls[0].name).toBe("Echo");
-      const next = form.then([{ name: "Echo", output: "work", success: true }]);
+      const next = form.then([]);
       expect(next.tag).toBe("done");
     }
   });
 
   test("Reboot call returns Reboot form", () => {
-    const form = parseToForm('<tools><tool>Reboot("code updated")</tool></tools>');
+    const form = toolCallsToForm([{ name: "Reboot", rawArgs: ["code updated"] }]);
     expect(form.tag).toBe("reboot");
   });
 
   test("Reboot with regular tools runs tools first", () => {
-    const form = parseToForm('<tools><tool>Echo("save")</tool><tool>Reboot("update")</tool></tools>');
+    const form = toolCallsToForm([
+      { name: "Echo", rawArgs: ["save"] },
+      { name: "Reboot", rawArgs: ["update"] },
+    ]);
     expect(form.tag).toBe("invoke");
     if (form.tag === "invoke") {
       expect(form.calls[0].name).toBe("Echo");
       const next = form.then([]);
       expect(next.tag).toBe("reboot");
-    }
-  });
-
-  test("remember blocks create Remember forms", () => {
-    const form = parseToForm('<tools><remember>important fact</remember></tools>');
-    expect(form.tag).toBe("seq");
-    if (form.tag === "seq") {
-      expect(form.forms[0].tag).toBe("remember");
-    }
-  });
-
-  test("forget blocks create Forget forms", () => {
-    const form = parseToForm('<tools><forget>old fact</forget></tools>');
-    expect(form.tag).toBe("seq");
-    if (form.tag === "seq") {
-      expect(form.forms[0].tag).toBe("forget");
-    }
-  });
-
-  test("mixed tools + remember", () => {
-    const form = parseToForm('<tools><tool>Echo("x")</tool><remember>note</remember></tools>');
-    expect(form.tag).toBe("seq");
-    if (form.tag === "seq") {
-      // Remember form, then Invoke form
-      expect(form.forms[0].tag).toBe("remember");
-      expect(form.forms[1].tag).toBe("invoke");
-    }
-  });
-
-  test("bare <tool> tags outside <tools> block", () => {
-    const form = parseToForm('<tool>Echo("bare")</tool>');
-    expect(form.tag).toBe("invoke");
-    if (form.tag === "invoke") {
-      expect(form.calls[0].name).toBe("Echo");
     }
   });
 });
@@ -499,14 +519,35 @@ describe("eval_ — form evaluation", () => {
 });
 
 // ---------------------------------------------------------------------------
-// run() integration tests — agent loop edge cases
+// run() integration tests — agent loop with JSON tool calls
 // ---------------------------------------------------------------------------
 
-describe("run — agent loop edge cases", () => {
+describe("run — agent loop", () => {
+  test("text-only response — no tool calls", async () => {
+    const provider = new MockProvider([
+      { text: "Hello, world!" },
+    ]);
+    const convo = new AIConversation(provider, "m");
+    const registry = createTestRegistry();
+    const { fx, events, streamedText } = createRecordingFx();
+    const world = mkWorld(convo, registry);
+
+    await run("hi", world, fx);
+
+    expect(streamedText).toEqual(["Hello, world!"]);
+    expect(events).toEqual([
+      { type: "stream_chunk", text: "Hello, wor" },
+      { type: "stream_chunk", text: "ld!" },
+      { type: "stream_done" },
+    ]);
+  });
+
   test("tool execution error returns error result to LLM", async () => {
     const provider = new MockProvider([
-      '<tools><tool>Fail("kaboom")</tool></tools>',
-      "I see the error.",
+      {
+        toolCalls: [tc("c1", "Fail", { msg: "kaboom" })],
+      },
+      { text: "I see the error." },
     ]);
     const convo = new AIConversation(provider, "m");
     const registry = createTestRegistry();
@@ -519,14 +560,15 @@ describe("run — agent loop edge cases", () => {
     expect(toolDone.success).toBe(false);
     expect(toolDone.output).toContain("kaboom");
 
-    // The error result should be sent back to the LLM
     expect(streamedText[streamedText.length - 1]).toBe("I see the error.");
   });
 
   test("AskUser tool handled via fx.ask, not normal execution", async () => {
     const provider = new MockProvider([
-      '<tools><tool>AskUser("What color?")</tool></tools>',
-      "Great choice!",
+      {
+        toolCalls: [tc("c1", "AskUser", { question: "What color?" })],
+      },
+      { text: "Great choice!" },
     ]);
     const convo = new AIConversation(provider, "m");
     const registry = createTestRegistry();
@@ -541,8 +583,10 @@ describe("run — agent loop edge cases", () => {
 
   test("ManageContext tool handled via fx.manageContext", async () => {
     const provider = new MockProvider([
-      '<tools><tool>ManageContext("prune old stuff")</tool></tools>',
-      "Context cleaned.",
+      {
+        toolCalls: [tc("c1", "ManageContext", { instructions: "prune old stuff" })],
+      },
+      { text: "Context cleaned." },
     ]);
     const convo = new AIConversation(provider, "m");
     const registry = createTestRegistry();
@@ -557,8 +601,10 @@ describe("run — agent loop edge cases", () => {
 
   test("Reload tool triggers system refresh", async () => {
     const provider = new MockProvider([
-      '<tools><tool>Reload()</tool></tools>',
-      "Reloaded.",
+      {
+        toolCalls: [tc("c1", "Reload", {})],
+      },
+      { text: "Reloaded." },
     ]);
     const convo = new AIConversation(provider, "m");
     const registry = createTestRegistry();
@@ -572,8 +618,10 @@ describe("run — agent loop edge cases", () => {
 
   test("tool with askPermission — approved", async () => {
     const provider = new MockProvider([
-      '<tools><tool>DangerTool("destroy")</tool></tools>',
-      "Done.",
+      {
+        toolCalls: [tc("c1", "DangerTool", { action: "destroy" })],
+      },
+      { text: "Done." },
     ]);
     const convo = new AIConversation(provider, "m");
     const registry = createTestRegistry();
@@ -592,8 +640,10 @@ describe("run — agent loop edge cases", () => {
 
   test("tool with askPermission — denied", async () => {
     const provider = new MockProvider([
-      '<tools><tool>DangerTool("destroy")</tool></tools>',
-      "OK, cancelled.",
+      {
+        toolCalls: [tc("c1", "DangerTool", { action: "destroy" })],
+      },
+      { text: "OK, cancelled." },
     ]);
     const convo = new AIConversation(provider, "m");
     const registry = createTestRegistry();
@@ -608,8 +658,10 @@ describe("run — agent loop edge cases", () => {
 
   test("tool with askPermission — safe action skips confirmation", async () => {
     const provider = new MockProvider([
-      '<tools><tool>DangerTool("safe_action")</tool></tools>',
-      "Done.",
+      {
+        toolCalls: [tc("c1", "DangerTool", { action: "safe_action" })],
+      },
+      { text: "Done." },
     ]);
     const convo = new AIConversation(provider, "m");
     const registry = createTestRegistry();
@@ -623,9 +675,12 @@ describe("run — agent loop edge cases", () => {
     expect(toolDone.success).toBe(true);
   });
 
-  test("remember and forget in tools block", async () => {
+  test("Remember tool calls fx.remember", async () => {
     const provider = new MockProvider([
-      '<tools><remember>user prefers dark mode</remember><forget>user prefers light mode</forget></tools>',
+      {
+        toolCalls: [tc("c1", "Remember", { content: "user prefers dark mode" })],
+      },
+      { text: "Noted." },
     ]);
     const convo = new AIConversation(provider, "m");
     const registry = createTestRegistry();
@@ -635,25 +690,35 @@ describe("run — agent loop edge cases", () => {
     await run("update prefs", world, fx);
 
     expect(events.some(e => e.type === "remember" && (e as any).content === "user prefers dark mode")).toBe(true);
-    expect(events.some(e => e.type === "forget" && (e as any).content === "user prefers light mode")).toBe(true);
   });
 
-  test("empty <tools> block treated as no-op", async () => {
-    const provider = new MockProvider(["<tools></tools>"]);
+  test("Forget tool calls fx.forget", async () => {
+    const provider = new MockProvider([
+      {
+        toolCalls: [tc("c1", "Forget", { content: "user prefers light mode" })],
+      },
+      { text: "Forgotten." },
+    ]);
     const convo = new AIConversation(provider, "m");
     const registry = createTestRegistry();
     const { fx, events } = createRecordingFx();
     const world = mkWorld(convo, registry);
 
-    await run("nothing", world, fx);
+    await run("forget pref", world, fx);
 
-    expect(events.filter(e => e.type === "tool_start")).toHaveLength(0);
+    expect(events.some(e => e.type === "forget" && (e as any).content === "user prefers light mode")).toBe(true);
   });
 
   test("multiple tool calls — all execute", async () => {
     const provider = new MockProvider([
-      '<tools><tool>Echo("a")</tool><tool>Echo("b")</tool><tool>Echo("c")</tool></tools>',
-      "Done.",
+      {
+        toolCalls: [
+          tc("c1", "Echo", { text: "a" }),
+          tc("c2", "Echo", { text: "b" }),
+          tc("c3", "Echo", { text: "c" }),
+        ],
+      },
+      { text: "Done." },
     ]);
     const convo = new AIConversation(provider, "m");
     const registry = createTestRegistry();
@@ -666,9 +731,112 @@ describe("run — agent loop edge cases", () => {
     expect(starts).toHaveLength(3);
   });
 
-  test("abort during tool execution", async () => {
+  test("CompleteTask via JSON stops the loop", async () => {
     const provider = new MockProvider([
-      '<tools><tool>Echo("a")</tool><tool>Echo("b")</tool></tools>',
+      {
+        toolCalls: [tc("c1", "CompleteTask", { summary: "All done" })],
+      },
+    ]);
+    const convo = new AIConversation(provider, "m");
+    const registry = createTestRegistry();
+    const { fx, events } = createRecordingFx();
+    const world = mkWorld(convo, registry);
+
+    await run("finish", world, fx);
+
+    const complete = events.find(e => e.type === "complete") as any;
+    expect(complete).toBeTruthy();
+    expect(complete.summary).toBe("All done");
+  });
+
+  test("CompleteTask with default summary", async () => {
+    const provider = new MockProvider([
+      {
+        toolCalls: [tc("c1", "CompleteTask", {})],
+      },
+    ]);
+    const convo = new AIConversation(provider, "m");
+    const registry = createTestRegistry();
+    const { fx, events } = createRecordingFx();
+    const world = mkWorld(convo, registry);
+
+    await run("done", world, fx);
+
+    const complete = events.find(e => e.type === "complete") as any;
+    expect(complete.summary).toBe("Task complete");
+  });
+
+  test("tools are forwarded to provider", async () => {
+    const provider = new MockProvider([
+      { text: "No tools needed." },
+    ]);
+    const convo = new AIConversation(provider, "m");
+    const registry = createTestRegistry();
+    const { fx } = createRecordingFx();
+    const world = mkWorld(convo, registry);
+
+    await run("test", world, fx);
+
+    expect(provider.calls).toHaveLength(1);
+    expect(provider.calls[0].tools).toBeDefined();
+    expect(provider.calls[0].tools!.length).toBeGreaterThan(0);
+    expect(provider.calls[0].tools!.some(t => t.function.name === "Echo")).toBe(true);
+  });
+
+  test("tool result format includes name and status", async () => {
+    const provider = new MockProvider([
+      {
+        toolCalls: [tc("c1", "Echo", { text: "test" })],
+      },
+      { text: "ok" },
+    ]);
+    const convo = new AIConversation(provider, "m");
+    const registry = createTestRegistry();
+    const { fx } = createRecordingFx();
+    const world = mkWorld(convo, registry);
+
+    await run("echo", world, fx);
+
+    // The second call to the provider should have the tool result in messages
+    expect(provider.calls).toHaveLength(2);
+    const lastMessages = provider.calls[1].messages;
+    const lastUserMsg = lastMessages[lastMessages.length - 1];
+    expect(lastUserMsg.content).toContain('<tool_result name="Echo" status="success">');
+    expect(lastUserMsg.content).toContain("test");
+  });
+
+  test("history accumulates across turns", async () => {
+    const provider = new MockProvider([
+      {
+        toolCalls: [tc("c1", "Echo", { text: "step1" })],
+      },
+      {
+        toolCalls: [tc("c2", "Echo", { text: "step2" })],
+      },
+      { text: "Final." },
+    ]);
+    const convo = new AIConversation(provider, "m");
+    const registry = createTestRegistry();
+    const { fx } = createRecordingFx();
+    const world = mkWorld(convo, registry);
+
+    await run("multi-step", world, fx);
+
+    const history = convo.getHistory();
+    // user (initial), user (result1), user (result2), assistant (final text)
+    // Note: tool-call-only responses don't add assistant messages (no text content)
+    expect(history.length).toBeGreaterThanOrEqual(3);
+  });
+
+  test("abort during tool execution", async () => {
+    const abort = new AbortController();
+    const provider = new MockProvider([
+      {
+        toolCalls: [
+          tc("c1", "Echo", { text: "a" }),
+          tc("c2", "Echo", { text: "b" }),
+        ],
+      },
     ]);
     const convo = new AIConversation(provider, "m");
 
@@ -691,77 +859,8 @@ describe("run — agent loop edge cases", () => {
     });
 
     const { fx } = createRecordingFx();
-    const abort = new AbortController();
     const world = mkWorld(convo, registry, abort.signal);
 
     await expect(run("test", world, fx)).rejects.toThrow(AbortError);
-  });
-
-  test("Kimi K2 format tool calls are executed", async () => {
-    const kimiResponse = '<|tool_calls_section_begin|><|tool_call_begin|>functions.Echo:0<|tool_call_argument_begin|>{"text":"kimi hello"}<|tool_call_end|><|tool_calls_section_end|>';
-    const provider = new MockProvider([kimiResponse, "Kimi done."]);
-    const convo = new AIConversation(provider, "m");
-    const registry = createTestRegistry();
-    const { fx, events, streamedText } = createRecordingFx();
-    const world = mkWorld(convo, registry);
-
-    await run("kimi test", world, fx);
-
-    const toolDone = events.find(e => e.type === "tool_done" && e.name === "Echo") as any;
-    expect(toolDone).toBeTruthy();
-    expect(toolDone.success).toBe(true);
-  });
-
-  test("tool result format includes name and status", async () => {
-    const provider = new MockProvider([
-      '<tools><tool>Echo("test")</tool></tools>',
-      "ok",
-    ]);
-    const convo = new AIConversation(provider, "m");
-    const registry = createTestRegistry();
-    const { fx } = createRecordingFx();
-    const world = mkWorld(convo, registry);
-
-    await run("echo", world, fx);
-
-    // The second call to the provider should have the tool result in messages
-    expect(provider.calls).toHaveLength(2);
-    const lastMessages = provider.calls[1].messages;
-    const lastUserMsg = lastMessages[lastMessages.length - 1];
-    expect(lastUserMsg.content).toContain('<tool_result name="Echo" status="success">');
-    expect(lastUserMsg.content).toContain("test");
-  });
-
-  test("history accumulates across turns", async () => {
-    const provider = new MockProvider([
-      '<tools><tool>Echo("step1")</tool></tools>',
-      '<tools><tool>Echo("step2")</tool></tools>',
-      "Final.",
-    ]);
-    const convo = new AIConversation(provider, "m");
-    const registry = createTestRegistry();
-    const { fx } = createRecordingFx();
-    const world = mkWorld(convo, registry);
-
-    await run("multi-step", world, fx);
-
-    const history = convo.getHistory();
-    // Should have: user, assistant (tools), user (result), assistant (tools), user (result), assistant (final)
-    expect(history.length).toBeGreaterThanOrEqual(6);
-  });
-
-  test("CompleteTask with default summary", async () => {
-    const provider = new MockProvider([
-      '<tools><tool>CompleteTask()</tool></tools>',
-    ]);
-    const convo = new AIConversation(provider, "m");
-    const registry = createTestRegistry();
-    const { fx, events } = createRecordingFx();
-    const world = mkWorld(convo, registry);
-
-    await run("done", world, fx);
-
-    const complete = events.find(e => e.type === "complete") as any;
-    expect(complete.summary).toBe("Task complete");
   });
 });

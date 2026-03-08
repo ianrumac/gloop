@@ -16,9 +16,6 @@ export interface ProviderRouting {
 
 // ---- JSON tool calling types (OpenRouter native format) ----
 
-/** Tool mode: "json" uses native OpenRouter tool calling, "xml" uses XML in system prompt */
-export type ToolMode = "json" | "xml";
-
 export interface JsonToolParameter {
   type: string;
   description?: string;
@@ -42,13 +39,23 @@ export interface JsonTool {
 
 export type ToolChoice = "auto" | "none" | "required" | { type: "function"; function: { name: string } };
 
-/** A tool call returned by the model in JSON mode */
+/** A completed tool call returned by the model */
 export interface JsonToolCall {
   id: string;
   type: "function";
   function: {
     name: string;
     arguments: string; // JSON-encoded arguments
+  };
+}
+
+/** A streaming tool call delta — partial data that must be accumulated by index */
+export interface ToolCallDelta {
+  index: number;
+  id?: string;
+  function: {
+    name?: string;
+    arguments?: string;
   };
 }
 
@@ -85,7 +92,7 @@ export interface AIStreamChunk {
   model: string;
   delta: {
     content?: string;
-    toolCalls?: JsonToolCall[];
+    toolCalls?: ToolCallDelta[];
   };
   finishReason: "stop" | "length" | "content_filter" | "tool_calls" | null;
   usage?: {
