@@ -75,3 +75,14 @@ export {
   parseInput,
   run,
 } from "./core/core.ts";
+
+// --- Defaults: batteries-included implementations ---
+export { createNodeIO } from "./defaults/io.ts";
+export { appendMemory, removeMemory, readMemory } from "./defaults/memory.ts";
+export { manageContextFork } from "./defaults/context-manager.ts";
+export { createEffects } from "./defaults/effects.ts";
+export type { DefaultEffectsOptions } from "./defaults/effects.ts";
+
+// --- AgentLoop: high-level entry point ---
+export { AgentLoop } from "./agent.ts";
+export type { AgentLoopOptions } from "./agent.ts";
