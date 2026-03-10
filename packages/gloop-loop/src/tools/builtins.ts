@@ -1,7 +1,4 @@
-import { randomUUID } from "crypto";
-import { unlink } from "fs/promises";
-import { tmpdir } from "os";
-import { join } from "path";
+import { applyPatches, parsePatch } from "diff";
 import type { ToolDefinition } from "./types.js";
 import type { ToolRegistry } from "./registry.js";
 import { createNodeIO } from "../defaults/io.js";
@@ -124,27 +121,55 @@ function _buildTools(io: BuiltinIO): ToolDefinition[] {
     },
   }, {
     name: "Patch_file",
-    description: "Apply a git-style unified diff patch to files in the current working directory",
-    arguments: [{ name: "patch", description: "The full git-style unified diff patch text to apply" }],
+    description: "Apply a unified diff patch to files. Supports both relative and absolute paths in patch headers.",
+    arguments: [{ name: "patch", description: "The full unified diff patch text to apply" }],
     execute: async (args) => {
       const patch = args.patch ?? "";
       if (!patch.trim()) {
         throw new Error("Patch_file requires a non-empty patch argument");
       }
 
-      const patchPath = join(tmpdir(), `gloop-patch-${randomUUID()}.diff`);
-      await io.writeFile(patchPath, patch.endsWith("\n") ? patch : `${patch}\n`);
-
-      const result = await io.exec(`git apply --whitespace=nowarn --recount ${patchPath}`);
-
-      await unlink(patchPath).catch(() => {});
-
-      if (result.exitCode !== 0) {
-        const details = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join("\n");
-        throw new Error(details || `git apply failed with exit code ${result.exitCode}`);
+      // Strip git-style a/ b/ prefixes from parsed patches so paths resolve correctly
+      const parsed = parsePatch(patch);
+      for (const file of parsed) {
+        if (file.oldFileName) file.oldFileName = file.oldFileName.replace(/^[ab]\//, "");
+        if (file.newFileName) file.newFileName = file.newFileName.replace(/^[ab]\//, "");
       }
 
-      return "Patch applied successfully.";
+      const applied: string[] = [];
+      const errors: string[] = [];
+
+      await new Promise<void>((resolve, reject) => {
+        applyPatches(parsed, {
+          loadFile(index, callback) {
+            const filePath = index.oldFileName ?? index.newFileName ?? "";
+            io.readFile(filePath)
+              .then(content => callback(null, content))
+              .catch(() => callback(null, "")); // new file — start empty
+          },
+          patched(index, content, callback) {
+            const filePath = index.newFileName ?? index.oldFileName ?? "";
+            if (content === false) {
+              errors.push(`Failed to apply patch to ${filePath}`);
+              callback(null);
+              return;
+            }
+            io.writeFile(filePath, content)
+              .then(() => { applied.push(filePath); callback(null); })
+              .catch(err => callback(err));
+          },
+          complete(err) {
+            if (err) reject(err);
+            else resolve();
+          },
+        });
+      });
+
+      if (errors.length > 0) {
+        throw new Error(errors.join("\n"));
+      }
+
+      return `Patch applied successfully to ${applied.length} file(s): ${applied.join(", ")}`;
     },
   }, {
     name: "Bash",

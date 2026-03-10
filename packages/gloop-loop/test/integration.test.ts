@@ -66,7 +66,7 @@ describe("integration — pizza delivery", () => {
           "You are a precise bug-fixing assistant. " +
           "Read the failing tests, trace failures to root causes in the source, fix only what's broken, " +
           "and verify your fix by running the tests. Be surgical — minimal changes only. " +
-          "Do NOT modify test files. " +
+          "Do NOT modify test files. Always use ABSOLUTE file paths. " +
           "When done, ALWAYS call the CompleteTask tool with a summary.",
         io,
         onStream: (text) => process.stderr.write(text),
