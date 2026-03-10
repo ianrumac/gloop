@@ -32,7 +32,7 @@ class MockProvider implements AIProvider {
 // ---------------------------------------------------------------------------
 
 describe("createEffects", () => {
-  function makeEffects(overrides?: Parameters<typeof createEffects>[0]) {
+  function makeEffects(overrides?: Partial<Parameters<typeof createEffects>[0]>) {
     const provider = new MockProvider();
     const convo = new AIConversation(provider, "m");
     const registry = new ToolRegistry();
