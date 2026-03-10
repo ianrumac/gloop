@@ -6,7 +6,7 @@
  *
  * @example
  * ```ts
- * import { AgentLoop, OpenRouterProvider } from "@anthropic/gloop-loop";
+ * import { AgentLoop, OpenRouterProvider } from "@ianrumac/gloop-loop";
  *
  * const agent = new AgentLoop({
  *   provider: new OpenRouterProvider({ apiKey: process.env.OPENROUTER_API_KEY! }),

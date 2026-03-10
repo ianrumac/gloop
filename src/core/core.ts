@@ -1,5 +1,5 @@
 /**
- * gloop core — Re-exports the core loop from @anthropic/gloop-loop
+ * gloop core — Re-exports the core loop from @ianrumac/gloop-loop
  * and provides gloop-specific wiring (debug logging, spawn classification).
  */
 
@@ -31,7 +31,7 @@ export {
   toolCallsToForm,
   formatResults,
   parseInput,
-} from "@anthropic/gloop-loop";
+} from "@ianrumac/gloop-loop";
 
 export type {
   Form,
@@ -40,7 +40,7 @@ export type {
   World,
   Effects,
   LoopConfig,
-} from "@anthropic/gloop-loop";
+} from "@ianrumac/gloop-loop";
 
 import {
   run as libRun,
@@ -48,7 +48,7 @@ import {
   type Effects,
   type LoopConfig,
   type ToolCall,
-} from "@anthropic/gloop-loop";
+} from "@ianrumac/gloop-loop";
 
 /** Gloop-specific spawn classifier: detects `gloop --task "..."` in Bash calls */
 function gloopClassifySpawn(call: ToolCall): string | null {

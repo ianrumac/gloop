@@ -1,5 +1,5 @@
 // ============================================================================
-// @anthropic/gloop-loop — A recursive Lisp-style agent loop for LLM agents
+// @ianrumac/gloop-loop — A recursive Lisp-style agent loop for LLM agents
 // ============================================================================
 
 // --- AI layer: provider interface, conversation, builder ---
