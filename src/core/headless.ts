@@ -15,6 +15,7 @@ import { buildSystemPrompt } from "./system.ts";
 import { enableDebug, debugLog } from "./debug.ts";
 import { loadRebootSession, saveRebootSession } from "./session.ts";
 import { run, mkWorld, type Effects } from "./core.ts";
+import { RebootError } from "../tools/builtins.ts";
 import { appendFileSync } from "fs";
 import { appendTaskPromptSuffix, runTaskSubagent } from "./task-mode.ts";
 import { installTool } from "../../bin/install-tool.ts";
@@ -192,21 +193,6 @@ const fx: Effects = {
     debugLog("SYSTEM", "System prompt refreshed");
   },
 
-  reboot: async (reason, c): Promise<never> => {
-    await saveRebootSession(c, reason);
-    logEvent({ type: "reboot", reason });
-    debugLog("REBOOT", `Restarting: ${reason}`);
-
-    // Re-exec headless with same args
-    const argv = process.argv;
-    Bun.spawn([argv[0]!, ...argv.slice(1)], {
-      stdio: ["inherit", "inherit", "inherit"],
-      env: process.env,
-      cwd: process.cwd(),
-    });
-    return process.exit(0) as never;
-  },
-
   manageContext: async (instructions) => {
     const { manageContextFork } = await import("./context-manager.ts");
     return manageContextFork(convo, instructions);
@@ -246,6 +232,18 @@ console.log(`instruction: ${instruction}\n`);
 try {
   await run(instruction, world, fx);
 } catch (err: unknown) {
+  if (err instanceof RebootError) {
+    await saveRebootSession(convo, err.reason);
+    logEvent({ type: "reboot", reason: err.reason });
+    debugLog("REBOOT", `Restarting: ${err.reason}`);
+    const argv = process.argv;
+    Bun.spawn([argv[0]!, ...argv.slice(1)], {
+      stdio: ["inherit", "inherit", "inherit"],
+      env: process.env,
+      cwd: process.cwd(),
+    });
+    process.exit(0);
+  }
   const msg = err instanceof Error ? err.message : String(err);
   console.error(`\n[error] ${msg}`);
   logEvent({ type: "error", message: msg });

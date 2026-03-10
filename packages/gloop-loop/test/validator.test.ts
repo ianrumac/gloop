@@ -1,6 +1,6 @@
 import { test, expect, describe } from "bun:test";
-import { requiresConfirmation } from "./validator.ts";
-import type { ToolCall } from "./types.ts";
+import { requiresConfirmation } from "../src/tools/validator.ts";
+import type { ToolCall } from "../src/tools/types.ts";
 
 describe("requiresConfirmation", () => {
   test("returns null for non-Bash tools", () => {

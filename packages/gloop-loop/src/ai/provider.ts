@@ -10,7 +10,7 @@ import type {
   StreamResult,
 } from "./types.ts";
 
-/** Convert our JsonTool definitions to SDK ManualTool objects for callModel() */
+/** Convert JsonTool definitions to SDK ManualTool objects for callModel() */
 function toSdkTools(jsonTools: JsonTool[]) {
   return jsonTools.map((jt) => {
     const shape: Record<string, z.ZodString> = {};
