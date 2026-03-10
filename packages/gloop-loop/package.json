@@ -19,7 +19,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@openrouter/sdk": "^0.8.0",
+    "@openrouter/sdk": "^0.9.11",
     "diff": "^8.0.3",
     "zod": "^4.3.6"
   },

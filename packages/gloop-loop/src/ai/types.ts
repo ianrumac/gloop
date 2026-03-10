@@ -94,6 +94,10 @@ export interface AIProviderConfig {
   apiKey: string;
   baseUrl?: string;
   defaultModel?: string;
+  /** Required for browser usage — identifies your app to OpenRouter */
+  httpReferer?: string;
+  /** Optional app name shown on OpenRouter dashboard */
+  xTitle?: string;
 }
 
 /** A value or a function that returns a value (resolved at query time). */
