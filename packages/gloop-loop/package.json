@@ -1,0 +1,32 @@
+{
+  "name": "@hypen-space/gloop-loop",
+  "version": "0.1.1",
+  "description": "A recursive Lisp-style agent loop for LLM tool-calling agents",
+  "type": "module",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "bun run build",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@openrouter/sdk": "^0.8.0",
+    "diff": "^8.0.3",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/diff": "^8.0.0",
+    "typescript": "^5"
+  },
+  "license": "MIT"
+}

@@ -1,7 +1,35 @@
 
-# gloop
+# gloop and gloop-loop
 
 Gloop is a self-modifying CLI agent with self-replication and OpenRouter support.
+Gloop loop is the core engine behind gloop — [read the full gloop-loop docs here](packages/gloop-loop/README.md).
+
+## Gloop loop quick start
+
+```bash
+npm install @hypen-space/gloop-loop
+# or
+pnpm add @hypen-space/gloop-loop
+# or
+bun add @hypen-space/gloop-loop
+```
+
+```ts
+import { AgentLoop, OpenRouterProvider } from "@hypen-space/gloop-loop";
+
+const agent = new AgentLoop({
+  provider: new OpenRouterProvider({ apiKey: process.env.OPENROUTER_API_KEY! }),
+  model: "anthropic/claude-sonnet-4",
+  system: "You are a helpful assistant.",
+});
+
+await agent.run("What files are in the current directory?");
+```
+
+
+## Gloop
+
+Now, about gloop
 
 > Huh? What? Self-modifying?
 

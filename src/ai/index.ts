@@ -3,18 +3,23 @@ export type {
   AIProviderConfig,
   AIRequestConfig,
   AIResponse,
-  AIStreamChunk,
+  StreamResult,
   Message,
   MessageRole,
   ProviderRouting,
   Lazy,
+  JsonTool,
+  JsonToolCall,
+  JsonToolFunction,
+  JsonToolParameter,
+  ToolChoice,
 } from "./types.ts";
 
 export { AI, AIBuilder, AIConversation } from "./builder.ts";
-export { OpenRouterProvider } from "./provider.ts";
+export { OpenRouterProvider } from "@hypen-space/gloop-loop";
 
 import { AI } from "./builder.ts";
-import { OpenRouterProvider } from "./provider.ts";
+import { OpenRouterProvider } from "@hypen-space/gloop-loop";
 
 export interface AIConfig {
   apiKey: string;

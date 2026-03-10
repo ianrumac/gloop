@@ -14,6 +14,7 @@ import { buildSystemPrompt } from "../src/core/system.ts";
 import { enableDebug, debugLog } from "../src/core/debug.ts";
 import { loadRebootSession, saveRebootSession } from "../src/core/session.ts";
 import { run, mkWorld, type Effects } from "../src/core/core.ts";
+import { RebootError } from "../src/tools/builtins.ts";
 import { parseTaskCliArgs, runTaskSubagent } from "../src/core/task-mode.ts";
 import { ensureSelfCopy } from "./self-copy.ts";
 import App from "../components/App.tsx";
@@ -51,7 +52,9 @@ if (taskRequest) {
 const debug = args.includes("--debug");
 const providerIdx = args.indexOf("--provider");
 const providerName = providerIdx !== -1 ? args[providerIdx + 1] : undefined;
-const model = args.find((a, i) => !a.startsWith("--") && i !== providerIdx + 1) ?? "x-ai/grok-4.1-fast";
+const model = args.find((a, i) =>
+  !a.startsWith("--") && i !== providerIdx + 1
+) ?? "x-ai/grok-4.1-fast";
 
 if (debug) enableDebug();
 
@@ -70,7 +73,7 @@ const reloadTool = registry.get("Reload");
 if (reloadTool) await reloadTool.execute({});
 
 // Build system prompt
-let systemPrompt = await buildSystemPrompt(registry, { clone });
+let systemPrompt = await buildSystemPrompt({ clone });
 debugLog("SYSTEM", systemPrompt);
 
 const convo = ai.conversation({ system: systemPrompt });
@@ -118,24 +121,10 @@ const { unmount } = render(
         },
 
         refreshSystem: async () => {
-          systemPrompt = await buildSystemPrompt(registry);
+          systemPrompt = await buildSystemPrompt({ clone });
           convo.setSystem(systemPrompt);
           ui.onSystemPromptRefreshed();
           debugLog("SYSTEM", "System prompt refreshed");
-        },
-
-        reboot: async (reason, c) => {
-          await saveRebootSession(c, reason);
-          debugLog("REBOOT", `Restarting: ${reason}`);
-
-          // Clean up ink and terminal
-          unmount();
-          if (process.stdin.isTTY) {
-            process.stdin.setRawMode(false);
-          }
-
-          // Exit with special code - launcher.ts will respawn us
-          process.exit(REBOOT_EXIT_CODE);
         },
 
         manageContext: async (instructions) => {
@@ -156,7 +145,20 @@ const { unmount } = render(
       };
 
       debugLog("USER", input);
-      await run(input, world, fx);
+      try {
+        await run(input, world, fx);
+      } catch (err) {
+        if (err instanceof RebootError) {
+          await saveRebootSession(convo, err.reason);
+          debugLog("REBOOT", `Restarting: ${err.reason}`);
+          unmount();
+          if (process.stdin.isTTY) {
+            process.stdin.setRawMode(false);
+          }
+          process.exit(REBOOT_EXIT_CODE);
+        }
+        throw err;
+      }
     },
   })
 );

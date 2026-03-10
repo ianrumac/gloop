@@ -3,45 +3,54 @@ import type {
   AIProvider,
   AIRequestConfig,
   AIResponse,
-  AIStreamChunk,
+  JsonToolCall,
+  StreamResult,
 } from "./src/ai/types.ts";
 import { AIConversation } from "./src/ai/builder.ts";
 import { ToolRegistry } from "./src/tools/registry.ts";
 import { run, mkWorld, type Effects, AbortError } from "./src/core/core.ts";
 
 // ---------------------------------------------------------------------------
-// Mock provider — returns pre-scripted responses as a stream
+// Mock provider — returns pre-scripted JSON tool call responses as a stream
 // ---------------------------------------------------------------------------
+
+interface MockResponse {
+  text?: string;
+  toolCalls?: JsonToolCall[];
+}
 
 class MockProvider implements AIProvider {
   readonly name = "mock";
-  private responses: string[];
+  private responses: MockResponse[];
   private callIndex = 0;
 
-  constructor(responses: string[]) {
+  constructor(responses: MockResponse[]) {
     this.responses = responses;
   }
 
   async complete(_config: AIRequestConfig): Promise<AIResponse> {
-    const content = this.responses[this.callIndex++] ?? "";
-    return { id: "mock", model: "mock", content, finishReason: "stop" };
-  }
-
-  async *stream(_config: AIRequestConfig): AsyncGenerator<AIStreamChunk, void, unknown> {
-    const content = this.responses[this.callIndex++] ?? "";
-    for (let i = 0; i < content.length; i += 10) {
-      yield {
-        id: "mock",
-        model: "mock",
-        delta: { content: content.slice(i, i + 10) },
-        finishReason: null,
-      };
-    }
-    yield {
+    const resp = this.responses[this.callIndex++] ?? {};
+    return {
       id: "mock",
       model: "mock",
-      delta: {},
-      finishReason: "stop",
+      content: resp.text ?? null,
+      finishReason: resp.toolCalls?.length ? "tool_calls" : "stop",
+      ...(resp.toolCalls && { toolCalls: resp.toolCalls }),
+    };
+  }
+
+  stream(_config: AIRequestConfig): StreamResult {
+    const resp = this.responses[this.callIndex++] ?? {};
+    const text = resp.text ?? "";
+    const textStream: AsyncIterableIterator<string> = (async function* () {
+      for (let i = 0; i < text.length; i += 10) {
+        yield text.slice(i, i + 10);
+      }
+    })();
+    return {
+      textStream,
+      toolCalls: Promise.resolve(resp.toolCalls ?? []),
+      cancel: async () => {},
     };
   }
 }
@@ -49,6 +58,15 @@ class MockProvider implements AIProvider {
 // ---------------------------------------------------------------------------
 // Helper: create a minimal registry with a test tool
 // ---------------------------------------------------------------------------
+
+/** Shorthand to create a JsonToolCall */
+function tc(id: string, name: string, args: Record<string, string>): JsonToolCall {
+  return {
+    id,
+    type: "function",
+    function: { name, arguments: JSON.stringify(args) },
+  };
+}
 
 function createTestRegistry(): ToolRegistry {
   const registry = new ToolRegistry();
@@ -107,7 +125,6 @@ function createRecordingFx(opts?: { confirmResult?: boolean; askAnswer?: string 
     remember: async (content) => { events.push({ type: "remember", content }); },
     forget: async (content) => { events.push({ type: "forget", content }); },
     refreshSystem: async () => { events.push({ type: "system_refreshed" }); },
-    reboot: async () => { throw new Error("unreachable"); },
     manageContext: async () => "pruned",
     complete(summary) { events.push({ type: "complete", summary }); },
     installTool: async () => "installed",
@@ -123,7 +140,7 @@ function createRecordingFx(opts?: { confirmResult?: boolean; askAnswer?: string 
 // ---------------------------------------------------------------------------
 
 test("plain text response — single stream, no tools", async () => {
-  const provider = new MockProvider(["Hello, world!"]);
+  const provider = new MockProvider([{ text: "Hello, world!" }]);
   const convo = new AIConversation(provider, "mock");
   const registry = createTestRegistry();
   const { fx, events, streamedText } = createRecordingFx();
@@ -137,8 +154,11 @@ test("plain text response — single stream, no tools", async () => {
 
 test("single tool call — tool_start/tool_done around execution", async () => {
   const provider = new MockProvider([
-    'Let me echo that. <tools><tool>Echo("hello")</tool></tools>',
-    "Done echoing.",
+    {
+      text: "Let me echo that.",
+      toolCalls: [tc("c1", "Echo", { text: "hello" })],
+    },
+    { text: "Done echoing." },
   ]);
   const convo = new AIConversation(provider, "mock");
   const registry = createTestRegistry();
@@ -162,8 +182,14 @@ test("single tool call — tool_start/tool_done around execution", async () => {
 
 test("multiple tool calls in one response", async () => {
   const provider = new MockProvider([
-    'I\'ll echo twice. <tools><tool>Echo("one")</tool> <tool>Echo("two")</tool></tools>',
-    "Both echoed.",
+    {
+      text: "I'll echo twice.",
+      toolCalls: [
+        tc("c1", "Echo", { text: "one" }),
+        tc("c2", "Echo", { text: "two" }),
+      ],
+    },
+    { text: "Both echoed." },
   ]);
   const convo = new AIConversation(provider, "mock");
   const registry = createTestRegistry();
@@ -185,9 +211,9 @@ test("multiple tool calls in one response", async () => {
 
 test("multi-turn tool loop", async () => {
   const provider = new MockProvider([
-    '<tools><tool>Echo("step 1")</tool></tools>',
-    '<tools><tool>Echo("step 2")</tool></tools>',
-    "All steps done.",
+    { toolCalls: [tc("c1", "Echo", { text: "step 1" })] },
+    { toolCalls: [tc("c2", "Echo", { text: "step 2" })] },
+    { text: "All steps done." },
   ]);
   const convo = new AIConversation(provider, "mock");
   const registry = createTestRegistry();
@@ -212,8 +238,11 @@ test("multi-turn tool loop", async () => {
 
 test("CompleteTask stops the loop", async () => {
   const provider = new MockProvider([
-    '<tools><tool>Echo("work")</tool></tools>',
-    'All done. <tools><tool>CompleteTask("Finished the task")</tool></tools>',
+    { toolCalls: [tc("c1", "Echo", { text: "work" })] },
+    {
+      text: "All done.",
+      toolCalls: [tc("c2", "CompleteTask", { summary: "Finished the task" })],
+    },
   ]);
   const convo = new AIConversation(provider, "mock");
   const registry = createTestRegistry();
@@ -228,8 +257,8 @@ test("CompleteTask stops the loop", async () => {
 
 test("unknown tool returns error", async () => {
   const provider = new MockProvider([
-    '<tools><tool>NonExistent("arg")</tool></tools>',
-    "Oh well.",
+    { toolCalls: [tc("c1", "NonExistent", { arg: "value" })] },
+    { text: "Oh well." },
   ]);
   const convo = new AIConversation(provider, "mock");
   const registry = createTestRegistry();
@@ -244,7 +273,7 @@ test("unknown tool returns error", async () => {
 });
 
 test("abort signal stops execution", async () => {
-  const provider = new MockProvider(["Hello, world!"]);
+  const provider = new MockProvider([{ text: "Hello, world!" }]);
   const convo = new AIConversation(provider, "mock");
   const registry = createTestRegistry();
   const { fx } = createRecordingFx();
