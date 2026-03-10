@@ -6,26 +6,33 @@
  *
  * @example
  * ```ts
- * import { AgentLoop, OpenRouterProvider } from "@ianrumac/gloop-loop";
+ * import { AgentLoop, OpenRouterProvider, primitiveTools } from "@hypen-space/gloop-loop";
  *
+ * // All builtins included by default (no tools passed)
  * const agent = new AgentLoop({
  *   provider: new OpenRouterProvider({ apiKey: process.env.OPENROUTER_API_KEY! }),
  *   model: "anthropic/claude-sonnet-4",
  *   system: "You are a helpful coding assistant.",
  * });
  *
+ * // Or: builtins + custom tools
+ * const agent2 = new AgentLoop({
+ *   provider: new OpenRouterProvider({ apiKey: process.env.OPENROUTER_API_KEY! }),
+ *   model: "anthropic/claude-sonnet-4",
+ *   tools: [...primitiveTools(), { name: "MyTool", ... }],
+ * });
+ *
  * await agent.run("What files are in the current directory?");
  * ```
  */
 
-import type { AIProvider } from "./ai/types.ts";
-import { AI, type AIConversation } from "./ai/builder.ts";
-import { ToolRegistry } from "./tools/registry.ts";
-import { registerBuiltins, type BuiltinIO } from "./tools/builtins.ts";
-import type { ToolDefinition } from "./tools/types.ts";
-import { run, mkWorld, type Effects, type LoopConfig, type World, AbortError } from "./core/core.ts";
-import { createNodeIO } from "./defaults/io.ts";
-import { createEffects, type DefaultEffectsOptions } from "./defaults/effects.ts";
+import type { AIProvider } from "./ai/types.js";
+import { AI, type AIConversation } from "./ai/builder.js";
+import { ToolRegistry } from "./tools/registry.js";
+import { primitiveTools, type BuiltinIO } from "./tools/builtins.js";
+import type { ToolDefinition } from "./tools/types.js";
+import { run, mkWorld, type Effects, type LoopConfig, type World, AbortError } from "./core/core.js";
+import { createEffects, type DefaultEffectsOptions } from "./defaults/effects.js";
 
 // ============================================================================
 // Configuration
@@ -38,9 +45,9 @@ export interface AgentLoopOptions {
   model: string;
   /** System prompt */
   system?: string;
-  /** Custom BuiltinIO implementation. Default: Node.js fs + child_process */
+  /** Custom BuiltinIO for primitiveTools(). Only used when tools is not provided. */
   io?: BuiltinIO;
-  /** Additional tools to register beyond the builtins */
+  /** Tools to use. Overrides defaults. Use [...primitiveTools(), ...yourTools] to keep builtins. */
   tools?: ToolDefinition[];
 
   // --- Effect overrides (all optional) ---
@@ -88,16 +95,11 @@ export class AgentLoop {
   private loopConfig: LoopConfig;
 
   constructor(opts: AgentLoopOptions) {
-    // 1. Build tool registry
+    // 1. Build tool registry — tools override defaults entirely
     this.registry = new ToolRegistry();
-    const io = opts.io ?? createNodeIO();
-    registerBuiltins(this.registry, io);
-
-    // Register any extra tools
-    if (opts.tools) {
-      for (const tool of opts.tools) {
-        this.registry.register(tool);
-      }
+    const tools = opts.tools ?? primitiveTools(opts.io);
+    for (const tool of tools) {
+      this.registry.register(tool);
     }
 
     // 2. Build conversation

@@ -8,7 +8,7 @@
 import { readFile, writeFile, mkdir, access } from "node:fs/promises";
 import { exec as cpExec } from "node:child_process";
 import { dirname } from "node:path";
-import type { BuiltinIO, ShellResult } from "../tools/builtins.ts";
+import type { BuiltinIO, ShellResult } from "../tools/builtins.js";
 
 const DEFAULT_TIMEOUT = 120_000; // 2 minutes
 const MAX_OUTPUT = 100_000; // 100KB per stream

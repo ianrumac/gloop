@@ -16,10 +16,10 @@ export type {
 } from "./types.ts";
 
 export { AI, AIBuilder, AIConversation } from "./builder.ts";
-export { OpenRouterProvider } from "@ianrumac/gloop-loop";
+export { OpenRouterProvider } from "@hypen-space/gloop-loop";
 
 import { AI } from "./builder.ts";
-import { OpenRouterProvider } from "@ianrumac/gloop-loop";
+import { OpenRouterProvider } from "@hypen-space/gloop-loop";
 
 export interface AIConfig {
   apiKey: string;

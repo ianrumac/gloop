@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useMemo } from 'react';
 import { Terminal, Zap, Code2, Brain, GitBranch, Infinity, BookOpen, Type, ArrowRight, CornerRightDown, Copy, Check, Wrench, Globe, GitFork, Cpu } from 'lucide-react';
 import { Button } from './components/Button';
 import './index.css';
@@ -21,6 +21,46 @@ function step(world: World, form: Form): Form {
 
 // eval = repeat(step) until done
 `;
+
+const models = [
+  "arcee-ai/trinity-large-preview:free",
+  "minimax/minimax-m2.5",
+  "google/gemini-3-flash-preview",
+  "deepseek/deepseek-v3.2",
+  "stepfun/step-3.5-flash:free",
+  "anthropic/claude-opus-4.6",
+  "anthropic/claude-sonnet-4.6",
+  "moonshotai/kimi-k2.5",
+  "x-ai/grok-4.1-fast",
+  "google/gemini-2.5-flash",
+];
+
+function buildLoopExample(model: string) {
+  return `import { AgentLoop, OpenRouterProvider,
+  primitiveTools } from "@hypen-space/gloop-loop";
+
+const agent = new AgentLoop({
+  provider: new OpenRouterProvider(),
+  model: "${model}",
+  system: "You are a deploy bot.",
+  // primitiveTools() = file I/O, shell, memory
+  tools: [
+    ...primitiveTools(),
+    {
+      name: "Deploy",
+      description: "Deploy the app",
+      arguments: [
+        { name: "env", description: "target" },
+      ],
+      execute: async (args) =>
+        "Deployed to " + args.env,
+    },
+  ],
+});
+
+await agent.run("Deploy to staging");
+`;
+}
 
 // Simple token-based syntax highlighter that doesn't break itself
 function highlightCode(code: string): string {
@@ -65,9 +105,9 @@ function highlightLine(line: string): string {
       const word = line.slice(i, end);
       
       // Classify the word
-      if (['type', 'function', 'switch', 'case', 'return'].includes(word)) {
+      if (['type', 'function', 'switch', 'case', 'return', 'import', 'from', 'const', 'new', 'await', 'async', 'export'].includes(word)) {
         result += `<span class="code-keyword">${word}</span>`;
-      } else if (['Form', 'World', 'Record', 'string', 'any'].includes(word)) {
+      } else if (['Form', 'World', 'Record', 'string', 'any', 'AgentLoop', 'OpenRouterProvider'].includes(word)) {
         result += `<span class="code-type">${word}</span>`;
       } else {
         result += `<span class="code-ident">${word}</span>`;
@@ -174,6 +214,11 @@ function App() {
   const [text, setText] = useState('');
   const fullText = 'function eval(form, world) { return eval(step(form, world), world); }';
 
+  const formattedLoopExample = useMemo(() => {
+    const model = models[Math.floor(Math.random() * models.length)];
+    return highlightCode(buildLoopExample(model));
+  }, []);
+
   useEffect(() => {
     let i = 0;
     const interval = setInterval(() => {
@@ -203,22 +248,23 @@ function App() {
 
       {/* Hero Content */}
       <main>
-        <section className="grid md:grid-cols-2 border-b-4 border-foreground min-h-[80vh]">
+        {/* TOP HALF — GLOOP */}
+        <section className="grid md:grid-cols-2 border-b-4 border-foreground min-h-[50vh]">
           <div className="p-8 md:p-16 flex flex-col justify-center border-b-4 md:border-b-0 md:border-r-4 border-foreground tech-grid relative">
             <div className="absolute top-0 right-0 w-16 h-16 border-b-4 border-l-4 border-foreground bg-accent"></div>
-            
+
             <div className="space-y-8 animate-fade-up">
               <div className="inline-flex items-center gap-2 border-2 border-foreground bg-background px-3 py-1 font-mono text-xs font-bold uppercase w-fit">
                 <div className="w-2 h-2 bg-accent animate-pulse"></div>
                 RECURSIVE AI AGENT
               </div>
-              
+
               <h1 className="text-6xl md:text-7xl lg:text-8xl font-bold tracking-tighter leading-[0.85] uppercase">
                 Gloop
               </h1>
-              
+
               <p className="text-xl md:text-2xl font-medium max-w-md leading-relaxed">
-                A self-modifying AI agent that thinks in pure functions. 
+                A self-modifying AI agent that thinks in pure functions.
                 Edits its own code. Manages its own memory. Runs in your terminal.
               </p>
 
@@ -248,13 +294,70 @@ function App() {
             <div className="flex justify-between items-center mb-8 border-b-2 border-background/20 pb-4">
               <span className="font-mono text-sm tracking-widest text-[#F0B323]">SRC/CORE.TS</span>
             </div>
-            {/* Code block with syntax highlighting */}
             <pre className="font-mono text-sm md:text-base leading-relaxed overflow-x-auto text-[#666666]">
               <code className="font-mono whitespace-pre" dangerouslySetInnerHTML={{ __html: formattedCode }} />
             </pre>
             <div className="mt-auto pt-8 flex items-center gap-4">
               <div className="h-[2px] w-full bg-background/20"></div>
               <span className="font-mono text-xs whitespace-nowrap text-[#FF5900]">EVALUATION COMPLETE</span>
+            </div>
+          </div>
+        </section>
+
+        {/* BOTTOM HALF — GLOOP-LOOP */}
+        <section className="grid md:grid-cols-2 border-b-4 border-foreground min-h-[50vh]">
+          <div className="p-8 md:p-16 flex flex-col justify-center border-b-4 md:border-b-0 md:border-r-4 border-foreground relative">
+            <div className="absolute bottom-0 left-0 w-12 h-12 border-t-4 border-r-4 border-foreground bg-[#F0B323]"></div>
+
+            <div className="space-y-8">
+              <div className="inline-flex items-center gap-2 border-2 border-foreground bg-background px-3 py-1 font-mono text-xs font-bold uppercase w-fit">
+                <div className="w-2 h-2 bg-[#F0B323] animate-pulse"></div>
+                NPM PACKAGE
+              </div>
+
+              <h2 className="text-5xl md:text-6xl lg:text-7xl font-bold tracking-tighter leading-[0.85] uppercase">
+                Gloop<br/><span className="text-[#F0B323]">Loop</span>
+              </h2>
+
+              <p className="text-xl md:text-2xl font-medium max-w-md leading-relaxed">
+                The recursive agent loop, extracted as a library.
+                3 lines to a working AI agent. All defaults overridable.
+              </p>
+
+              <div className="space-y-3 pt-4 border-t-4 border-foreground max-w-md">
+                <div className="font-mono text-sm flex items-start gap-3">
+                  <span className="text-accent font-bold shrink-0">01</span>
+                  <span>Built-in tools: file I/O, shell, memory, context management</span>
+                </div>
+                <div className="font-mono text-sm flex items-start gap-3">
+                  <span className="text-accent font-bold shrink-0">02</span>
+                  <span>Works with any OpenAI-compatible provider via OpenRouter</span>
+                </div>
+                <div className="font-mono text-sm flex items-start gap-3">
+                  <span className="text-accent font-bold shrink-0">03</span>
+                  <span>Inject custom tools, effects, I/O, and memory backends</span>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap gap-4 pt-4">
+                <CopyBlock text="npm install @hypen-space/gloop-loop" />
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-foreground text-background p-8 md:p-16 flex flex-col relative overflow-hidden">
+            <div className="absolute top-4 right-4 text-muted/20">
+              <Code2 className="w-24 h-24" />
+            </div>
+            <div className="flex justify-between items-center mb-8 border-b-2 border-background/20 pb-4">
+              <span className="font-mono text-sm tracking-widest text-[#F0B323]">YOUR-APP.TS</span>
+            </div>
+            <pre className="font-mono text-sm md:text-base leading-relaxed overflow-x-auto text-[#666666]">
+              <code className="font-mono whitespace-pre" dangerouslySetInnerHTML={{ __html: formattedLoopExample }} />
+            </pre>
+            <div className="mt-auto pt-8 flex items-center gap-4">
+              <div className="h-[2px] w-full bg-background/20"></div>
+              <span className="font-mono text-xs whitespace-nowrap text-[#F0B323]">READY TO LOOP</span>
             </div>
           </div>
         </section>

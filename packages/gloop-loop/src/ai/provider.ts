@@ -8,7 +8,7 @@ import type {
   JsonTool,
   JsonToolCall,
   StreamResult,
-} from "./types.ts";
+} from "./types.js";
 
 /** Convert JsonTool definitions to SDK ManualTool objects for callModel() */
 function toSdkTools(jsonTools: JsonTool[]) {
@@ -50,7 +50,7 @@ export class OpenRouterProvider implements AIProvider {
       ...(config.frequencyPenalty !== undefined && { frequencyPenalty: config.frequencyPenalty }),
       ...(config.presencePenalty !== undefined && { presencePenalty: config.presencePenalty }),
       ...(config.provider && { provider: config.provider }),
-      ...(config.toolChoice !== undefined && { toolChoice: config.toolChoice }),
+      ...(config.toolChoice !== undefined && { toolChoice: config.toolChoice as any }),
     });
 
     const [text, response] = await Promise.all([
@@ -92,7 +92,7 @@ export class OpenRouterProvider implements AIProvider {
       ...(config.frequencyPenalty !== undefined && { frequencyPenalty: config.frequencyPenalty }),
       ...(config.presencePenalty !== undefined && { presencePenalty: config.presencePenalty }),
       ...(config.provider && { provider: config.provider }),
-      ...(config.toolChoice !== undefined && { toolChoice: config.toolChoice }),
+      ...(config.toolChoice !== undefined && { toolChoice: config.toolChoice as any }),
     });
 
     const textStream = result.getTextStream();

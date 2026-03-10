@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { jsonToolCallsToToolCalls } from "../src/tools/parser.ts";
+import { jsonToolCallsToToolCalls } from "../src/tools/parser.js";
 
 describe("jsonToolCallsToToolCalls", () => {
   test("converts single tool call with JSON args", () => {

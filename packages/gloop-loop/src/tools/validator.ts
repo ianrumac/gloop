@@ -1,4 +1,4 @@
-import type { ToolCall } from "./types.ts";
+import type { ToolCall } from "./types.js";
 
 /** Patterns that require user confirmation before execution */
 const DANGEROUS_PATTERNS = [

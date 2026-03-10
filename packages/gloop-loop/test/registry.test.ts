@@ -1,6 +1,6 @@
 import { test, expect, describe } from "bun:test";
-import { ToolRegistry } from "../src/tools/registry.ts";
-import type { ToolDefinition } from "../src/tools/types.ts";
+import { ToolRegistry } from "../src/tools/registry.js";
+import type { ToolDefinition } from "../src/tools/types.js";
 
 function makeTool(name: string, args: string[] = []): ToolDefinition {
   return {

@@ -3,9 +3,9 @@
  * and replace pruned messages with a condensed summary.
  */
 
-import type { AIConversation } from "../ai/builder.ts";
-import { ToolRegistry } from "../tools/registry.ts";
-import { run, mkWorld, type Effects } from "../core/core.ts";
+import type { AIConversation } from "../ai/builder.js";
+import { ToolRegistry } from "../tools/registry.js";
+import { run, mkWorld, type Effects } from "../core/core.js";
 
 const CONTEXT_MANAGER_SYSTEM_PROMPT = `You are a context manager. Your job is to review the conversation history, delete messages that are no longer useful, and produce a condensed summary of the deleted content.
 

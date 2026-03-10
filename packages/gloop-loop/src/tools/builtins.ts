@@ -2,8 +2,9 @@ import { randomUUID } from "crypto";
 import { unlink } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
-import type { ToolDefinition } from "./types.ts";
-import type { ToolRegistry } from "./registry.ts";
+import type { ToolDefinition } from "./types.js";
+import type { ToolRegistry } from "./registry.js";
+import { createNodeIO } from "../defaults/io.js";
 
 // ---------------------------------------------------------------------------
 // IO interface — abstracts runtime-specific file and process operations
@@ -54,26 +55,39 @@ export function formatShellResult(result: ShellResult): string {
 }
 
 // ---------------------------------------------------------------------------
-// registerBuiltins — register all portable builtin tools
+// primitiveTools — returns the builtin tool definitions as an array
+// ---------------------------------------------------------------------------
+
+export function primitiveTools(io?: BuiltinIO): ToolDefinition[] {
+  return _buildTools(io ?? createNodeIO());
+}
+
+// ---------------------------------------------------------------------------
+// registerBuiltins — register all portable builtin tools on a registry
 // ---------------------------------------------------------------------------
 
 export function registerBuiltins(
   registry: ToolRegistry,
   io: BuiltinIO,
 ): void {
-  registry.register({
+  for (const tool of _buildTools(io)) {
+    registry.register(tool);
+  }
+}
+
+function _buildTools(io: BuiltinIO): ToolDefinition[] {
+  return [{
     name: "ReadFile",
     description: "Read a file from the filesystem",
     arguments: [{ name: "path", description: "The path to the file to read" }],
     execute: async (args) => {
-      if (!(await io.fileExists(args.path))) {
-        throw new Error(`File not found: ${args.path}`);
+      const path = args.path!;
+      if (!(await io.fileExists(path))) {
+        throw new Error(`File not found: ${path}`);
       }
-      return await io.readFile(args.path);
+      return await io.readFile(path);
     },
-  });
-
-  registry.register({
+  }, {
     name: "WriteFile",
     description:
       "Write LITERAL file content to a file. The content argument MUST be the complete, exact text to write — NOT a description or instruction of what to write. For example: WriteFile(\"foo.ts\", \"export const x = 1;\\n\") is correct. WriteFile(\"foo.ts\", \"Add an export\") is WRONG — that would write the literal string 'Add an export' into the file.",
@@ -86,8 +100,8 @@ export function registerBuiltins(
       },
     ],
     execute: async (args) => {
-      const content = args.content;
-      const path = args.path;
+      const content = args.content!;
+      const path = args.path!;
 
       // Guard: if the file already exists and new content is suspiciously short,
       // it's likely the model passed a description instead of real content.
@@ -108,9 +122,7 @@ export function registerBuiltins(
       await io.writeFile(path, content);
       return `Successfully wrote ${content.length} bytes to ${path}`;
     },
-  });
-
-  registry.register({
+  }, {
     name: "Patch_file",
     description: "Apply a git-style unified diff patch to files in the current working directory",
     arguments: [{ name: "patch", description: "The full git-style unified diff patch text to apply" }],
@@ -134,9 +146,7 @@ export function registerBuiltins(
 
       return "Patch applied successfully.";
     },
-  });
-
-  registry.register({
+  }, {
     name: "Bash",
     description:
       "Execute a command in the shell. For long-running commands (servers/watchers), run them in the background (e.g. `... > /tmp/file.log 2>&1 &`) and then inspect logs in follow-up commands so the session does not block.",
@@ -162,12 +172,10 @@ export function registerBuiltins(
         timeoutMs = parsed;
       }
 
-      const result = await io.exec(args.command, timeoutMs);
+      const result = await io.exec(args.command!, timeoutMs);
       return formatShellResult(result);
     },
-  });
-
-  registry.register({
+  }, {
     name: "CompleteTask",
     description:
       "Call this tool when you have finished the user's task. Provide a short summary of what you did. This hands control back to the user.",
@@ -177,9 +185,7 @@ export function registerBuiltins(
     execute: async (args) => {
       return args.summary || "Task complete.";
     },
-  });
-
-  registry.register({
+  }, {
     name: "AskUser",
     description:
       "Ask the user a question and wait for their response. Use this when you need clarification, a decision, or any input from the user before continuing.",
@@ -189,9 +195,7 @@ export function registerBuiltins(
     execute: async (args) => {
       return args.question || "What would you like to do?";
     },
-  });
-
-  registry.register({
+  }, {
     name: "Remember",
     description:
       "Store a short note in persistent memory. Use this to remember things about the system, projects, tools, user preferences, or yourself. Store short notes only — never raw command output, full files, or long logs.",
@@ -199,9 +203,7 @@ export function registerBuiltins(
       { name: "content", description: "The short note to remember" },
     ],
     execute: async (args) => args.content || "",
-  });
-
-  registry.register({
+  }, {
     name: "Forget",
     description:
       "Remove a previously stored note from persistent memory. Use this to clear outdated or incorrect information.",
@@ -209,9 +211,7 @@ export function registerBuiltins(
       { name: "content", description: "The note to forget (must match what was previously remembered)" },
     ],
     execute: async (args) => args.content || "",
-  });
-
-  registry.register({
+  }, {
     name: "ManageContext",
     description:
       "Start a context management session to review and prune conversation history. Call when context is getting long or cluttered with old tool results.",
@@ -219,5 +219,5 @@ export function registerBuiltins(
       { name: "instructions", description: "What to focus on when pruning (e.g. 'remove old file reads', 'keep everything about auth')" },
     ],
     execute: async (args) => args.instructions || "Prune stale messages",
-  });
+  }];
 }

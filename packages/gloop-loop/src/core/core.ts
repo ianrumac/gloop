@@ -8,12 +8,12 @@
  * The interpreter evaluates forms, producing new forms, until termination.
  */
 
-import type { AIConversation } from "../ai/builder.ts";
-import type { JsonToolCall } from "../ai/types.ts";
-import type { ToolRegistry } from "../tools/registry.ts";
-import type { ToolCall, ToolResult } from "../tools/types.ts";
-import { jsonToolCallsToToolCalls } from "../tools/parser.ts";
-import { requiresConfirmation } from "../tools/validator.ts";
+import type { AIConversation } from "../ai/builder.js";
+import type { JsonToolCall } from "../ai/types.js";
+import type { ToolRegistry } from "../tools/registry.js";
+import type { ToolCall, ToolResult } from "../tools/types.js";
+import { jsonToolCallsToToolCalls } from "../tools/parser.js";
+import { requiresConfirmation } from "../tools/validator.js";
 
 // ============================================================================
 // FORMS — The S-expressions of our agent loop
@@ -105,6 +105,18 @@ export interface World {
 
 export class AbortError extends Error {
   constructor() { super("Interrupted by user"); this.name = "AbortError"; }
+}
+
+/** Race a promise against an AbortSignal. Rejects with AbortError if signal fires. */
+export function raceAbort<T>(signal: AbortSignal | undefined, promise: Promise<T>): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(new AbortError());
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      signal.addEventListener("abort", () => reject(new AbortError()), { once: true })
+    ),
+  ]);
 }
 
 export const mkWorld = (
@@ -338,21 +350,10 @@ async function evalThink(
 
   const result = world.convo.stream(input);
 
-  // Build an abort promise that rejects when signal fires
-  const abortPromise = world.signal
-    ? new Promise<never>((_, reject) => {
-        if (world.signal!.aborted) { reject(new AbortError()); return; }
-        world.signal!.addEventListener("abort", () => reject(new AbortError()), { once: true });
-      })
-    : null;
-
   try {
     const iter = result.textStream[Symbol.asyncIterator]();
     while (true) {
-      const next = iter.next();
-      const { done, value } = abortPromise
-        ? await Promise.race([next, abortPromise])
-        : await next;
+      const { done, value } = await raceAbort(world.signal, iter.next());
       if (done) break;
 
       fx.streamChunk(value);

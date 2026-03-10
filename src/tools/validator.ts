@@ -1,5 +1,5 @@
 // Re-export from the gloop-loop library
-export { requiresConfirmation } from "@ianrumac/gloop-loop";
+export { requiresConfirmation } from "@hypen-space/gloop-loop";
 
 /**
  * Prompt the user for y/n confirmation via stdin.

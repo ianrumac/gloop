@@ -10,11 +10,11 @@
  */
 
 import { createInterface } from "node:readline";
-import type { AIConversation } from "../ai/builder.ts";
-import type { Effects } from "../core/core.ts";
-import { appendMemory, removeMemory } from "./memory.ts";
-import { manageContextFork } from "./context-manager.ts";
-import type { ToolRegistry } from "../tools/registry.ts";
+import type { AIConversation } from "../ai/builder.js";
+import type { Effects } from "../core/core.js";
+import { appendMemory, removeMemory } from "./memory.js";
+import { manageContextFork } from "./context-manager.js";
+import type { ToolRegistry } from "../tools/registry.js";
 
 export interface DefaultEffectsOptions {
   /** The conversation — needed for manageContext. */

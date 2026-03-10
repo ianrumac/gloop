@@ -1,5 +1,5 @@
 // ============================================================================
-// @ianrumac/gloop-loop — A recursive Lisp-style agent loop for LLM agents
+// @hypen-space/gloop-loop — A recursive Lisp-style agent loop for LLM agents
 // ============================================================================
 
 // --- AI layer: provider interface, conversation, builder ---
@@ -18,10 +18,10 @@ export type {
   AIProvider,
   AIProviderConfig,
   Lazy,
-} from "./ai/types.ts";
+} from "./ai/types.js";
 
-export { AI, AIBuilder, AIConversation } from "./ai/builder.ts";
-export { OpenRouterProvider } from "./ai/provider.ts";
+export { AI, AIBuilder, AIConversation } from "./ai/builder.js";
+export { OpenRouterProvider } from "./ai/provider.js";
 
 // --- Tool layer: registry, types, parsing, validation ---
 export type {
@@ -29,15 +29,15 @@ export type {
   ToolDefinition,
   ToolCall,
   ToolResult,
-} from "./tools/types.ts";
+} from "./tools/types.js";
 
-export { ToolRegistry } from "./tools/registry.ts";
-export { jsonToolCallsToToolCalls } from "./tools/parser.ts";
-export { requiresConfirmation } from "./tools/validator.ts";
+export { ToolRegistry } from "./tools/registry.js";
+export { jsonToolCallsToToolCalls } from "./tools/parser.js";
+export { requiresConfirmation } from "./tools/validator.js";
 
 // --- Builtin tools: portable tool implementations ---
-export type { BuiltinIO, ShellResult } from "./tools/builtins.ts";
-export { registerBuiltins, formatShellResult } from "./tools/builtins.ts";
+export type { BuiltinIO, ShellResult } from "./tools/builtins.js";
+export { primitiveTools, registerBuiltins, formatShellResult } from "./tools/builtins.js";
 
 // --- Core loop: forms, interpreter, runner ---
 export type {
@@ -47,7 +47,7 @@ export type {
   World,
   Effects,
   LoopConfig,
-} from "./core/core.ts";
+} from "./core/core.js";
 
 export {
   // Form constructors
@@ -67,6 +67,7 @@ export {
   Spawn,
   // World
   AbortError,
+  raceAbort,
   mkWorld,
   // Interpreter
   eval_,
@@ -74,15 +75,15 @@ export {
   formatResults,
   parseInput,
   run,
-} from "./core/core.ts";
+} from "./core/core.js";
 
 // --- Defaults: batteries-included implementations ---
-export { createNodeIO } from "./defaults/io.ts";
-export { appendMemory, removeMemory, readMemory } from "./defaults/memory.ts";
-export { manageContextFork } from "./defaults/context-manager.ts";
-export { createEffects } from "./defaults/effects.ts";
-export type { DefaultEffectsOptions } from "./defaults/effects.ts";
+export { createNodeIO } from "./defaults/io.js";
+export { appendMemory, removeMemory, readMemory } from "./defaults/memory.js";
+export { manageContextFork } from "./defaults/context-manager.js";
+export { createEffects } from "./defaults/effects.js";
+export type { DefaultEffectsOptions } from "./defaults/effects.js";
 
 // --- AgentLoop: high-level entry point ---
-export { AgentLoop } from "./agent.ts";
-export type { AgentLoopOptions } from "./agent.ts";
+export { AgentLoop } from "./agent.js";
+export type { AgentLoopOptions } from "./agent.js";

@@ -4,4 +4,4 @@ export type {
   ToolDefinition,
   ToolCall,
   ToolResult,
-} from "@ianrumac/gloop-loop";
+} from "@hypen-space/gloop-loop";

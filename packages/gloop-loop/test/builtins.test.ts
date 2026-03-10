@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "bun:test";
-import { ToolRegistry, registerBuiltins, formatShellResult, type BuiltinIO, type ShellResult } from "../src/index.ts";
+import { ToolRegistry, registerBuiltins, formatShellResult, type BuiltinIO, type ShellResult } from "../src/index.js";
 
 // ---------------------------------------------------------------------------
 // Mock IO

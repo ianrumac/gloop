@@ -8,7 +8,7 @@ import type {
   Lazy,
   JsonTool,
   ToolChoice,
-} from "./types.ts";
+} from "./types.js";
 
 function resolve<T>(value: Lazy<T>): T {
   return typeof value === "function" ? (value as () => T)() : value;

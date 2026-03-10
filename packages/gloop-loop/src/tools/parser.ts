@@ -1,5 +1,5 @@
-import type { ToolCall } from "./types.ts";
-import type { JsonToolCall } from "../ai/types.ts";
+import type { ToolCall } from "./types.js";
+import type { JsonToolCall } from "../ai/types.js";
 
 /**
  * Convert JSON tool calls (from native tool calling) into ToolCall format.

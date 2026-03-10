@@ -5,9 +5,9 @@ import type {
   AIResponse,
   JsonToolCall,
   StreamResult,
-} from "../src/ai/types.ts";
-import { AIConversation } from "../src/ai/builder.ts";
-import { ToolRegistry } from "../src/tools/registry.ts";
+} from "../src/ai/types.js";
+import { AIConversation } from "../src/ai/builder.js";
+import { ToolRegistry } from "../src/tools/registry.js";
 import {
   run,
   eval_,
@@ -33,7 +33,7 @@ import {
   type Effects,
   type World,
   type LoopConfig,
-} from "../src/core/core.ts";
+} from "../src/core/core.js";
 
 // ---------------------------------------------------------------------------
 // Mock provider that returns StreamResult from stream()

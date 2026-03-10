@@ -5,7 +5,7 @@ import type { ToolRegistry } from "./registry.ts";
 import {
   registerBuiltins as libRegisterBuiltins,
   type BuiltinIO,
-} from "@ianrumac/gloop-loop";
+} from "@hypen-space/gloop-loop";
 import { exec as shellExec, formatShellResult as gloopFormatShellResult } from "../../bin/shell.ts";
 
 /** Thrown by the Reboot tool — caught by the outer run loop to trigger process restart. */

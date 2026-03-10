@@ -14,4 +14,4 @@ export type {
   AIProvider,
   AIProviderConfig,
   Lazy,
-} from "@ianrumac/gloop-loop";
+} from "@hypen-space/gloop-loop";

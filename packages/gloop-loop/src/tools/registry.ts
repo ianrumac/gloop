@@ -1,5 +1,5 @@
-import type { ToolDefinition } from "./types.ts";
-import type { JsonTool } from "../ai/types.ts";
+import type { ToolDefinition } from "./types.js";
+import type { JsonTool } from "../ai/types.js";
 
 export class ToolRegistry {
   private tools = new Map<string, ToolDefinition>();

@@ -1,11 +1,11 @@
 import { test, expect, describe } from "bun:test";
-import { AIBuilder, AI, AIConversation } from "../src/ai/builder.ts";
+import { AIBuilder, AI, AIConversation } from "../src/ai/builder.js";
 import type {
   AIProvider,
   AIRequestConfig,
   AIResponse,
   StreamResult,
-} from "../src/ai/types.ts";
+} from "../src/ai/types.js";
 
 // ---------------------------------------------------------------------------
 // Mock provider
