@@ -36,8 +36,7 @@ const models = [
 ];
 
 function buildLoopExample(model: string) {
-  return `import { AgentLoop, OpenRouterProvider,
-  primitiveTools } from "@hypen-space/gloop-loop";
+  return `import { AgentLoop, OpenRouterProvider } from "@hypen-space/gloop-loop";
 
 const agent = new AgentLoop({
   provider: new OpenRouterProvider(),
