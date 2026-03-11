@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>gloop-loop browser example</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'IBM Plex Mono', monospace;
+      background: #0a0a0a;
+      color: #f4f4f0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      padding: 1rem 1.5rem;
+      border-bottom: 2px solid #333;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    header h1 { font-size: 1rem; letter-spacing: 0.1em; }
+    header h1 span { color: #F0B323; }
+    #key-form {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+    }
+    #key-form input {
+      background: #1a1a1a;
+      border: 1px solid #333;
+      color: #f4f4f0;
+      padding: 0.4rem 0.6rem;
+      font-family: inherit;
+      font-size: 0.75rem;
+      width: 280px;
+    }
+    button.primary {
+      background: #FF5900;
+      color: #fff;
+      border: none;
+      padding: 0.4rem 1rem;
+      font-family: inherit;
+      font-size: 0.75rem;
+      font-weight: bold;
+      cursor: pointer;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    button.primary:hover { background: #e04f00; }
+
+    /* Main layout: chat left, sidebar right */
+    #main {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 1fr 320px;
+      overflow: hidden;
+    }
+
+    /* Chat column */
+    #chat-col {
+      display: flex;
+      flex-direction: column;
+      border-right: 2px solid #333;
+    }
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+    .msg {
+      max-width: 85%;
+      padding: 0.6rem 0.8rem;
+      font-size: 0.8rem;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .msg.user {
+      align-self: flex-end;
+      background: #1a1a1a;
+      border: 1px solid #333;
+    }
+    .msg.assistant {
+      align-self: flex-start;
+      background: #111;
+      border-left: 3px solid #FF5900;
+    }
+    .msg.tool {
+      align-self: flex-start;
+      background: #0d1a0d;
+      border-left: 3px solid #F0B323;
+      font-size: 0.7rem;
+      opacity: 0.8;
+    }
+    .msg.error {
+      align-self: center;
+      background: #1a0d0d;
+      border: 1px solid #E12120;
+      color: #E12120;
+      font-size: 0.7rem;
+    }
+    #input-bar {
+      padding: 0.75rem 1.5rem;
+      border-top: 2px solid #333;
+      display: flex;
+      gap: 0.5rem;
+    }
+    #input-bar input {
+      flex: 1;
+      background: #1a1a1a;
+      border: 1px solid #333;
+      color: #f4f4f0;
+      padding: 0.5rem 0.8rem;
+      font-family: inherit;
+      font-size: 0.8rem;
+    }
+    #input-bar input:focus, #key-form input:focus {
+      outline: none;
+      border-color: #FF5900;
+    }
+    #input-bar.disabled input, #input-bar.disabled button {
+      opacity: 0.4;
+      pointer-events: none;
+    }
+
+    /* Sidebar */
+    #sidebar {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .panel {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .panel + .panel {
+      border-top: 2px solid #333;
+    }
+    .panel-header {
+      padding: 0.75rem 1rem;
+      font-size: 0.65rem;
+      font-weight: bold;
+      text-transform: uppercase;
+      letter-spacing: 0.15em;
+      border-bottom: 1px solid #222;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .panel-header .count {
+      background: #333;
+      padding: 0.15rem 0.5rem;
+      font-size: 0.6rem;
+    }
+    .panel-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 0.5rem;
+    }
+
+    /* Todos */
+    .todo-item {
+      padding: 0.5rem 0.6rem;
+      font-size: 0.75rem;
+      border-bottom: 1px solid #1a1a1a;
+      display: flex;
+      gap: 0.5rem;
+      align-items: flex-start;
+    }
+    .todo-item .bullet {
+      color: #FF5900;
+      font-weight: bold;
+      flex-shrink: 0;
+    }
+    .todo-item.done .bullet { color: #4a4; }
+    .todo-item.done .todo-text { text-decoration: line-through; opacity: 0.5; }
+
+    /* Memory */
+    .memory-entry {
+      padding: 0.4rem 0.6rem;
+      font-size: 0.7rem;
+      border-bottom: 1px solid #1a1a1a;
+      color: #F0B323;
+    }
+    .memory-entry .key {
+      color: #888;
+      font-size: 0.6rem;
+      text-transform: uppercase;
+    }
+
+    .empty-state {
+      padding: 1.5rem 1rem;
+      font-size: 0.7rem;
+      color: #444;
+      text-align: center;
+      font-style: italic;
+    }
+
+    .status {
+      font-size: 0.65rem;
+      color: #666;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>GLOOP<span>-LOOP</span> / BROWSER</h1>
+    <div id="key-form">
+      <input type="password" id="api-key" placeholder="OpenRouter API key" />
+      <button class="primary" onclick="initAgent()">CONNECT</button>
+    </div>
+  </header>
+
+  <div id="main">
+    <!-- Chat -->
+    <div id="chat-col">
+      <div id="messages">
+        <div class="msg tool">
+// gloop-loop running in the browser.
+// Tools: ReadTodos, AddTodo, CompleteTodo, Remember, Recall
+// Enter your API key to start.</div>
+      </div>
+      <div id="input-bar" class="disabled">
+        <input type="text" id="user-input" placeholder="Try: add a todo to buy groceries" onkeydown="if(event.key==='Enter')sendMessage()" />
+        <button class="primary" onclick="sendMessage()">SEND</button>
+      </div>
+    </div>
+
+    <!-- Sidebar -->
+    <div id="sidebar">
+      <div class="panel">
+        <div class="panel-header">
+          Todos <span class="count" id="todo-count">0</span>
+        </div>
+        <div class="panel-body" id="todo-list">
+          <div class="empty-state">No todos yet</div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-header">
+          Memory <span class="count" id="memory-count">0</span>
+        </div>
+        <div class="panel-body" id="memory-list">
+          <div class="empty-state">Nothing remembered</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { AgentLoop, OpenRouterProvider } from "@hypen-space/gloop-loop";
+
+    // =========================================================================
+    // State — simple in-memory store, visible in the sidebar
+    // =========================================================================
+
+    let todos = [];
+    let memory = {};
+    let nextTodoId = 1;
+
+    function renderTodos() {
+      const $list = document.getElementById("todo-list");
+      document.getElementById("todo-count").textContent = todos.length;
+      if (todos.length === 0) {
+        $list.innerHTML = '<div class="empty-state">No todos yet</div>';
+        return;
+      }
+      $list.innerHTML = todos.map(t => `
+        <div class="todo-item ${t.done ? 'done' : ''}">
+          <span class="bullet">${t.done ? '[x]' : '[ ]'}</span>
+          <span class="todo-text">${esc(t.text)}</span>
+        </div>
+      `).join("");
+    }
+
+    function renderMemory() {
+      const $list = document.getElementById("memory-list");
+      const entries = Object.entries(memory);
+      document.getElementById("memory-count").textContent = entries.length;
+      if (entries.length === 0) {
+        $list.innerHTML = '<div class="empty-state">Nothing remembered</div>';
+        return;
+      }
+      $list.innerHTML = entries.map(([k, v]) => `
+        <div class="memory-entry">
+          <div class="key">${esc(k)}</div>
+          <div>${esc(v)}</div>
+        </div>
+      `).join("");
+    }
+
+    function esc(s) {
+      return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    }
+
+    // =========================================================================
+    // Browser tools
+    // =========================================================================
+
+    const browserTools = [
+      {
+        name: "ReadTodos",
+        description: "Read all todos. Returns the full todo list as JSON.",
+        arguments: [],
+        execute: async () => {
+          if (todos.length === 0) return "No todos yet.";
+          return JSON.stringify(todos, null, 2);
+        },
+      },
+      {
+        name: "AddTodo",
+        description: "Add a new todo item.",
+        arguments: [{ name: "text", description: "The todo text" }],
+        execute: async (args) => {
+          const todo = { id: nextTodoId++, text: args.text, done: false };
+          todos.push(todo);
+          renderTodos();
+          return `Added todo #${todo.id}: ${todo.text}`;
+        },
+      },
+      {
+        name: "CompleteTodo",
+        description: "Mark a todo as completed by its ID.",
+        arguments: [{ name: "id", description: "The todo ID to complete" }],
+        execute: async (args) => {
+          const id = parseInt(args.id);
+          const todo = todos.find(t => t.id === id);
+          if (!todo) throw new Error(`Todo #${id} not found`);
+          todo.done = true;
+          renderTodos();
+          return `Completed todo #${id}: ${todo.text}`;
+        },
+      },
+      {
+        name: "Remember",
+        description: "Store a key-value pair in memory. Use this to remember facts, preferences, or notes.",
+        arguments: [
+          { name: "key", description: "A short label for this memory" },
+          { name: "value", description: "The content to remember" },
+        ],
+        execute: async (args) => {
+          memory[args.key] = args.value;
+          renderMemory();
+          return `Remembered "${args.key}": ${args.value}`;
+        },
+      },
+      {
+        name: "Recall",
+        description: "Recall everything in memory, or a specific key.",
+        arguments: [{ name: "key", description: "Optional key to look up. Leave empty to recall all." }],
+        execute: async (args) => {
+          if (args.key && args.key.trim()) {
+            const val = memory[args.key];
+            return val ? `${args.key}: ${val}` : `Nothing remembered for "${args.key}"`;
+          }
+          const entries = Object.entries(memory);
+          if (entries.length === 0) return "Memory is empty.";
+          return entries.map(([k, v]) => `${k}: ${v}`).join("\n");
+        },
+      },
+      {
+        name: "CompleteTask",
+        description: "Call when the task is done.",
+        arguments: [{ name: "summary", description: "Summary of what was done" }],
+        execute: async (args) => args.summary || "Done.",
+      },
+      {
+        name: "AskUser",
+        description: "Ask the user a question.",
+        arguments: [{ name: "question", description: "The question to ask" }],
+        execute: async (args) => args.question || "What would you like to do?",
+      },
+    ];
+
+    // =========================================================================
+    // Agent + DOM
+    // =========================================================================
+
+    let agent = null;
+
+    const $messages = document.getElementById("messages");
+    const $input = document.getElementById("user-input");
+    const $inputBar = document.getElementById("input-bar");
+
+    function addMessage(role, text) {
+      const div = document.createElement("div");
+      div.className = `msg ${role}`;
+      div.textContent = text;
+      $messages.appendChild(div);
+      $messages.scrollTop = $messages.scrollHeight;
+      return div;
+    }
+
+    let currentStream = null;
+    function startStream() {
+      currentStream = addMessage("assistant", "");
+    }
+    function appendStream(text) {
+      if (currentStream) {
+        currentStream.textContent += text;
+        $messages.scrollTop = $messages.scrollHeight;
+      }
+    }
+
+    // =========================================================================
+    // Init + send
+    // =========================================================================
+
+    window.initAgent = function () {
+      const apiKey = document.getElementById("api-key").value.trim();
+      if (!apiKey) return;
+
+      agent = new AgentLoop({
+        provider: new OpenRouterProvider({ apiKey }),
+        model: "anthropic/claude-sonnet-4",
+        system: [
+          "You are a helpful assistant running in a browser.",
+          "You have tools to manage a todo list (ReadTodos, AddTodo, CompleteTodo)",
+          "and a key-value memory (Remember, Recall).",
+          "The user can see the todos and memory in the sidebar.",
+          "Keep responses concise.",
+        ].join(" "),
+        tools: browserTools,
+        onStream: (text) => appendStream(text),
+        onToolStatus: (name, status) => {
+          addMessage("tool", `[${name}] ${status}`);
+        },
+        ask: async (question) => {
+          addMessage("tool", `? ${question}`);
+          return prompt(question) || "";
+        },
+        confirm: async (command) => window.confirm(`Allow: ${command}?`),
+        onComplete: (summary) => addMessage("tool", `done: ${summary}`),
+        remember: async (content) => {
+          memory["note"] = content;
+          renderMemory();
+        },
+        forget: async (content) => {
+          for (const [k, v] of Object.entries(memory)) {
+            if (v.includes(content) || k.includes(content)) delete memory[k];
+          }
+          renderMemory();
+        },
+      });
+
+      $messages.innerHTML = "";
+      addMessage("tool", "// Connected. Try: \"add 3 todos for a weekend trip\"");
+      $inputBar.classList.remove("disabled");
+      $input.focus();
+
+      document.getElementById("key-form").innerHTML =
+        '<span class="status" style="color:#F0B323">connected</span>';
+    };
+
+    window.sendMessage = async function () {
+      const text = $input.value.trim();
+      if (!text || !agent) return;
+
+      $input.value = "";
+      addMessage("user", text);
+      $inputBar.classList.add("disabled");
+
+      startStream();
+      try {
+        await agent.run(text);
+      } catch (e) {
+        addMessage("error", `Error: ${e.message}`);
+      }
+      currentStream = null;
+      $inputBar.classList.remove("disabled");
+      $input.focus();
+    };
+  </script>
+</body>
+</html>

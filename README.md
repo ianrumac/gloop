@@ -37,7 +37,7 @@ Well yeah - the core idea is to make a minimal harness that is as usable as modi
 Something like LUCA but for agents. Why? Because I've been experimenting with agents for a long time, and wanted a solid
 foundation to try new things and see how they play out, but would never get to test using popular harnesses such as Claude Code, Codex or OpenClaude - things like:
 
-- XML instead of JSON Schema for tool calls - and what shape? What size? Use git patches? marked inserts? What is better for token spend x performance?
+- Alternative formats for tool schemas - and what shape? What size? Use git patches? marked inserts? What is better for token spend x performance?
 - Hot reload with self building tools - let it build tools and reload them into the context by itself!
 - Self-modification with session resuming - agent being able to modify it's own harness and restart without losing context is
 - Different types of memory - maybe just a markdown file is enough for the start, but what about later? Embeddings? Graphs? Sqlite?

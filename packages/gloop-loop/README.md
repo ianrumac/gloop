@@ -290,7 +290,7 @@ try {
 | `mkWorld()` | function | Create a `World` from conversation + registry |
 | `parseInput()` | function | Parse user input into a Form (slash commands, etc.) |
 | `toolCallsToForm()` | function | Convert tool calls to a Form with continuations |
-| `formatResults()` | function | Format `ToolResult[]` as XML for the LLM |
+| `formatResults()` | function | Format `ToolResult[]` for the LLM |
 | `Think`, `Invoke`, `Confirm`, `Ask`, `Remember`, `Forget`, `Emit`, `Refresh`, `Done`, `Seq`, `Nil`, `Install`, `ListTools`, `Spawn` | functions | Form constructors |
 | `AbortError` | class | Thrown on cancellation |
 | `raceAbort()` | function | Race a promise against an `AbortSignal` |

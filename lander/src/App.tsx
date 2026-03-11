@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useMemo } from 'react';
-import { Terminal, Zap, Code2, Brain, GitBranch, Infinity, BookOpen, Type, ArrowRight, CornerRightDown, Copy, Check, Wrench, Globe, GitFork, Cpu } from 'lucide-react';
+import { Terminal, Zap, Code2, GitBranch, Infinity, ArrowRight, CornerRightDown, Copy, Check, Wrench, Globe, GitFork, Cpu } from 'lucide-react';
 import { Button } from './components/Button';
 import './index.css';
 
@@ -127,34 +127,34 @@ const formattedCode = highlightCode(coreCode);
 
 const features = [
   {
-    icon: Code2,
-    title: 'Lisp Forms',
-    description: 'Everything is data. S-expressions describe pure computation. No hidden state.',
+    icon: Zap,
+    title: 'Minimal Drop-in',
+    description: '3 lines to a working agent. Import, configure, run. All defaults overridable.',
   },
   {
-    icon: Type,
-    title: 'Type Safety',
-    description: 'TypeScript end-to-end. Macros preserve hygiene. Static guarantees.',
+    icon: Globe,
+    title: 'Any OpenRouter Model',
+    description: 'Claude, Gemini, Grok — use whichever model you want. Just pass the model name.',
   },
   {
-    icon: Infinity,
-    title: 'Recursion',
-    description: 'eval(Form, World) → Form. Trampoline interpreter. Proper tail calls.',
-  },
-  {
-    icon: Brain,
-    title: 'Semantic Memory',
-    description: 'Embeddings for recall. <remember> and <forget> tags. Long-term patterns.',
+    icon: Wrench,
+    title: 'Hot Reload',
+    description: 'Build tools on the fly. Reload without restart. Agent installs and uses new tools in-session.',
   },
   {
     icon: GitBranch,
     title: 'Self-Modifying',
-    description: 'Edit code, reload tools, spawn subagents. Full introspection.',
+    description: 'Edits its own code. Clones per project. Spawns subagents. Full introspection.',
   },
   {
-    icon: BookOpen,
-    title: 'SICP Principles',
-    description: 'Metalinguistic abstraction. Elegance. Taste.',
+    icon: Code2,
+    title: 'Completely Customisable',
+    description: 'Inject tools, effects, I/O, memory. Override any behavior. Your stack, your rules.',
+  },
+  {
+    icon: Infinity,
+    title: 'Pure Data Loop',
+    description: 'Everything is data. The interpreter evaluates. No hidden state. TypeScript end-to-end.',
   },
 ];
 
@@ -263,13 +263,11 @@ function App() {
               </h1>
 
               <p className="text-xl md:text-2xl font-medium max-w-md leading-relaxed">
-                A self-modifying AI agent that thinks in pure functions.
-                Edits its own code. Manages its own memory. Runs in your terminal.
+                Gloop is an agent that works in your terminal, using whichever model you choose. Gloop's advantage is that it can modify its own code and clone its own instances, letting you fully customize it — want to change the UI? Create new tools? Customize how it works? Just tell gloop, it will rerun itself with its own code.
               </p>
 
               <div className="font-mono text-lg md:text-xl pt-6 border-t-4 border-foreground max-w-md">
-                <span className="text-accent">//</span> Thinks in Forms.
-                <br/>
+                <div className="font-mono text-accent mb-2">// Thinks in Forms.</div>
                 <span className="typing-cursor font-bold">{text}</span>
               </div>
 
@@ -320,7 +318,7 @@ function App() {
 
               <p className="text-xl md:text-2xl font-medium max-w-md leading-relaxed">
                 The recursive agent loop, extracted as a library.
-                3 lines to a working AI agent. All defaults overridable.
+                3 lines to a working AI agent in your backend or in your website. All defaults overridable.
               </p>
 
               <div className="space-y-3 pt-4 border-t-4 border-foreground max-w-md">
