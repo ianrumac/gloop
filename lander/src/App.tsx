@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useMemo } from 'react';
+import { useState, useRef, useMemo } from 'react';
 import { Terminal, Zap, Code2, GitBranch, Infinity, ArrowRight, CornerRightDown, Copy, Check, Wrench, Globe, GitFork, Cpu } from 'lucide-react';
 import { Button } from './components/Button';
 import './index.css';
@@ -210,22 +210,9 @@ function InfoRow({ icon: Icon, title, text }: { icon: React.ElementType; title: 
 }
 
 function App() {
-  const [text, setText] = useState('');
-  const fullText = 'function eval(form, world) { return eval(step(form, world), world); }';
-
   const formattedLoopExample = useMemo(() => {
     const model = models[Math.floor(Math.random() * models.length)];
     return highlightCode(buildLoopExample(model));
-  }, []);
-
-  useEffect(() => {
-    let i = 0;
-    const interval = setInterval(() => {
-      setText(fullText.slice(0, i));
-      i++;
-      if (i > fullText.length) clearInterval(interval);
-    }, 50);
-    return () => clearInterval(interval);
   }, []);
 
   return (
@@ -263,12 +250,12 @@ function App() {
               </h1>
 
               <p className="text-xl md:text-2xl font-medium max-w-md leading-relaxed">
-                Gloop is an agent that works in your terminal, using whichever model you choose. Gloop's advantage is that it can modify its own code and clone its own instances, letting you fully customize it — want to change the UI? Create new tools? Customize how it works? Just tell gloop, it will rerun itself with its own code.
+                A self-modifying AI agent that thinks in pure functions.
+                Edits its own code. Manages its own memory. Runs in your terminal.
               </p>
 
-              <div className="font-mono text-lg md:text-xl pt-6 border-t-4 border-foreground max-w-md">
-                <div className="font-mono text-accent mb-2">// Thinks in Forms.</div>
-                <span className="typing-cursor font-bold">{text}</span>
+              <div className="font-mono text-accent text-sm md:text-base pt-6 border-t-4 border-foreground max-w-md">
+                // Gloop is an agent that works in your terminal, using whichever model you choose. Gloop's advantage is that it can modify its own code and clone its own instances, letting you fully customize it — want to change the UI? Create new tools? Customize how it works? Just tell gloop, it will rerun itself with its own code.
               </div>
 
               <div className="flex flex-wrap gap-4 pt-6">
