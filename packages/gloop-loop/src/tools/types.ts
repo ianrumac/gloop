@@ -14,7 +14,12 @@ export interface ToolDefinition {
 
 export interface ToolCall {
   name: string;
-  rawArgs: string[];
+  /**
+   * Named arguments for the tool, already coerced to strings and keyed by
+   * the tool's declared argument names.  The parser validates against the
+   * registered `ToolDefinition.arguments` so only declared keys appear here.
+   */
+  args: Record<string, string>;
 }
 
 export interface ToolResult {

@@ -19,12 +19,20 @@ import { AgentLoop, OpenRouterProvider } from "@hypen-space/gloop-loop";
 
 const agent = new AgentLoop({
   provider: new OpenRouterProvider({ apiKey: process.env.OPENROUTER_API_KEY! }),
-  model: "anthropic/claude-sonnet-4",
+  model: "anthropic/claude-sonnet-4.5",
   system: "You are a helpful assistant.",
 });
 
-await agent.run("What files are in the current directory?");
+agent.on("stream_chunk", (e) => process.stdout.write(e.text));
+
+await agent.sendSync("What files are in the current directory?");
+await agent.stop();
 ```
+
+The loop is modelled as an actor: `sendSync` auto-starts the loop, enqueues the
+message, and resolves when that message's turn finishes. For pipelines,
+interactive UIs, typed per-event subscriptions, and the full API reference, see
+the [gloop-loop README](packages/gloop-loop/README.md).
 
 
 ## Gloop

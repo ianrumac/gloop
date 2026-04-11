@@ -79,11 +79,39 @@ export {
 
 // --- Defaults: batteries-included implementations ---
 export { createNodeIO } from "./defaults/io.js";
-export { appendMemory, removeMemory, readMemory } from "./defaults/memory.js";
+export {
+  createFileMemory,
+  appendMemory,
+  removeMemory,
+  readMemory,
+} from "./defaults/memory.js";
+export type { FileMemory, FileMemoryOptions } from "./defaults/memory.js";
 export { manageContextFork } from "./defaults/context-manager.js";
-export { createEffects } from "./defaults/effects.js";
-export type { DefaultEffectsOptions } from "./defaults/effects.js";
 
-// --- AgentLoop: high-level entry point ---
+// --- AgentLoop: high-level actor-style entry point ---
 export { AgentLoop } from "./agent.js";
-export type { AgentLoopOptions } from "./agent.js";
+export type {
+  AgentLoopOptions,
+  AgentMessage,
+  AgentMessageRole,
+  AgentEvent,
+  AgentEventListener,
+  // Per-variant named aliases for consumer-side type annotations.
+  TurnStartEvent,
+  TurnEndEvent,
+  BusyEvent,
+  IdleEvent,
+  QueueChangedEvent,
+  StreamChunkEvent,
+  StreamDoneEvent,
+  ToolStartEvent,
+  ToolDoneEvent,
+  MemoryEvent,
+  SystemRefreshedEvent,
+  TaskCompleteEvent,
+  InterruptedEvent,
+  ErrorEvent,
+  FatalEvent,
+  ConfirmRequestEvent,
+  AskRequestEvent,
+} from "./agent.js";

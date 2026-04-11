@@ -8,6 +8,7 @@ import type {
 } from "../src/ai/types.js";
 import { AIConversation } from "../src/ai/builder.js";
 import { manageContextFork } from "../src/defaults/context-manager.js";
+import { AgentLoop, type AgentEvent } from "../src/agent.js";
 
 // ---------------------------------------------------------------------------
 // Scenario-based mock provider for context management
@@ -277,5 +278,138 @@ describe("manageContextFork", () => {
     // Should not throw
     const result = await manageContextFork(convo, "review");
     expect(result).toContain("no messages pruned");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Nested-actor isolation — verifies that the nested `AgentLoop` created
+// by `manageContextFork` does not leak events into the parent's event bus
+// when driven through the outer actor's normal `fx.manageContext` path.
+// ---------------------------------------------------------------------------
+
+describe("manageContextFork — nested actor isolation", () => {
+  test("fork events do not leak to the parent AgentLoop's subscribers", async () => {
+    // One provider instance is shared by both the parent and the nested
+    // fork (the fork picks up `convo.provider`).  We script the responses
+    // in the order they will be consumed:
+    //
+    //   1. Parent's initial LLM call: returns a ManageContext tool call
+    //   2. Fork's LLM call: returns a no-op CompleteTask
+    //   3. Parent's follow-up LLM call (after the fork returns): text reply
+    //
+    const provider = new ContextMockProvider([
+      // 1. Parent: "please prune my history"
+      { toolCalls: [tc("p1", "ManageContext", { instructions: "prune old stuff" })] },
+      // 2. Fork: nothing to prune, complete immediately
+      { toolCalls: [tc("f1", "CompleteTask", { summary: "nothing to prune" })] },
+      // 3. Parent: final text reply after the fork's result comes back
+      { text: "pruning done, moving on" },
+    ]);
+
+    const agent = new AgentLoop({
+      provider,
+      model: "m",
+      system: "parent system prompt",
+      tools: [
+        // A minimal ManageContext tool — the builtin isn't needed here
+        // because `evalInvoke` special-cases ManageContext and routes
+        // straight to `fx.manageContext`.
+        {
+          name: "ManageContext",
+          description: "prune context",
+          arguments: [{ name: "instructions", description: "what to do" }],
+          execute: async () => "",
+        },
+        {
+          name: "CompleteTask",
+          description: "done",
+          arguments: [{ name: "summary", description: "s" }],
+          execute: async (a) => a.summary ?? "",
+        },
+      ],
+    });
+
+    // Subscribe to EVERY event on the parent bus.
+    const parentEvents: AgentEvent[] = [];
+    agent.onEvent((e) => parentEvents.push(e));
+
+    await agent.sendSync("do the thing");
+
+    // The parent should have seen its own lifecycle events + the
+    // ManageContext tool_start / tool_done pair + its own stream events.
+    const types = parentEvents.map((e) => e.type);
+    expect(types).toContain("turn_start");
+    expect(types).toContain("turn_end");
+    expect(types).toContain("tool_start");
+    expect(types).toContain("tool_done");
+    expect(types).toContain("stream_done");
+
+    // The fork's ViewMessage / DeleteMessages / Summarize / CompleteTask
+    // tool events must NOT appear in the parent's event stream.  If any of
+    // these do, the fork is leaking events into the parent bus.
+    const toolNames = parentEvents
+      .filter((e): e is Extract<AgentEvent, { type: "tool_start" | "tool_done" }> =>
+        e.type === "tool_start" || e.type === "tool_done",
+      )
+      .map((e) => e.name);
+
+    // Only ManageContext should show up at the parent level.  The fork's
+    // CompleteTask / ViewMessage / DeleteMessages / Summarize should not.
+    const forkTools = toolNames.filter((n) =>
+      ["ViewMessage", "DeleteMessages", "Summarize"].includes(n),
+    );
+    expect(forkTools).toEqual([]);
+    expect(toolNames).toContain("ManageContext");
+
+    // And the parent should have only one `task_complete` — the fork's
+    // CompleteTask tool call stays inside the fork and does not surface.
+    const completes = parentEvents.filter((e) => e.type === "task_complete");
+    expect(completes.length).toBeLessThanOrEqual(1);
+
+    await agent.stop();
+  });
+
+  test("fork CompleteTask does not trigger the parent's task_complete event", async () => {
+    // A fork that calls CompleteTask should complete the FORK only — the
+    // parent actor must continue processing the remainder of its turn.
+    const provider = new ContextMockProvider([
+      // Parent: calls ManageContext
+      { toolCalls: [tc("p1", "ManageContext", { instructions: "prune" })] },
+      // Fork: completes
+      { toolCalls: [tc("f1", "CompleteTask", { summary: "fork done" })] },
+      // Parent: now calls its own CompleteTask with a different summary
+      { toolCalls: [tc("p2", "CompleteTask", { summary: "parent done" })] },
+    ]);
+
+    const agent = new AgentLoop({
+      provider,
+      model: "m",
+      system: "parent",
+      tools: [
+        {
+          name: "ManageContext",
+          description: "x",
+          arguments: [{ name: "instructions", description: "i" }],
+          execute: async () => "",
+        },
+        {
+          name: "CompleteTask",
+          description: "d",
+          arguments: [{ name: "summary", description: "s" }],
+          execute: async (a) => a.summary ?? "",
+        },
+      ],
+    });
+
+    const completes: string[] = [];
+    agent.on("task_complete", (e) => completes.push(e.summary));
+
+    await agent.sendSync("do the thing");
+
+    // The parent should see exactly one task_complete — its own.  The
+    // fork's "fork done" CompleteTask stays inside the nested actor.
+    expect(completes).toEqual(["parent done"]);
+
+    await agent.stop();
   });
 });

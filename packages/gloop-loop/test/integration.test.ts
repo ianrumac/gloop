@@ -2,8 +2,8 @@
  * Integration test — runs a real agent loop against a live LLM via OpenRouter.
  *
  * The agent is pointed at the pizza-delivery project (tests/src/pizza-delivery.ts)
- * which has 2 bugs that cause 5 test failures. The agent must read the code,
- * diagnose the bugs, fix them, and verify with `bun test`.
+ * which has bugs that cause several test failures.  The agent must read the
+ * code, diagnose the bugs, fix them, and verify with `bun test`.
  *
  * After the test, the original file is restored from memory (no git).
  *
@@ -14,7 +14,7 @@
 import { test, expect, describe } from "bun:test";
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { AgentLoop } from "../src/agent.js";
+import { AgentLoop, type AgentEvent } from "../src/agent.js";
 import { OpenRouterProvider } from "../src/ai/provider.js";
 import { createNodeIO } from "../src/defaults/io.js";
 
@@ -56,9 +56,8 @@ describe("integration — pizza delivery", () => {
       );
       expect(beforeResult.exitCode).not.toBe(0);
 
-      // 3. Set up the agent
+      // 3. Build the actor
       const provider = new OpenRouterProvider({ apiKey: API_KEY! });
-
       const agent = new AgentLoop({
         provider,
         model: MODEL,
@@ -69,15 +68,23 @@ describe("integration — pizza delivery", () => {
           "Do NOT modify test files. Always use ABSOLUTE file paths. " +
           "When done, ALWAYS call the CompleteTask tool with a summary.",
         io,
-        onStream: (text) => process.stderr.write(text),
-        onToolStatus: (name, status) => process.stderr.write(`  [${name}] ${status}\n`),
-        onComplete: () => {},
+        // Non-interactive: auto-approve any confirmations.
         confirm: async () => true,
       });
 
+      // Stream assistant text to stderr so the test log shows agent activity.
+      agent.onEvent((event: AgentEvent) => {
+        if (event.type === "stream_chunk") process.stderr.write(event.text);
+        else if (event.type === "stream_done") process.stderr.write("\n");
+        else if (event.type === "tool_start") process.stderr.write(`  [${event.name}] ${event.preview}\n`);
+        else if (event.type === "tool_done") {
+          process.stderr.write(`  [${event.name}] ${event.ok ? "done" : `error: ${event.output.slice(0, 100)}`}\n`);
+        }
+      });
+
       try {
-        // 4. Run the agent
-        await agent.run(
+        // 4. Drive one turn through the actor and wait for it to terminate.
+        await agent.sendSync(
           `The project at ${PIZZA_DIR} has failing tests. Run \`cd ${PIZZA_DIR} && bun test src/pizza-delivery.test.ts\` ` +
           `to see the failures, then read ${SOURCE_FILE} to find and fix the bugs. ` +
           `The test file is at ${TEST_FILE} — do NOT modify it. ` +
@@ -93,7 +100,8 @@ describe("integration — pizza delivery", () => {
         expect(afterResult.exitCode).toBe(0);
         expect(afterResult.stdout + afterResult.stderr).toMatch(/\bpass\b/i);
       } finally {
-        // 7. Restore original (broken) file — no git, just rewrite from memory
+        await agent.stop();
+        // 6. Restore original (broken) file — no git, just rewrite from memory
         await writeFile(SOURCE_FILE, originalSource, "utf-8");
       }
     },
