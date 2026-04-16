@@ -209,6 +209,7 @@ export class AIConversation {
   private history: Message[] = [];
   private routing?: ProviderRouting;
   private jsonTools?: JsonTool[];
+  private _maxTokens?: number;
 
   constructor(provider: AIProvider, modelId: string, systemPrompt?: string) {
     this._provider = provider;
@@ -228,6 +229,7 @@ export class AIConversation {
     if (this.systemPrompt) builder.system(this.systemPrompt);
     if (this.routing) builder.providerRouting(this.routing);
     if (this.jsonTools) builder.tools(this.jsonTools);
+    if (this._maxTokens !== undefined) builder.maxTokens(this._maxTokens);
     builder.messages(this.history);
 
     const response = await builder.query();
@@ -244,6 +246,7 @@ export class AIConversation {
     if (this.systemPrompt) builder.system(this.systemPrompt);
     if (this.routing) builder.providerRouting(this.routing);
     if (this.jsonTools) builder.tools(this.jsonTools);
+    if (this._maxTokens !== undefined) builder.maxTokens(this._maxTokens);
     builder.messages(this.history);
 
     const result = builder.stream();
@@ -312,6 +315,12 @@ export class AIConversation {
   /** Clear JSON tools */
   clearJsonTools(): this {
     this.jsonTools = undefined;
+    return this;
+  }
+
+  /** Cap completion tokens for every request on this conversation. */
+  setMaxTokens(n: number): this {
+    this._maxTokens = n;
     return this;
   }
 

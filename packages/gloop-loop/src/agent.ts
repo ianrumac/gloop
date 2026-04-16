@@ -271,10 +271,16 @@ export interface AgentLoopOptions {
   log?: (label: string, content: string) => void;
 
   // ---- Loop config ----
-  /** Number of tool calls between automatic context prune. Default: 50 */
+  /** Number of tool calls between automatic context prune. 0 disables. Default: 0 */
   contextPruneInterval?: number;
   /** Classify tool calls as spawn tasks. */
   classifySpawn?: LoopConfig["classifySpawn"];
+  /**
+   * Cap completion tokens per request.  Passed to the provider as max_tokens.
+   * Default: 262144 (256k) — large enough that a long response with trailing
+   * tool calls won't be truncated mid-generation.  Reduce for cheaper runs.
+   */
+  maxTokens?: number;
 }
 
 // ============================================================================
@@ -332,6 +338,7 @@ export class AgentLoop {
     // 2. Build conversation
     const ai = new AI(opts.provider, opts.model);
     this.convo = ai.conversation({ model: opts.model, system: opts.system });
+    this.convo.setMaxTokens(opts.maxTokens ?? 262_144);
 
     // 3. Build world.  `world.signal` is swapped in per-turn by runLoop() so
     //    `interrupt()` only aborts the current turn and not the whole actor.

@@ -22,6 +22,7 @@ import { parseGloopTaskBashCommand, parseTaskCliArgs, runTaskSubagent } from "..
 import { ensureSelfCopy } from "./self-copy.ts";
 import App from "../components/App.tsx";
 import { installTool } from "./install-tool.ts";
+import { DEFAULT_GLOOP_MODEL } from "../src/core/default-model.ts";
 
 // Special exit code that signals "please restart me"
 const REBOOT_EXIT_CODE = 75;
@@ -54,9 +55,12 @@ if (taskRequest) {
 const debug = args.includes("--debug");
 const providerIdx = args.indexOf("--provider");
 const providerName = providerIdx !== -1 ? args[providerIdx + 1] : undefined;
-const model = args.find((a, i) =>
-  !a.startsWith("--") && i !== providerIdx + 1
-) ?? "x-ai/grok-4.1-fast";
+const model =
+  args.find(
+    (a, i) =>
+      !a.startsWith("--") &&
+      (providerIdx === -1 || i !== providerIdx + 1)
+  ) ?? DEFAULT_GLOOP_MODEL;
 
 if (debug) enableDebug();
 
@@ -85,7 +89,6 @@ const agent: AgentLoop = new AgentLoop({
   // below so Reload/installTool see the same registry the loop uses.
   tools: [],
   log: debug ? (label, content) => debugLogRaw(label, content) : undefined,
-  contextPruneInterval: 50,
   // A RebootError from the Reboot tool stops the loop and fires a `fatal`
   // event — see wireRebootHandler below.
   isFatal: rebootIsFatal,

@@ -26,6 +26,7 @@ import {
   runTaskSubagent,
 } from "./task-mode.ts";
 import { installTool } from "../../bin/install-tool.ts";
+import { DEFAULT_GLOOP_MODEL } from "./default-model.ts";
 
 // ============================================================================
 // CLI PARSING
@@ -40,7 +41,7 @@ function usage(): never {
 
 const args = process.argv.slice(2);
 
-let model = "x-ai/grok-4.1-fast";
+let model = DEFAULT_GLOOP_MODEL;
 let outputPath = "gloop-output.jsonl";
 let debug = false;
 let providerName: string | undefined;
@@ -108,7 +109,6 @@ const agent: AgentLoop = new AgentLoop({
   // Reload/installTool see the same registry the loop uses.
   tools: [],
   log: debug ? (label, content) => debugLogRaw(label, content) : undefined,
-  contextPruneInterval: 50,
   // A RebootError stops the loop and fires a `fatal` event — see
   // wireRebootHandler below.
   isFatal: rebootIsFatal,

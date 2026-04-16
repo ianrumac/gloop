@@ -165,7 +165,7 @@ export interface LoopConfig {
    */
   classifySpawn?: (call: ToolCall) => string | null;
 
-  /** Number of tool calls between automatic context prune. Default: 50 */
+  /** Number of tool calls between automatic context prune. 0 disables. Default: 0 */
   contextPruneInterval?: number;
 }
 
@@ -492,8 +492,8 @@ async function evalInvoke(
     await fx.refreshSystem();
   }
 
-  // Auto-prune context every N tool calls
-  const interval = config?.contextPruneInterval ?? 50;
+  // Auto-prune context every N tool calls (0 disables)
+  const interval = config?.contextPruneInterval ?? 0;
   world.toolCalls += calls.length;
   if (interval > 0 && world.toolCalls >= interval) {
     world.toolCalls = 0;
