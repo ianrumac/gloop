@@ -165,7 +165,7 @@ export interface LoopConfig {
    */
   classifySpawn?: (call: ToolCall) => string | null;
 
-  /** Number of tool calls between automatic context prune. Default: 50 */
+  /** Number of tool calls between automatic context prune. 0 disables. Default: 0 */
   contextPruneInterval?: number;
 }
 
@@ -205,7 +205,7 @@ export function toolCallsToForm(toolCalls: ToolCall[], classifySpawn?: (call: To
 
   // Terminal forms: complete (optionally preceded by tool invocations)
   if (completeCall) {
-    const summary = completeCall.rawArgs[0] ?? "Task complete";
+    const summary = completeCall.args.summary ?? "Task complete";
     return regularCalls.length > 0 ? Invoke(regularCalls, () => Done(summary)) : Done(summary);
   }
   if (regularCalls.length === 0) return Nil;
@@ -378,7 +378,7 @@ async function evalThink(
   const jsonCalls = await result.toolCalls;
 
   if (jsonCalls.length > 0) {
-    const toolCalls = jsonToolCallsToToolCalls(jsonCalls);
+    const toolCalls = jsonToolCallsToToolCalls(jsonCalls, world.registry);
     fx.log?.("TOOL_CALLS", JSON.stringify(toolCalls));
     const nextForm = toolCallsToForm(toolCalls, config?.classifySpawn);
     return eval_(nextForm, world, fx, config);
@@ -406,7 +406,7 @@ async function evalInvoke(
 
     // Handle AskUser specially
     if (call.name === "AskUser") {
-      const question = call.rawArgs[0] ?? "What would you like to do?";
+      const question = call.args.question ?? "What would you like to do?";
       fx.toolStart("AskUser", question.substring(0, 60));
       const answer = await fx.ask(question);
       results.push({ name: "AskUser", output: `User answered: ${answer}`, success: true });
@@ -416,7 +416,7 @@ async function evalInvoke(
 
     // Handle ManageContext specially — fork a mini agent loop
     if (call.name === "ManageContext") {
-      const instructions = call.rawArgs[0] ?? "Prune stale messages";
+      const instructions = call.args.instructions ?? "Prune stale messages";
       fx.toolStart("ManageContext", instructions.substring(0, 60));
       const result = await fx.manageContext(instructions);
       results.push({ name: "ManageContext", output: result, success: true });
@@ -426,7 +426,7 @@ async function evalInvoke(
 
     // Handle Remember specially — persist to memory + UI feedback
     if (call.name === "Remember") {
-      const content = call.rawArgs[0] ?? "";
+      const content = call.args.content ?? "";
       fx.toolStart("Remember", content.substring(0, 60));
       await fx.remember(content);
       results.push({ name: "Remember", output: `Remembered: ${content}`, success: true });
@@ -436,7 +436,7 @@ async function evalInvoke(
 
     // Handle Forget specially — remove from memory + UI feedback
     if (call.name === "Forget") {
-      const content = call.rawArgs[0] ?? "";
+      const content = call.args.content ?? "";
       fx.toolStart("Forget", content.substring(0, 60));
       await fx.forget(content);
       results.push({ name: "Forget", output: `Forgot: ${content}`, success: true });
@@ -455,11 +455,7 @@ async function evalInvoke(
     // Check if confirmation needed — first the legacy Bash check, then tool's own askPermission
     let danger = requiresConfirmation(call);
     if (danger === null && tool.askPermission) {
-      const args: Record<string, string> = {};
-      tool.arguments.forEach((arg, i) => {
-        if (i < call.rawArgs.length) args[arg.name] = call.rawArgs[i]!;
-      });
-      danger = tool.askPermission(args);
+      danger = tool.askPermission(call.args);
     }
     if (danger !== null) {
       const ok = await fx.confirm(danger);
@@ -470,17 +466,16 @@ async function evalInvoke(
       }
     }
 
-    const preview = call.rawArgs
-      .map(a => `"${a.substring(0, 40)}${a.length > 40 ? "..." : ""}"`)
+    // Build a short preview from declared argument order (insertion order of
+    // `call.args` matches the registry's declared argument list since the
+    // parser iterates `tool.arguments`).
+    const preview = Object.values(call.args)
+      .map((v) => `"${v.substring(0, 40)}${v.length > 40 ? "..." : ""}"`)
       .join(", ");
     fx.toolStart(call.name, preview);
 
     try {
-      const args: Record<string, string> = {};
-      tool.arguments.forEach((arg, i) => {
-        if (i < call.rawArgs.length) args[arg.name] = call.rawArgs[i]!;
-      });
-      const output = await tool.execute(args);
+      const output = await tool.execute(call.args);
       results.push({ name: call.name, output, success: true });
       fx.toolDone(call.name, true, "ok");
     } catch (err: unknown) {
@@ -497,8 +492,8 @@ async function evalInvoke(
     await fx.refreshSystem();
   }
 
-  // Auto-prune context every N tool calls
-  const interval = config?.contextPruneInterval ?? 50;
+  // Auto-prune context every N tool calls (0 disables)
+  const interval = config?.contextPruneInterval ?? 0;
   world.toolCalls += calls.length;
   if (interval > 0 && world.toolCalls >= interval) {
     world.toolCalls = 0;

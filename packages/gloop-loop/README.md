@@ -1,322 +1,419 @@
 # @hypen-space/gloop-loop
 
-A drop-in recursive agent loop with OpenRouter support + easily extendable for any other provider.
-Comes with built in npm compatible defaults, but also usable in browsers.
+A recursive, actor-style agent loop for LLMs. Typed events, chainable builder, batteries-included for Node/Bun, portable to the browser.
 
-## What is this?
-
-gloop-loop models an LLM agent as a recursive interpreter over **Forms** -- pure data values that describe what to do next (think, invoke a tool, ask the user, emit text, etc.). The interpreter evaluates forms one at a time, threading immutable state (`World`) through each step and performing side effects through an injected `Effects` interface. The result is a small (~2K LOC), zero-framework agent kernel where every behavior is explicit and composable.
-
-## Installation
+## Install
 
 ```bash
-npm install @hypen-space/gloop-loop
-# or
-pnpm add @hypen-space/gloop-loop
-# or
 bun add @hypen-space/gloop-loop
+# or: npm install / pnpm add
 ```
 
-## Quick Start
+You also need an `OPENROUTER_API_KEY` in the environment.
 
+## Quick start — a deploy bot with 5 tools
 
 ```ts
 import { AgentLoop, OpenRouterProvider } from "@hypen-space/gloop-loop";
 
 const agent = new AgentLoop({
   provider: new OpenRouterProvider({ apiKey: process.env.OPENROUTER_API_KEY! }),
-  model: "anthropic/claude-sonnet-4",
-  system: "You are a helpful assistant.",
+  model: "anthropic/claude-sonnet-4.5",
+  system: "You are a deploy bot. Use the tools to help the user.",
+
+  tools: [
+    {
+      name: "ListEnvironments",
+      description: "List all deployment environments.",
+      arguments: [],
+      execute: async () => "staging, prod, canary",
+    },
+    {
+      name: "GetStatus",
+      description: "Get the current deployment status of an environment.",
+      arguments: [{ name: "env", description: "Environment name" }],
+      execute: async (args) => `${args.env}: healthy, 3 instances`,
+    },
+    {
+      name: "Deploy",
+      description: "Deploy the current build to an environment.",
+      arguments: [
+        { name: "env", description: "Target environment" },
+        { name: "version", description: "Version tag" },
+      ],
+      askPermission: (args) => `Deploy ${args.version} to ${args.env}?`,
+      execute: async (args) => `Deployed ${args.version} to ${args.env}`,
+    },
+    {
+      name: "Rollback",
+      description: "Roll back an environment.",
+      arguments: [{ name: "env", description: "Environment" }],
+      askPermission: (args) => `Rollback ${args.env}?`,
+      execute: async (args) => `Rolled ${args.env} back`,
+    },
+    {
+      name: "CompleteTask",
+      description: "Call when you're done.",
+      arguments: [{ name: "summary", description: "What was done" }],
+      execute: async (args) => args.summary ?? "Done",
+    },
+  ],
+
+  confirm: async () => true, // auto-approve for a script; drop for TUIs
 });
 
-await agent.run("What files are in the current directory?");
+agent
+  .on("stream_chunk",   (e) => process.stdout.write(e.text))
+  .on("tool_start",     (e) => console.log(`  → ${e.name}(${e.preview})`))
+  .on("tool_done",      (e) => console.log(`  ${e.ok ? "✓" : "✗"} ${e.name}`))
+  .on("task_complete",  (e) => console.log(`\n[done] ${e.summary}`));
+
+await agent.sendSync("deploy v2.1.0 to staging and tell me the status");
+await agent.stop();
 ```
 
-With no `tools` passed, the agent gets all built-in tools (file I/O, shell, memory, context management) out of the box, streams to stdout, and prompts via stdin.
+Everything you need to know:
 
+- **`ToolDefinition`** is a plain object. No decorators, no Zod, no codegen.
+- **`askPermission`** returns a string → agent pauses, UI confirms, then runs. Returns `null` → just runs.
+- **`agent.on(type, handler)`** — handler is type-narrowed, no `switch`, no casts.
+- **`sendSync(msg)`** auto-starts the loop, runs one turn, resolves/rejects when that turn finishes.
 
-## Core Concepts
+If you don't pass `tools`, you get the full built-in set — `ReadFile`, `WriteFile`, `Patch_file`, `Bash`, `AskUser`, `Remember`, `Forget`, `ManageContext`, `CompleteTask` — for free.
 
-### Forms
+## Features
 
-A Form is a tagged union describing the next action. The interpreter pattern-matches on the tag and recurses until it hits a terminal form (`Done` or `Nil`). There are 14 form types:
+### Three shapes for driving the loop
 
-| Form | Purpose |
-|------|---------|
-| `Think(input)` | Send input to the LLM and stream its response |
-| `Invoke(calls, cont)` | Execute tool calls, pass results to continuation |
-| `Confirm(cmd, cont)` | Ask user to approve a command |
-| `Ask(question, cont)` | Prompt user for free-form input |
-| `Remember(content, then)` | Persist a note to memory |
-| `Forget(content, then)` | Remove a note from memory |
-| `Emit(text, then)` | Output text to the user |
-| `Refresh()` | Refresh the system prompt |
-| `Done(summary)` | Terminal -- task complete |
-| `Nil` | Terminal -- no-op |
-| `Seq(...forms)` | Evaluate a sequence of forms |
-| `Install(source)` | Install a tool from a URL or path |
-| `ListTools()` | List registered tools |
-| `Spawn(task, cont)` | Delegate a task to a subagent |
-
-Each non-terminal form carries a continuation -- a function that takes the result and returns the next form. The entire control flow is a chain of pure data transformations.
-
-### World
-
-Immutable state threaded through evaluation:
+**Script — one message, await it:**
 
 ```ts
-interface World {
-  convo: AIConversation;   // conversation history + LLM access
-  registry: ToolRegistry;  // registered tools
-  toolCalls: number;       // counter for auto context pruning
-  signal?: AbortSignal;    // cancellation
+await agent.sendSync("do the thing");
+await agent.stop();
+```
+
+**Pipeline — stage messages then go:**
+
+```ts
+agent.send("read the spec").send("write the code").send("run the tests").start();
+await agent.awaitIdle();   // all three turns done
+await agent.stop();
+```
+
+`send()` deliberately does **not** auto-start so you can stage a batch.
+
+**Interactive — event stream drives the UI:**
+
+```ts
+const agent = new AgentLoop({ provider, model, system, tools })
+  .on("stream_chunk",    (e) => ui.appendStream(e.text))
+  .on("tool_start",      (e) => ui.showTool(e.id, e.name, e.preview))
+  .on("tool_done",       (e) => ui.finishTool(e.id, e.ok, e.output))
+  .on("confirm_request", (e) => ui.openConfirm(e.id, e.command))
+  .on("ask_request",     (e) => ui.openAsk(e.id, e.question))
+  .start();
+
+onUserSubmit = (text)       => agent.send(text);
+onEscape     = ()           => agent.interrupt();
+onConfirm    = (id, ok)     => agent.respondToConfirm(id, ok);
+onAsk        = (id, answer) => agent.respondToAsk(id, answer);
+```
+
+### Typed events with no `switch` ladder
+
+```ts
+import { type StreamChunkEvent, type ToolDoneEvent } from "@hypen-space/gloop-loop";
+
+const logChunk = (e: StreamChunkEvent) => process.stdout.write(e.text);
+const logTool  = (e: ToolDoneEvent)    => log({ tool: e.name, ok: e.ok });
+
+agent.on("stream_chunk", logChunk).on("tool_done", logTool);
+```
+
+16 per-variant aliases exported: `TurnStartEvent`, `TurnEndEvent`, `BusyEvent`, `IdleEvent`, `QueueChangedEvent`, `StreamChunkEvent`, `StreamDoneEvent`, `ToolStartEvent`, `ToolDoneEvent`, `MemoryEvent`, `SystemRefreshedEvent`, `TaskCompleteEvent`, `InterruptedEvent`, `ErrorEvent`, `FatalEvent`, `ConfirmRequestEvent`, `AskRequestEvent`.
+
+One-shot promise helper for "wait for next X":
+
+```ts
+const done = await agent.nextEvent("task_complete");
+console.log(done.summary);   // typed as string
+
+const bashOk = await agent.nextEvent((e) =>
+  e.type === "tool_done" && e.name === "Bash" && e.ok,
+);
+```
+
+### Four ways to set the system prompt
+
+| When | Use |
+|---|---|
+| At startup | Constructor `system` option |
+| Immediately, right now | `agent.setSystem(prompt)` — chainable |
+| Between queued messages (inbox-ordered) | `agent.send({ role: "system", content: prompt })` |
+| Rebuild from external state | `refreshSystem: async () => buildPrompt()` option |
+
+Why four? Because "change the prompt between message A and message B" and "change the prompt immediately" are different operations. `setSystem` is immediate and races with the inbox; `send({role: "system", ...})` slots into the inbox at a precise position:
+
+```ts
+agent
+  .send("list the files")                              // original prompt
+  .send({ role: "system", content: "now be harsh" })   // swaps mid-pipeline
+  .send("review the first one")                        // new prompt
+  .start();
+```
+
+### Mutating the tool set between turns
+
+All chainable, all take effect on the next turn:
+
+```ts
+agent.addTool(newTool);          // add one
+agent.removeTool("OldTool");     // remove one
+agent.setTools([...newTools]);   // replace everything atomically
+```
+
+The loop re-reads the registry before each LLM call, so changes land immediately on the next turn.
+
+### File-backed memory (opt-in)
+
+**The default is no-op** — the library never writes to disk unless you ask. To opt in:
+
+```ts
+import { createFileMemory } from "@hypen-space/gloop-loop";
+
+const memory = createFileMemory();                   // .gloop/memory.md in cwd
+const memory = createFileMemory({ dir: ".notes" });  // .notes/memory.md
+const memory = createFileMemory({
+  dir: ".notes",
+  file: "agent.md",
+  maxEntryLength: 1000,
+});
+
+const agent = new AgentLoop({
+  provider, model,
+  remember: memory.remember,
+  forget:   memory.forget,
+});
+
+// Read the current contents anywhere:
+const notes = await memory.read();
+```
+
+`createFileMemory` returns `{ remember, forget, read }` — closures captured over the config. **Two instances with different `dir`s are fully independent.** Entries longer than `maxEntryLength` are collapsed to a single line and truncated with `[truncated] ...` so the file stays tidy.
+
+If you don't opt in, the `memory` event still fires so your UI can react — but nothing hits disk. Bring your own persistence:
+
+```ts
+remember: async (content) => db.insert("memories", { content }),
+forget:   async (content) => db.delete("memories", { content }),
+```
+
+### Fatal errors and process-level restart (reboot pattern)
+
+Some errors mean the host should tear down and restart the whole process (e.g. a self-modifying agent that has updated its own code and needs to reload). Classify them:
+
+```ts
+class RebootError extends Error {
+  constructor(public readonly reason: string) {
+    super(`Reboot: ${reason}`);
+    this.name = "RebootError";
+  }
 }
-```
 
-### Effects
+const agent = new AgentLoop({
+  provider, model, system, tools,
+  isFatal: (err) => err instanceof RebootError,
+});
 
-All I/O is injected through the `Effects` interface. The interpreter never does I/O directly -- it calls effect functions. This makes the loop testable, portable, and embeddable in any UI.
-
-```ts
-interface Effects {
-  streamChunk: (text: string) => void;
-  streamDone: () => void;
-  toolStart: (name: string, preview: string) => void;
-  toolDone: (name: string, ok: boolean, output: string) => void;
-  confirm: (command: string) => Promise<boolean>;
-  ask: (question: string) => Promise<string>;
-  remember: (content: string) => Promise<void>;
-  forget: (content: string) => Promise<void>;
-  refreshSystem: () => Promise<void>;
-  manageContext: (instructions: string) => Promise<string>;
-  complete: (summary: string) => void;
-  installTool: (source: string) => Promise<string>;
-  listTools: () => string;
-  spawn: (task: string) => Promise<SpawnResult>;
-  log?: (label: string, content: string) => void;
-}
-```
-
-### AgentLoop
-
-The batteries-included wrapper. Constructs `World`, `Effects`, and a `ToolRegistry` from a single options object. Exposes `.run()`, `.addTool()`, `.setSystem()`, and `.clear()`.
-
-## Custom Tools
-
-Define a `ToolDefinition` and register it:
-
-```ts
-agent.addTool({
-  name: "GetWeather",
-  description: "Get current weather for a city",
-  arguments: [{ name: "city", description: "City name" }],
-  execute: async (args) => {
-    const resp = await fetch(`https://wttr.in/${args.city}?format=3`);
-    return resp.text();
-  },
+agent.on("fatal", async (e) => {
+  await saveState();
+  await agent.stop();
+  process.exit(75);   // let your launcher respawn
 });
 ```
 
-Tools can optionally define `askPermission` to require user confirmation before execution:
+When `isFatal` returns `true`, the actor:
+
+1. Stops the loop (no more turns)
+2. Clears the inbox
+3. Emits `fatal` **instead of** `error`
+4. `sendSync` rejects with the fatal error
+
+Non-fatal errors keep the loop alive — the next queued message is processed normally. This is the difference between "the current turn failed" and "the whole agent needs to die".
+
+### Cancellation
+
+```ts
+const pending = agent.sendSync("Refactor the whole codebase");
+
+// Later — user hits escape:
+agent.interrupt();
+
+try {
+  await pending;
+} catch (err) {
+  if (err.name === "AbortError") console.log("Interrupted");
+}
+
+// Loop is still alive — keep sending:
+await agent.sendSync("Never mind, just a small refactor");
+```
+
+`interrupt()` aborts the current turn; the loop keeps running. To tear everything down: `await agent.stop()`.
+
+### Custom tools with permission prompts
 
 ```ts
 agent.addTool({
   name: "Deploy",
-  description: "Deploy the app to production",
-  arguments: [{ name: "env", description: "Target environment" }],
+  description: "Deploy to a target environment.",
+  arguments: [{ name: "env", description: "Target env" }],
   askPermission: (args) => `Deploy to ${args.env}?`,
-  execute: async (args) => {
-    await deployTo(args.env);
-    return `Deployed to ${args.env}`;
+  execute: async (args) => `Deployed to ${args.env}`,
+});
+```
+
+`askPermission` returning a string makes the loop emit a `confirm_request` event (or call your `confirm` option if you passed one). The tool's `execute` only runs after the user answers yes via `agent.respondToConfirm(id, ok)`.
+
+### Common one-liners
+
+| I want to… | Code |
+|---|---|
+| Subscribe to everything | `agent.onEvent((e) => {...})` |
+| Subscribe to one event type (narrowed) | `agent.on("tool_done", (e) => ...)` |
+| Unsubscribe | `agent.off("tool_done", handler)` or `agent.offEvent(listener)` |
+| Wait for a specific event | `await agent.nextEvent("task_complete")` |
+| Wait for the inbox to drain | `await agent.awaitIdle()` |
+| Send and wait for THIS turn to finish | `await agent.sendSync(msg)` |
+| Send and forget | `agent.send(msg)` |
+| Interrupt current turn | `agent.interrupt()` |
+| Stop everything | `await agent.stop()` |
+| Reset conversation | `agent.clear()` |
+| Change system prompt now | `agent.setSystem(prompt)` |
+| Change system prompt inbox-ordered | `agent.send({ role: "system", content: prompt })` |
+| Pin to one OpenRouter provider | `agent.convo.setProviderRouting({ only: ["anthropic"] })` |
+| Get conversation history | `agent.convo.getHistory()` |
+| Restore conversation history | `agent.convo.setHistory([...])` |
+
+### Built-in tools (when you don't pass `tools`)
+
+| Tool | Does |
+|---|---|
+| `ReadFile` | Read a file |
+| `WriteFile` | Write literal content to a file (with safety checks) |
+| `Patch_file` | Apply a unified-diff patch |
+| `Bash` | Run a shell command |
+| `AskUser` | Prompt the user |
+| `Remember` / `Forget` | Call your memory callbacks |
+| `ManageContext` | Prune conversation history when it gets long |
+| `CompleteTask` | Signal task completion with a summary |
+
+### Browser / custom IO
+
+`primitiveTools()` uses `node:fs` and `node:child_process`. Pass your own:
+
+```ts
+const agent = new AgentLoop({
+  provider, model, system,
+  io: {
+    readFile:   async (path) => fetch(`/api/read?p=${path}`).then((r) => r.text()),
+    fileExists: async (path) => true,
+    writeFile:  async (path, content) => { /* POST to server */ },
+    exec:       async (command) => ({ stdout: "", stderr: "no shell here", exitCode: 1 }),
   },
 });
 ```
 
-Passing `tools` to `AgentLoop` **replaces** the defaults entirely. Use `primitiveTools()` to keep the builtins alongside your custom tools:
-
-```ts
-import { AgentLoop, OpenRouterProvider, primitiveTools } from "@hypen-space/gloop-loop";
-
-const agent = new AgentLoop({
-  provider: new OpenRouterProvider({ apiKey: "..." }),
-  model: "anthropic/claude-sonnet-4",
-  tools: [...primitiveTools(), myCustomTool],
-});
-```
-
-## Low-Level API
-
-For full control, use `run()` or `eval_()` directly with your own `World` and `Effects`:
-
-```ts
-import {
-  run, eval_, mkWorld, Think, Done, Seq,
-  AI, OpenRouterProvider, ToolRegistry,
-  registerBuiltins, createNodeIO, createEffects,
-  type Effects,
-} from "@hypen-space/gloop-loop";
-
-// 1. Set up tools
-const registry = new ToolRegistry();
-registerBuiltins(registry, createNodeIO());
-
-// 2. Set up conversation
-const provider = new OpenRouterProvider({ apiKey: "..." });
-const ai = new AI(provider, "anthropic/claude-sonnet-4");
-const convo = ai.conversation({ model: "anthropic/claude-sonnet-4", system: "You help." });
-
-// 3. Set up effects and world
-const effects = createEffects({ convo, registry });
-const world = mkWorld(convo, registry);
-
-// Option A: run from user input (parses slash commands, then evaluates)
-await run("Hello!", world, effects);
-
-// Option B: evaluate a form directly
-await eval_(Think("What files are here?"), world, effects);
-
-// Option C: compose forms by hand
-await eval_(Seq(Think("List three colors"), Done("Listed colors")), world, effects);
-```
-
-## Built-in Tools
-
-`primitiveTools()` returns the default tool set:
-
-| Tool | Description |
-|------|-------------|
-| `ReadFile` | Read a file from the filesystem |
-| `WriteFile` | Write literal content to a file (with safety checks against accidental overwrites) |
-| `Patch_file` | Apply a git-style unified diff patch |
-| `Bash` | Execute shell commands (with optional timeout, confirmation for destructive ops) |
-| `CompleteTask` | Signal task completion and return a summary |
-| `AskUser` | Prompt the user for input |
-| `Remember` | Store a note in persistent memory (`.gloop/memory.md`) |
-| `Forget` | Remove a note from persistent memory |
-| `ManageContext` | Prune conversation history to manage context length |
-
-## Custom Effects
-
-Override specific behaviors via `AgentLoopOptions`:
-
-```ts
-const agent = new AgentLoop({
-  provider: new OpenRouterProvider({ apiKey: "..." }),
-  model: "anthropic/claude-sonnet-4",
-  onStream: (text) => ws.send(JSON.stringify({ type: "text", text })),
-  onToolStatus: (name, status) => logger.info(`[${name}] ${status}`),
-  ask: async (question) => waitForUserResponse(question),
-  confirm: async (command) => showConfirmDialog(command),
-  onComplete: (summary) => ui.finish(summary),
-  remember: async (content) => db.insert("memories", { content }),
-  forget: async (content) => db.delete("memories", { content }),
-  log: (label, content) => console.debug(`[${label}]`, content),
-});
-```
-
-Or use `createEffects()` directly when working with the low-level API:
-
-```ts
-const effects = createEffects({
-  convo,
-  registry,
-  onStream: (text) => socket.send(text),
-  confirm: async () => true, // auto-approve everything
-});
-```
-
-## Abort / Cancellation
-
-Thread an `AbortController` to cancel a running agent:
-
-```ts
-import { AgentLoop, OpenRouterProvider, AbortError } from "@hypen-space/gloop-loop";
-
-const controller = new AbortController();
-
-const agent = new AgentLoop({
-  provider: new OpenRouterProvider({ apiKey: "..." }),
-  model: "anthropic/claude-sonnet-4",
-  signal: controller.signal,
-});
-
-setTimeout(() => controller.abort(), 30_000);
-
-try {
-  await agent.run("Refactor the auth module");
-} catch (err) {
-  if (err instanceof AbortError) {
-    console.log("Agent was cancelled");
-  }
-}
-```
+A complete browser example lives in `examples/browser.html`.
 
 ## API Reference
 
-### AI Layer
+### AgentLoop
 
-| Export | Kind | Description |
-|--------|------|-------------|
-| `OpenRouterProvider` | class | `AIProvider` implementation backed by OpenRouter |
-| `AI` | class | Entry point: `.model()`, `.chat()`, `.conversation()` |
-| `AIConversation` | class | Stateful multi-turn conversation with streaming |
-| `AIBuilder` | class | Fluent request builder with lazy parameter resolution |
-| `AIProvider` | type | Provider interface: `complete()` + `stream()` |
-| `AIProviderConfig` | type | `{ apiKey, baseUrl?, defaultModel? }` |
-| `AIRequestConfig` | type | Full request configuration |
-| `AIResponse` | type | Completion response |
-| `StreamResult` | type | `{ textStream, toolCalls, cancel() }` |
+| Method | Returns | Chainable | Auto-starts |
+|---|---|---|---|
+| `new AgentLoop(opts)` | `AgentLoop` | — | no |
+| `.start()` | `this` | ✓ | (is the start) |
+| `.stop()` | `Promise<void>` | — | — |
+| `.send(msg)` | `this` | ✓ | **no** |
+| `.sendSync(msg)` | `Promise<void>` | — | **yes** |
+| `.interrupt()` | `this` | ✓ | — |
+| `.awaitIdle()` | `Promise<void>` | — | — |
+| `.nextEvent(type \| filter)` | `Promise<event>` | — | — |
+| `.on(type, handler)` | `this` | ✓ | — |
+| `.off(type, handler)` | `this` | ✓ | — |
+| `.onEvent(listener)` | `this` | ✓ | — |
+| `.offEvent(listener)` | `this` | ✓ | — |
+| `.addTool(tool)` | `this` | ✓ | — |
+| `.removeTool(name)` | `this` | ✓ | — |
+| `.setTools(tools)` | `this` | ✓ | — |
+| `.setSystem(prompt)` | `this` | ✓ | — |
+| `.clear()` | `this` | ✓ | — |
+| `.respondToConfirm(id, ok)` | `this` | ✓ | — |
+| `.respondToAsk(id, answer)` | `this` | ✓ | — |
+| `.isRunning()` | `boolean` | — | — |
+| `.pending()` | `number` | — | — |
 
-### Tools
+Readable state: `agent.convo`, `agent.registry`, `agent.world`.
 
-| Export | Kind | Description |
-|--------|------|-------------|
-| `ToolRegistry` | class | Register, lookup, and list tool definitions |
-| `primitiveTools()` | function | Returns the default builtin tools array |
-| `registerBuiltins()` | function | Register all builtins onto a registry |
-| `ToolDefinition` | type | `{ name, description, arguments, execute, askPermission? }` |
-| `ToolArgument` | type | `{ name, description }` |
-| `ToolCall` | type | `{ name, rawArgs }` |
-| `ToolResult` | type | `{ name, output, success }` |
-| `BuiltinIO` | type | IO interface for builtin tools (fs + shell) |
-| `formatShellResult()` | function | Format a `ShellResult` for display |
+### AgentEvent
 
-### Core Loop
+Discriminated union on `.type`:
 
-| Export | Kind | Description |
-|--------|------|-------------|
-| `run()` | function | `(input, world, effects, config?) => Promise<void>` |
-| `eval_()` | function | `(form, world, effects, config?) => Promise<void>` |
-| `mkWorld()` | function | Create a `World` from conversation + registry |
-| `parseInput()` | function | Parse user input into a Form (slash commands, etc.) |
-| `toolCallsToForm()` | function | Convert tool calls to a Form with continuations |
-| `formatResults()` | function | Format `ToolResult[]` for the LLM |
-| `Think`, `Invoke`, `Confirm`, `Ask`, `Remember`, `Forget`, `Emit`, `Refresh`, `Done`, `Seq`, `Nil`, `Install`, `ListTools`, `Spawn` | functions | Form constructors |
-| `AbortError` | class | Thrown on cancellation |
-| `raceAbort()` | function | Race a promise against an `AbortSignal` |
-| `Form` | type | Tagged union of all form types |
-| `Effects` | type | Side-effect callback interface |
-| `World` | type | Interpreter state |
-| `LoopConfig` | type | Optional loop configuration (prune interval, spawn classifier) |
+| Type | Payload | When |
+|---|---|---|
+| `turn_start` | `{ message }` | About to process a message |
+| `turn_end` | — | Turn finished (normally, errored, or interrupted) |
+| `busy` / `idle` | — | Loop state |
+| `queue_changed` | `{ pending }` | Inbox size changed |
+| `stream_chunk` | `{ text }` | Assistant text chunk |
+| `stream_done` | — | Stream finished (tools may follow) |
+| `tool_start` | `{ id, name, preview }` | Tool invocation started |
+| `tool_done` | `{ id, name, ok, output }` | Tool invocation finished |
+| `memory` | `{ op, content }` | Agent called Remember / Forget |
+| `system_refreshed` | — | System prompt was updated |
+| `task_complete` | `{ summary }` | `CompleteTask` was called |
+| `interrupted` | — | Current turn aborted |
+| `error` | `{ error: Error }` | Turn failed (non-fatal) |
+| `fatal` | `{ error: Error }` | Turn failed; loop has stopped itself |
+| `confirm_request` | `{ id, command }` | Answer with `respondToConfirm` |
+| `ask_request` | `{ id, question }` | Answer with `respondToAsk` |
 
-### Defaults
+### Options
 
-| Export | Kind | Description |
-|--------|------|-------------|
-| `AgentLoop` | class | High-level entry point wiring everything together |
-| `AgentLoopOptions` | type | Configuration for `AgentLoop` |
-| `createEffects()` | function | Build a complete `Effects` with sensible defaults |
-| `createNodeIO()` | function | Node.js `BuiltinIO` implementation (fs + child_process) |
-| `appendMemory()` | function | Append to `.gloop/memory.md` |
-| `removeMemory()` | function | Remove from `.gloop/memory.md` |
-| `readMemory()` | function | Read `.gloop/memory.md` |
-| `manageContextFork()` | function | Context pruning via conversation fork |
+| Option | Default | Purpose |
+|---|---|---|
+| `provider` | **required** | `AIProvider` (e.g. `new OpenRouterProvider({apiKey})`) |
+| `model` | **required** | Model id (e.g. `"anthropic/claude-sonnet-4.5"`) |
+| `system` | — | Initial system prompt |
+| `tools` | `primitiveTools()` | Tool set |
+| `io` | `createNodeIO()` | Custom fs/shell adapter for `primitiveTools()` |
+| `confirm` | emit `confirm_request` event | Direct answer to a permission prompt |
+| `ask` | emit `ask_request` event | Direct answer to a free-form question |
+| `remember` | no-op | Persistence for the Remember tool |
+| `forget` | no-op | Persistence for the Forget tool |
+| `refreshSystem` | no-op | Rebuild the system prompt on request |
+| `installTool` | not available stub | Runtime tool install |
+| `listTools` | registry names | Human-readable tool list |
+| `spawn` | not configured stub | Delegate to a subagent process |
+| `isFatal` | — | Classify an error as fatal (stops the loop) |
+| `contextPruneInterval` | 50 | Tool-call count between auto-prunes |
+| `classifySpawn` | — | Classify tool calls as spawn tasks |
+| `log` | — | Debug logger |
 
-## Runtime Compatibility
+### Other exports
 
-- **Node.js >= 18** and **Bun**: fully supported.
-- The core loop (`core/`) and AI layer (`ai/`) are portable -- no Node.js-specific APIs.
-- `defaults/` and `primitiveTools()` use Node.js APIs (`fs`, `child_process`, `readline`). Provide your own `BuiltinIO` and `Effects` implementations to run in other environments.
+- **Providers**: `OpenRouterProvider`, `AI`, `AIBuilder`, `AIConversation`
+- **Tools**: `ToolDefinition`, `ToolCall`, `ToolResult`, `ToolRegistry`, `primitiveTools`, `registerBuiltins`
+- **Memory**: `createFileMemory`, `FileMemory`, `FileMemoryOptions`, `appendMemory`, `removeMemory`, `readMemory`
+- **Errors**: `AbortError`
+- **Low-level interpreter** (advanced): `run`, `eval_`, `mkWorld`, Form constructors (`Think`, `Invoke`, `Done`, ...), `Effects`, `World`, `LoopConfig`
+
+## Runtime compatibility
+
+- **Bun** and **Node.js ≥ 18**
+- Core loop and AI layer are portable (no Node APIs)
+- Primitive tools use `node:fs` + `node:child_process` — override `io` for other runtimes
 
 ## License
 

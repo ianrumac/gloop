@@ -15,7 +15,7 @@ const DANGEROUS_PATTERNS = [
 export function requiresConfirmation(call: ToolCall): string | null {
   if (call.name !== "Bash") return null;
 
-  const command = call.rawArgs[0] ?? "";
+  const command = call.args.command ?? "";
   for (const pattern of DANGEROUS_PATTERNS) {
     if (pattern.test(command)) {
       return command;

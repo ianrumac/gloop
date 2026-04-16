@@ -7,18 +7,22 @@
 
 import React from "react";
 import { render } from "ink";
-import { createAI } from "../src/ai/index.ts";
-import { ToolRegistry, registerBuiltins } from "../src/tools/index.ts";
+import { OpenRouterProvider } from "@hypen-space/gloop-loop";
+import { registerBuiltins } from "../src/tools/index.ts";
 import { ensureGloopDir, appendMemory, removeMemory } from "../src/core/memory.ts";
 import { buildSystemPrompt } from "../src/core/system.ts";
-import { enableDebug, debugLog } from "../src/core/debug.ts";
-import { loadRebootSession, saveRebootSession } from "../src/core/session.ts";
-import { run, mkWorld, type Effects } from "../src/core/core.ts";
-import { RebootError } from "../src/tools/builtins.ts";
-import { parseTaskCliArgs, runTaskSubagent } from "../src/core/task-mode.ts";
+import { enableDebug, debugLog, debugLogRaw } from "../src/core/debug.ts";
+import {
+  loadRebootSession,
+  rebootIsFatal,
+  wireRebootHandler,
+} from "../src/core/session.ts";
+import { AgentLoop } from "../src/core/core.ts";
+import { parseGloopTaskBashCommand, parseTaskCliArgs, runTaskSubagent } from "../src/core/task-mode.ts";
 import { ensureSelfCopy } from "./self-copy.ts";
 import App from "../components/App.tsx";
 import { installTool } from "./install-tool.ts";
+import { DEFAULT_GLOOP_MODEL } from "../src/core/default-model.ts";
 
 // Special exit code that signals "please restart me"
 const REBOOT_EXIT_CODE = 75;
@@ -30,12 +34,11 @@ const REBOOT_EXIT_CODE = 75;
 const args = process.argv.slice(2);
 const clone = args.includes("--clone");
 
-// ============================================================================
-// SELF-COPY CHECK (only with --clone)
-// ============================================================================
+// ---- Self-copy check (only with --clone) ----
 if (clone) {
   await ensureSelfCopy();
 }
+
 const taskRequest = parseTaskCliArgs(args);
 if (taskRequest) {
   const result = await runTaskSubagent(taskRequest, { cwd: process.cwd() });
@@ -52,40 +55,92 @@ if (taskRequest) {
 const debug = args.includes("--debug");
 const providerIdx = args.indexOf("--provider");
 const providerName = providerIdx !== -1 ? args[providerIdx + 1] : undefined;
-const model = args.find((a, i) =>
-  !a.startsWith("--") && i !== providerIdx + 1
-) ?? "x-ai/grok-4.1-fast";
+const model =
+  args.find(
+    (a, i) =>
+      !a.startsWith("--") &&
+      (providerIdx === -1 || i !== providerIdx + 1)
+  ) ?? DEFAULT_GLOOP_MODEL;
 
 if (debug) enableDebug();
 
-const ai = createAI({
-  apiKey: process.env.OPENROUTER_API_KEY!,
-  defaultModel: model,
-});
-
-const registry = new ToolRegistry();
-registerBuiltins(registry, { clone });
-
 await ensureGloopDir();
-
-// Load custom tools
-const reloadTool = registry.get("Reload");
-if (reloadTool) await reloadTool.execute({});
 
 // Build system prompt
 let systemPrompt = await buildSystemPrompt({ clone });
 debugLog("SYSTEM", systemPrompt);
 
-const convo = ai.conversation({ system: systemPrompt });
+// Check for reboot session (so we can restore history after the actor is built)
+const rebootSession = await loadRebootSession();
+
+// ============================================================================
+// BUILD THE ACTOR
+// ============================================================================
+
+const provider = new OpenRouterProvider({
+  apiKey: process.env.OPENROUTER_API_KEY!,
+});
+
+const agent: AgentLoop = new AgentLoop({
+  provider,
+  model,
+  system: systemPrompt,
+  // Start with no tools; we register builtins into the actor's own registry
+  // below so Reload/installTool see the same registry the loop uses.
+  tools: [],
+  log: debug ? (label, content) => debugLogRaw(label, content) : undefined,
+  // A RebootError from the Reboot tool stops the loop and fires a `fatal`
+  // event — see wireRebootHandler below.
+  isFatal: rebootIsFatal,
+
+  // Spawn classifier: detect `gloop --task "..."` in Bash calls.
+  classifySpawn: (call) => {
+    if (call.name !== "Bash") return null;
+    const req = parseGloopTaskBashCommand(call.args.command ?? "");
+    return req ? req.task : null;
+  },
+
+  // confirm / ask are NOT set — the actor will emit confirm_request /
+  // ask_request events and the UI will respond via
+  // agent.respondToConfirm / agent.respondToAsk.
+
+  remember: async (content) => {
+    await appendMemory(content);
+    debugLog("REMEMBER", content);
+  },
+  forget: async (content) => {
+    await removeMemory(content);
+    debugLog("FORGET", content);
+  },
+
+  refreshSystem: async () => {
+    systemPrompt = await buildSystemPrompt({ clone });
+    debugLog("SYSTEM", "System prompt refreshed");
+    return systemPrompt;
+  },
+
+  installTool: (source) => installTool(source, agent.registry),
+
+  spawn: (task) => runTaskSubagent({ task, model }, { cwd: process.cwd() }),
+});
+
+// Register builtins into the actor's registry so Reload/install see the same
+// registry the loop uses.
+registerBuiltins(agent.registry, { clone });
+
+// Load custom tools via Reload so the actor sees them from turn 1.
+const reloadTool = agent.registry.get("Reload");
+if (reloadTool) await reloadTool.execute({});
+
+// Wire provider routing (OpenRouter-specific).
 if (providerName) {
-  convo.setProviderRouting({ only: [providerName] });
+  agent.convo.setProviderRouting({ only: [providerName] });
   debugLog("PROVIDER", `Routing to: ${providerName}`);
 }
 
-// Check for reboot session
-const rebootSession = await loadRebootSession();
+// Restore reboot session if present.
 if (rebootSession) {
-  convo.setHistory(rebootSession.history);
+  agent.convo.setHistory(rebootSession.history);
   debugLog("REBOOT", `Restored session: ${rebootSession.reason}`);
 }
 
@@ -97,68 +152,21 @@ const { unmount } = render(
   React.createElement(App, {
     model,
     rebootReason: rebootSession?.reason,
-    runAgent: async (input, ui, signal) => {
-      const world = mkWorld(convo, registry, signal);
-
-      const fx: Effects = {
-        streamChunk: ui.onStreamChunk,
-        streamDone: ui.onStreamDone,
-        toolStart: ui.onToolStart,
-        toolDone: ui.onToolDone,
-        confirm: ui.onConfirmNeeded,
-        ask: ui.onAskUser,
-
-        remember: async (content) => {
-          await appendMemory(content);
-          ui.onRemember(content);
-          debugLog("REMEMBER", content);
-        },
-
-        forget: async (content) => {
-          await removeMemory(content);
-          ui.onForget(content);
-          debugLog("FORGET", content);
-        },
-
-        refreshSystem: async () => {
-          systemPrompt = await buildSystemPrompt({ clone });
-          convo.setSystem(systemPrompt);
-          ui.onSystemPromptRefreshed();
-          debugLog("SYSTEM", "System prompt refreshed");
-        },
-
-        manageContext: async (instructions) => {
-          const { manageContextFork } = await import("../src/core/context-manager.ts");
-          return manageContextFork(convo, instructions);
-        },
-
-        complete: ui.onTaskComplete,
-
-        installTool: (source) => installTool(source, registry),
-
-        listTools: () => {
-          const names = registry.names();
-          return `${names.length} tools available: ${names.join(", ")}`;
-        },
-
-        spawn: async (task) => runTaskSubagent({ task, model }, { cwd: process.cwd() }),
-      };
-
-      debugLog("USER", input);
-      try {
-        await run(input, world, fx);
-      } catch (err) {
-        if (err instanceof RebootError) {
-          await saveRebootSession(convo, err.reason);
-          debugLog("REBOOT", `Restarting: ${err.reason}`);
-          unmount();
-          if (process.stdin.isTTY) {
-            process.stdin.setRawMode(false);
-          }
-          process.exit(REBOOT_EXIT_CODE);
-        }
-        throw err;
-      }
-    },
+    agent,
   })
 );
+
+// ============================================================================
+// REBOOT HANDLING
+// ============================================================================
+//
+// The `isFatal: rebootIsFatal` option classifies RebootError as fatal, so
+// the actor stops the loop and emits a `fatal` event.  wireRebootHandler
+// saves the session + invokes our restart callback, which tears down Ink
+// and exits with a special code that the launcher recognises as "restart".
+wireRebootHandler(agent, async () => {
+  unmount();
+  if (process.stdin.isTTY) process.stdin.setRawMode(false);
+  await agent.stop();
+  process.exit(REBOOT_EXIT_CODE);
+});

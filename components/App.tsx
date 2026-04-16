@@ -2,7 +2,7 @@ import React, { useState, useCallback, useRef, useEffect } from "react";
 import { Box, Static, Text, useStdout } from "ink";
 import { Marked } from "marked";
 import { markedTerminal } from "marked-terminal";
-import { AbortError } from "../src/core/core.ts";
+import type { AgentLoop, AgentEvent } from "../src/core/core.ts";
 import ToolExecution from "./ToolExecution.tsx";
 import type { ToolStatus } from "./ToolExecution.tsx";
 import ConfirmDialog from "./ConfirmDialog.tsx";
@@ -12,19 +12,27 @@ import InputPrompt from "./InputPrompt.tsx";
 const marked = new Marked(markedTerminal());
 const renderMd = (s: string) => (marked.parse(s) as string).trimEnd();
 
-function formatError(err: any): string {
-  let msg = `Error: ${err.message || err}`;
-  if (err.status) msg += `\nStatus: ${err.status}`;
-  if (err.error) {
-    const body = typeof err.error === "string" ? err.error : JSON.stringify(err.error, null, 2);
+function formatError(err: Error): string {
+  let msg = `Error: ${err.message}`;
+  // Common shapes from provider SDKs — defensive but no longer `any`.
+  const extras = err as Error & {
+    status?: number;
+    error?: unknown;
+    body?: unknown;
+    cause?: unknown;
+    code?: string;
+  };
+  if (extras.status) msg += `\nStatus: ${extras.status}`;
+  if (extras.error) {
+    const body = typeof extras.error === "string" ? extras.error : JSON.stringify(extras.error, null, 2);
     msg += `\nDetails: ${body}`;
   }
-  if (err.body) {
-    const body = typeof err.body === "string" ? err.body : JSON.stringify(err.body, null, 2);
+  if (extras.body) {
+    const body = typeof extras.body === "string" ? extras.body : JSON.stringify(extras.body, null, 2);
     msg += `\nBody: ${body}`;
   }
-  if (err.cause) msg += `\nCause: ${err.cause}`;
-  if (err.code) msg += `\nCode: ${err.code}`;
+  if (extras.cause) msg += `\nCause: ${String(extras.cause)}`;
+  if (extras.code) msg += `\nCode: ${extras.code}`;
   return msg;
 }
 
@@ -48,24 +56,10 @@ interface LiveTool {
   preview: string;
 }
 
-/** UI callbacks that effects need */
-export interface AgentUI {
-  onStreamChunk(text: string): void;
-  onStreamDone(): void;
-  onToolStart(name: string, preview: string): void;
-  onToolDone(name: string, ok: boolean, output: string): void;
-  onConfirmNeeded(command: string): Promise<boolean>;
-  onAskUser(question: string): Promise<string>;
-  onRemember(content: string): void;
-  onForget(content: string): void;
-  onSystemPromptRefreshed(): void;
-  onTaskComplete(summary: string): void;
-}
-
 interface Props {
   model: string;
   rebootReason?: string;
-  runAgent: (input: string, ui: AgentUI, signal: AbortSignal) => Promise<void>;
+  agent: AgentLoop;
 }
 
 // ============================================================================
@@ -73,92 +67,67 @@ interface Props {
 // ============================================================================
 
 let _id = 0;
-const uid = () => String(++_id);
+const uid = () => `ui_${++_id}`;
 
-export default function App({ model, rebootReason, runAgent }: Props) {
+export default function App({ model, rebootReason, agent }: Props) {
   const { stdout } = useStdout();
   const cols = stdout?.columns ?? 80;
 
-  // Header is the first Static entry — rendered once, scrolls up naturally
+  // Committed timeline — written once to stdout via <Static>.
   const [committed, setCommitted] = useState<CommittedEntry[]>([
     { kind: "header", id: uid(), model },
   ]);
+  // Live (running) tools — shown with spinners in the dynamic area.
   const [liveTools, setLiveTools] = useState<LiveTool[]>([]);
+  // Streaming assistant text for the current turn.
   const [streaming, setStreaming] = useState("");
-  const [confirm, setConfirm] = useState<{ cmd: string; resolve: (ok: boolean) => void } | null>(null);
-  const [askUser, setAskUser] = useState<{ q: string; resolve: (a: string) => void } | null>(null);
+  // Pending confirm / ask dialogs.
+  const [confirmReq, setConfirmReq] = useState<{ id: string; command: string } | null>(null);
+  const [askReq, setAskReq] = useState<{ id: string; question: string } | null>(null);
+  // Busy = actor is actively processing a turn.
   const [busy, setBusy] = useState(false);
+  // Inbox size (kept in state so the indicator re-renders).
+  const [queueSize, setQueueSize] = useState(0);
+
+  // Refs — used as mutation-safe accumulators, never read from JSX.
+  const streamBufRef = useRef("");
+  const liveToolsRef = useRef<LiveTool[]>([]);
   const didResume = useRef(false);
-  const streamBuf = useRef("");
-  const abortRef = useRef<AbortController | null>(null);
-  const queueRef = useRef<string[]>([]);
-  const processingRef = useRef(false);
 
-  // Core processing — constructs UI callbacks and runs the agent
-  const processInput = useCallback(async (input: string) => {
-    processingRef.current = true;
-    setBusy(true);
-    setStreaming("");
-    streamBuf.current = "";
+  // ============================================================================
+  // EVENT SUBSCRIPTION
+  // ============================================================================
 
-    const abort = new AbortController();
-    abortRef.current = abort;
+  useEffect(() => {
+    const listener = (event: AgentEvent) => {
+      switch (event.type) {
+        case "busy":
+          setBusy(true);
+          break;
 
-    const ui: AgentUI = {
-      onStreamChunk(text) {
-        streamBuf.current += text;
-        setStreaming(streamBuf.current);
-      },
-      onStreamDone() {
-        const final = streamBuf.current.trim();
-        if (final) {
-          setCommitted(t => [...t, { kind: "assistant", id: uid(), content: final }]);
-        }
-        setStreaming("");
-        streamBuf.current = "";
-      },
-      onToolStart(name, preview) {
-        const id = uid();
-        setLiveTools(prev => [...prev, { id, name, preview }]);
-      },
-      onToolDone(name, ok, output) {
-        setLiveTools(prev => {
-          const idx = prev.findIndex(t => t.name === name);
-          if (idx === -1) return prev;
-          const tool = prev[idx]!;
-          const status: ToolStatus = ok ? "success" : output === "denied by user" ? "denied" : "error";
-          setCommitted(c => [...c, { kind: "tool", id: tool.id, name: tool.name, preview: tool.preview, status, output }]);
-          return [...prev.slice(0, idx), ...prev.slice(idx + 1)];
-        });
-      },
-      onConfirmNeeded: (cmd) => new Promise(resolve => setConfirm({ cmd, resolve })),
-      onAskUser: (q) => new Promise(resolve => setAskUser({ q, resolve })),
-      onRemember(content) {
-        setCommitted(t => [...t, { kind: "memory", id: uid(), type: "remember", content }]);
-      },
-      onForget(content) {
-        setCommitted(t => [...t, { kind: "memory", id: uid(), type: "forget", content }]);
-      },
-      onSystemPromptRefreshed() {
-        setCommitted(t => [...t, { kind: "system-refresh", id: uid() }]);
-      },
-      onTaskComplete(summary) {
-        setCommitted(t => [...t, { kind: "assistant", id: uid(), content: summary }]);
-      },
-    };
+        case "idle":
+          setBusy(false);
+          break;
 
-    try {
-      await runAgent(input, ui, abort.signal);
-    } catch (err: any) {
-      if (err instanceof AbortError) {
-        setStreaming("");
-        streamBuf.current = "";
-        // Move any still-running tools to committed as interrupted
-        setLiveTools(prev => {
-          if (prev.length > 0) {
-            setCommitted(c => [
+        case "queue_changed":
+          setQueueSize(event.pending);
+          break;
+
+        case "turn_start":
+          // Reset per-turn accumulators.
+          streamBufRef.current = "";
+          setStreaming("");
+          break;
+
+        case "turn_end":
+          // Any still-live tools become "interrupted" committed entries.
+          if (liveToolsRef.current.length > 0) {
+            const drained = liveToolsRef.current;
+            liveToolsRef.current = [];
+            setLiveTools([]);
+            setCommitted((c) => [
               ...c,
-              ...prev.map(t => ({
+              ...drained.map((t) => ({
                 kind: "tool" as const,
                 id: t.id,
                 name: t.name,
@@ -168,67 +137,161 @@ export default function App({ model, rebootReason, runAgent }: Props) {
               })),
             ]);
           }
-          return [];
-        });
-        setCommitted(t => [...t, { kind: "assistant", id: uid(), content: "[Interrupted]" }]);
-      } else {
-        const details = formatError(err);
-        setCommitted(t => [...t, { kind: "assistant", id: uid(), content: details }]);
+          break;
+
+        case "stream_chunk":
+          streamBufRef.current += event.text;
+          setStreaming(streamBufRef.current);
+          break;
+
+        case "stream_done": {
+          const final = streamBufRef.current.trim();
+          streamBufRef.current = "";
+          setStreaming("");
+          if (final) {
+            setCommitted((c) => [...c, { kind: "assistant", id: uid(), content: final }]);
+          }
+          break;
+        }
+
+        case "tool_start": {
+          const tool: LiveTool = { id: event.id, name: event.name, preview: event.preview };
+          liveToolsRef.current = [...liveToolsRef.current, tool];
+          setLiveTools(liveToolsRef.current);
+          break;
+        }
+
+        case "tool_done": {
+          const tool = liveToolsRef.current.find((t) => t.id === event.id);
+          if (!tool) break;
+          liveToolsRef.current = liveToolsRef.current.filter((t) => t.id !== event.id);
+          setLiveTools(liveToolsRef.current);
+          const status: ToolStatus = event.ok
+            ? "success"
+            : event.output === "denied by user"
+              ? "denied"
+              : "error";
+          setCommitted((c) => [
+            ...c,
+            {
+              kind: "tool",
+              id: event.id,
+              name: event.name,
+              preview: tool.preview,
+              status,
+              output: event.output,
+            },
+          ]);
+          break;
+        }
+
+        case "memory":
+          setCommitted((c) => [
+            ...c,
+            { kind: "memory", id: uid(), type: event.op, content: event.content },
+          ]);
+          break;
+
+        case "system_refreshed":
+          setCommitted((c) => [...c, { kind: "system-refresh", id: uid() }]);
+          break;
+
+        case "task_complete":
+          // The assistant's final summary — render as an assistant message.
+          if (event.summary.trim()) {
+            setCommitted((c) => [
+              ...c,
+              { kind: "assistant", id: uid(), content: event.summary },
+            ]);
+          }
+          break;
+
+        case "interrupted":
+          streamBufRef.current = "";
+          setStreaming("");
+          setCommitted((c) => [...c, { kind: "assistant", id: uid(), content: "[Interrupted]" }]);
+          break;
+
+        case "error":
+          // RebootError / fatal errors are handled via wireRebootHandler in
+          // bin/index.ts — they never fire as `error` events.
+          streamBufRef.current = "";
+          setStreaming("");
+          setCommitted((c) => [
+            ...c,
+            { kind: "assistant", id: uid(), content: formatError(event.error) },
+          ]);
+          break;
+
+        case "fatal":
+          // Silently drop — the reboot handler will unmount us momentarily.
+          break;
+
+        case "confirm_request":
+          setConfirmReq({ id: event.id, command: event.command });
+          break;
+
+        case "ask_request":
+          setAskReq({ id: event.id, question: event.question });
+          break;
       }
-    }
+    };
+    agent.onEvent(listener);
 
-    abortRef.current = null;
-    setConfirm(null);
-    setAskUser(null);
+    // Start the actor once the subscription is in place.
+    agent.start();
 
-    // Process next queued input if any
-    // (user entry was already committed by handleSubmit — don't re-commit)
-    const next = queueRef.current.shift();
-    if (next) {
-      await processInput(next);
-    } else {
-      processingRef.current = false;
-      setBusy(false);
-    }
-  }, [runAgent]);
+    return () => {
+      agent.offEvent(listener);
+    };
+  }, [agent]);
 
-  // Submit handler — queues if busy
-  const handleSubmit = useCallback(async (input: string) => {
-    // Always commit the user entry immediately
-    setCommitted(t => [...t, { kind: "user", id: uid(), content: input }]);
+  // ============================================================================
+  // INPUT HANDLERS
+  // ============================================================================
 
-    if (processingRef.current) {
-      queueRef.current.push(input);
-    } else {
-      processInput(input);
-    }
-  }, [processInput]);
+  const handleSubmit = useCallback(
+    (input: string) => {
+      // Commit the user entry immediately — feels responsive.
+      setCommitted((c) => [...c, { kind: "user", id: uid(), content: input }]);
+      agent.send(input);
+    },
+    [agent],
+  );
 
-  // Escape handler — abort current run and clear queue
   const handleEscape = useCallback(() => {
-    if (abortRef.current) {
-      abortRef.current.abort();
-      queueRef.current = [];
-    }
-  }, []);
+    agent.interrupt();
+  }, [agent]);
 
-  // Auto-resume after reboot
+  const handleConfirm = useCallback(
+    (ok: boolean) => {
+      if (confirmReq) {
+        agent.respondToConfirm(confirmReq.id, ok);
+        setConfirmReq(null);
+      }
+    },
+    [agent, confirmReq],
+  );
+
+  const handleAnswer = useCallback(
+    (answer: string) => {
+      if (askReq) {
+        agent.respondToAsk(askReq.id, answer);
+        setAskReq(null);
+      }
+    },
+    [agent, askReq],
+  );
+
+  // Auto-resume after reboot: once on mount.
   useEffect(() => {
     if (rebootReason && !didResume.current) {
       didResume.current = true;
-      handleSubmit(`[System: Rebooted successfully. Reason: ${rebootReason}. Fresh code is now loaded. Continue where you left off.]`);
+      handleSubmit(
+        `[System: Rebooted successfully. Reason: ${rebootReason}. Fresh code is now loaded. Continue where you left off.]`,
+      );
     }
   }, [rebootReason, handleSubmit]);
-
-  const handleConfirm = useCallback((ok: boolean) => {
-    confirm?.resolve(ok);
-    setConfirm(null);
-  }, [confirm]);
-
-  const handleAnswer = useCallback((a: string) => {
-    askUser?.resolve(a);
-    setAskUser(null);
-  }, [askUser]);
 
   // ============================================================================
   // RENDER
@@ -292,7 +355,7 @@ export default function App({ model, rebootReason, runAgent }: Props) {
       {/* Dynamic area — re-rendered each frame, stays at bottom */}
 
       {/* Running tools (spinners) */}
-      {liveTools.map(tool => (
+      {liveTools.map((tool) => (
         <ToolExecution
           key={tool.id}
           name={tool.name}
@@ -305,26 +368,26 @@ export default function App({ model, rebootReason, runAgent }: Props) {
       {streaming ? (
         <Box><Text>{renderMd(streaming)}</Text></Box>
       ) : null}
-      {!streaming && busy && !confirm && !askUser ? (
+      {!streaming && busy && !confirmReq && !askReq ? (
         <Box><Text dimColor>Thinking...</Text></Box>
       ) : null}
 
-      {/* Queued items indicator — shown in dynamic area at the bottom */}
-      {queueRef.current.length > 0 ? (
+      {/* Queued items indicator — now reactive, because queueSize is state */}
+      {queueSize > 0 ? (
         <Box>
-          <Text dimColor>[{queueRef.current.length} queued]</Text>
+          <Text dimColor>[{queueSize} queued]</Text>
         </Box>
       ) : null}
 
       {/* Confirm / AskUser dialogs */}
-      {confirm ? <ConfirmDialog command={confirm.cmd} onResolve={handleConfirm} /> : null}
-      {askUser ? <AskUserDialog question={askUser.q} onAnswer={handleAnswer} /> : null}
+      {confirmReq ? <ConfirmDialog command={confirmReq.command} onResolve={handleConfirm} /> : null}
+      {askReq ? <AskUserDialog question={askReq.question} onAnswer={handleAnswer} /> : null}
 
       {/* Input — always visible; inactive when a dialog needs input */}
       <InputPrompt
         onSubmit={handleSubmit}
         onEscape={handleEscape}
-        isActive={!confirm && !askUser}
+        isActive={!confirmReq && !askReq}
       />
     </Box>
   );

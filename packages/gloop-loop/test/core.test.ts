@@ -222,9 +222,9 @@ function createRecordingFx(opts?: {
 }
 
 /** A classifySpawn hook for testing — recognizes "spawn:task" in Bash calls */
-function testClassifySpawn(call: { name: string; rawArgs: string[] }): string | null {
+function testClassifySpawn(call: { name: string; args: Record<string, string> }): string | null {
   if (call.name !== "Bash") return null;
-  const cmd = call.rawArgs[0] ?? "";
+  const cmd = call.args.command ?? "";
   if (cmd.startsWith("spawn:")) return cmd.slice(6);
   return null;
 }
@@ -240,20 +240,20 @@ describe("toolCallsToForm", () => {
   });
 
   test("regular tool call returns Invoke", () => {
-    const form = toolCallsToForm([{ name: "Echo", rawArgs: ["hi"] }]);
+    const form = toolCallsToForm([{ name: "Echo", args: { text: "hi" } }]);
     expect(form.tag).toBe("invoke");
   });
 
   test("CompleteTask returns Done", () => {
-    const form = toolCallsToForm([{ name: "CompleteTask", rawArgs: ["finished"] }]);
+    const form = toolCallsToForm([{ name: "CompleteTask", args: { summary: "finished" } }]);
     expect(form.tag).toBe("done");
     if (form.tag === "done") expect(form.summary).toBe("finished");
   });
 
   test("mixed regular + CompleteTask invokes tools first", () => {
     const form = toolCallsToForm([
-      { name: "Echo", rawArgs: ["work"] },
-      { name: "CompleteTask", rawArgs: ["done"] },
+      { name: "Echo", args: { text: "work" } },
+      { name: "CompleteTask", args: { summary: "done" } },
     ]);
     expect(form.tag).toBe("invoke");
     if (form.tag === "invoke") {
@@ -266,7 +266,7 @@ describe("toolCallsToForm", () => {
 
   test("classifySpawn creates spawn form", () => {
     const form = toolCallsToForm(
-      [{ name: "Bash", rawArgs: ["spawn:fix tests"] }],
+      [{ name: "Bash", args: { command: "spawn:fix tests" } }],
       testClassifySpawn,
     );
     expect(form.tag).toBe("spawn");
@@ -275,8 +275,8 @@ describe("toolCallsToForm", () => {
   test("mixed spawn and regular tools — invoke plain first", () => {
     const form = toolCallsToForm(
       [
-        { name: "Echo", rawArgs: ["work"] },
-        { name: "Bash", rawArgs: ["spawn:subtask"] },
+        { name: "Echo", args: { text: "work" } },
+        { name: "Bash", args: { command: "spawn:subtask" } },
       ],
       testClassifySpawn,
     );
@@ -289,14 +289,14 @@ describe("toolCallsToForm", () => {
 
   test("without classifySpawn, Bash calls are regular tools", () => {
     const form = toolCallsToForm([
-      { name: "Bash", rawArgs: ["spawn:something"] },
+      { name: "Bash", args: { command: "spawn:something" } },
     ]);
     // No classifySpawn → treated as regular Invoke
     expect(form.tag).toBe("invoke");
   });
 
   test("CompleteTask with default summary", () => {
-    const form = toolCallsToForm([{ name: "CompleteTask", rawArgs: [] }]);
+    const form = toolCallsToForm([{ name: "CompleteTask", args: {} }]);
     expect(form.tag).toBe("done");
     if (form.tag === "done") expect(form.summary).toBe("Task complete");
   });

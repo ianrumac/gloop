@@ -1,11 +1,11 @@
 /**
- * Context manager — Forks a mini agent loop to prune conversation history
- * and replace pruned messages with a condensed summary.
+ * Context manager — forks a mini `AgentLoop` actor to prune conversation
+ * history and replace pruned messages with a condensed summary.
  */
 
 import type { AIConversation } from "../ai/builder.js";
-import { ToolRegistry } from "../tools/registry.js";
-import { run, mkWorld, type Effects } from "../core/core.js";
+import { AgentLoop } from "../agent.js";
+import type { ToolDefinition } from "../tools/types.js";
 
 const CONTEXT_MANAGER_SYSTEM_PROMPT = `You are a context manager. Your job is to review the conversation history, delete messages that are no longer useful, and produce a condensed summary of the deleted content.
 
@@ -34,88 +34,87 @@ export async function manageContextFork(
   log?.("MANAGE_CONTEXT", `Starting context management, ${history.length} messages: ${instructions}`);
 
   // Build summary index for the fork agent
-  const index = history.map((msg, i) => {
-    const content = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
-    const first50 = content.slice(0, 50);
-    const last50 = content.length > 100 ? content.slice(-50) : "";
-    return `#${i} [${msg.role}] "${first50}${last50 ? "... ..." + last50 : ""}"`;
-  }).join("\n");
+  const index = history
+    .map((msg, i) => {
+      const content = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
+      const first50 = content.slice(0, 50);
+      const last50 = content.length > 100 ? content.slice(-50) : "";
+      return `#${i} [${msg.role}] "${first50}${last50 ? "... ..." + last50 : ""}"`;
+    })
+    .join("\n");
 
-  // Create fork conversation
-  const forkConvo = convo.fork(CONTEXT_MANAGER_SYSTEM_PROMPT);
-
-  // Build mini registry with context tools
-  const forkRegistry = new ToolRegistry();
+  // Shared mutable state the tools write into.
   const toDelete: number[] = [];
   let condensedSummary = "";
 
-  forkRegistry.register({
-    name: "ViewMessage",
-    description: "View the full content of a message by index",
-    arguments: [{ name: "index", description: "Message index to view" }],
-    execute: async (args) => {
-      const idx = parseInt(args.index ?? "");
-      const msg = history[idx];
-      if (!msg) return `No message at index ${idx}`;
-      const content = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
-      return `#${idx} [${msg.role}]\n${content}`;
+  const tools: ToolDefinition[] = [
+    {
+      name: "ViewMessage",
+      description: "View the full content of a message by index",
+      arguments: [{ name: "index", description: "Message index to view" }],
+      execute: async (args) => {
+        const idx = parseInt(args.index ?? "");
+        const msg = history[idx];
+        if (!msg) return `No message at index ${idx}`;
+        const content = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
+        return `#${idx} [${msg.role}]\n${content}`;
+      },
     },
-  });
-
-  forkRegistry.register({
-    name: "DeleteMessages",
-    description: "Mark messages for deletion by index (comma-separated)",
-    arguments: [{ name: "indexes", description: "Comma-separated message indexes to delete" }],
-    execute: async (args) => {
-      const idxs = (args.indexes ?? "").split(",").map(s => parseInt(s.trim())).filter(n => !isNaN(n));
-      const safe = idxs.filter(i => i > 0 && i < history.length);
-      toDelete.push(...safe);
-      return `Marked ${safe.length} messages for deletion: [${safe.join(", ")}]`;
+    {
+      name: "DeleteMessages",
+      description: "Mark messages for deletion by index (comma-separated)",
+      arguments: [{ name: "indexes", description: "Comma-separated message indexes to delete" }],
+      execute: async (args) => {
+        const idxs = (args.indexes ?? "")
+          .split(",")
+          .map((s) => parseInt(s.trim()))
+          .filter((n) => !isNaN(n));
+        // Don't allow deleting the system message (#0).
+        const safe = idxs.filter((i) => i > 0 && i < history.length);
+        toDelete.push(...safe);
+        return `Marked ${safe.length} messages for deletion: [${safe.join(", ")}]`;
+      },
     },
-  });
-
-  forkRegistry.register({
-    name: "Summarize",
-    description: "Write a condensed summary of the important information from deleted messages.",
-    arguments: [{ name: "summary", description: "Condensed summary of key information from pruned messages" }],
-    execute: async (args) => {
-      condensedSummary = args.summary ?? "";
-      return condensedSummary
-        ? `Summary recorded (${condensedSummary.length} chars). Call CompleteTask to finish.`
-        : "Empty summary — nothing will be injected.";
+    {
+      name: "Summarize",
+      description:
+        "Write a condensed summary of the important information from deleted messages. This summary will be injected into the conversation so context is not lost.",
+      arguments: [{ name: "summary", description: "Condensed summary of key information from pruned messages" }],
+      execute: async (args) => {
+        condensedSummary = args.summary ?? "";
+        return condensedSummary
+          ? `Summary recorded (${condensedSummary.length} chars). Call CompleteTask to finish.`
+          : "Empty summary — nothing will be injected.";
+      },
     },
-  });
+    {
+      name: "CompleteTask",
+      description: "Finish context management",
+      arguments: [{ name: "summary", description: "Brief summary of what was done" }],
+      execute: async (args) => args.summary || "Context management complete",
+    },
+  ];
 
-  forkRegistry.register({
-    name: "CompleteTask",
-    description: "Finish context management",
-    arguments: [{ name: "summary", description: "Brief summary of what was done" }],
-    execute: async (args) => args.summary || "Context management complete",
-  });
-
-  // Run the fork with silent effects
-  const forkWorld = mkWorld(forkConvo, forkRegistry);
-  const silentFx: Effects = {
-    streamChunk: () => {},
-    streamDone: () => {},
-    toolStart: (name, preview) => log?.("CONTEXT_FORK", `tool: ${name} ${preview}`),
-    toolDone: (name, ok, out) => log?.("CONTEXT_FORK", `done: ${name} ok=${ok} ${out}`),
+  // Spawn a nested actor with its own provider/model (copied from the parent
+  // conversation), its own registry (only the context-management tools), and
+  // no UI subscribers — it runs silently.
+  const forkAgent = new AgentLoop({
+    provider: convo.provider,
+    model: convo.model,
+    system: CONTEXT_MANAGER_SYSTEM_PROMPT,
+    tools,
     confirm: async () => true,
     ask: async () => "",
-    remember: async () => {},
-    forget: async () => {},
-    refreshSystem: async () => {},
-    manageContext: async () => "Cannot nest ManageContext",
-    complete: (s) => log?.("CONTEXT_FORK", `complete: ${s}`),
-    installTool: async () => "Not available in context fork",
-    listTools: () => "Not available in context fork",
-    spawn: async () => ({ success: false, summary: "Not available in context fork", exitCode: 1, stdout: "", stderr: "" }),
-  };
+    log,
+  });
 
-  const input = `Instructions: ${instructions}\n\nMessage index:\n${index}`;
-  await run(input, forkWorld, silentFx);
+  // Drive a single turn and wait for completion.
+  await forkAgent.sendSync(
+    `Instructions: ${instructions}\n\nMessage index:\n${index}`,
+  );
+  await forkAgent.stop();
 
-  // Apply deletions
+  // Apply deletions.
   const deleteSet = new Set(toDelete);
 
   if (deleteSet.size === 0) {
@@ -126,7 +125,7 @@ export async function manageContextFork(
 
   const kept = history.filter((_, i) => !deleteSet.has(i));
 
-  // Inject condensed summary as a user message right after system prompt
+  // Inject condensed summary as a user message right after the system prompt.
   if (condensedSummary) {
     const summaryMsg = {
       role: "user" as const,

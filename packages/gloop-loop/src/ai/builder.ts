@@ -203,26 +203,33 @@ export class AI {
 }
 
 export class AIConversation {
-  private provider: AIProvider;
-  private modelId: string;
+  private _provider: AIProvider;
+  private _modelId: string;
   private systemPrompt?: string;
   private history: Message[] = [];
   private routing?: ProviderRouting;
   private jsonTools?: JsonTool[];
+  private _maxTokens?: number;
 
   constructor(provider: AIProvider, modelId: string, systemPrompt?: string) {
-    this.provider = provider;
-    this.modelId = modelId;
+    this._provider = provider;
+    this._modelId = modelId;
     this.systemPrompt = systemPrompt;
   }
+
+  /** The AI provider backing this conversation. */
+  get provider(): AIProvider { return this._provider; }
+  /** The model identifier used for every request. */
+  get model(): string { return this._modelId; }
 
   async send(message: string): Promise<AIResponse> {
     this.history.push({ role: "user", content: message });
 
-    const builder = new AIBuilder(this.provider, this.modelId);
+    const builder = new AIBuilder(this._provider, this._modelId);
     if (this.systemPrompt) builder.system(this.systemPrompt);
     if (this.routing) builder.providerRouting(this.routing);
     if (this.jsonTools) builder.tools(this.jsonTools);
+    if (this._maxTokens !== undefined) builder.maxTokens(this._maxTokens);
     builder.messages(this.history);
 
     const response = await builder.query();
@@ -235,10 +242,11 @@ export class AIConversation {
   stream(message: string): StreamResult {
     this.history.push({ role: "user", content: message });
 
-    const builder = new AIBuilder(this.provider, this.modelId);
+    const builder = new AIBuilder(this._provider, this._modelId);
     if (this.systemPrompt) builder.system(this.systemPrompt);
     if (this.routing) builder.providerRouting(this.routing);
     if (this.jsonTools) builder.tools(this.jsonTools);
+    if (this._maxTokens !== undefined) builder.maxTokens(this._maxTokens);
     builder.messages(this.history);
 
     const result = builder.stream();
@@ -310,9 +318,15 @@ export class AIConversation {
     return this;
   }
 
+  /** Cap completion tokens for every request on this conversation. */
+  setMaxTokens(n: number): this {
+    this._maxTokens = n;
+    return this;
+  }
+
   /** Create a new conversation with the same provider/model but a fresh history */
   fork(systemPrompt: string): AIConversation {
-    const forked = new AIConversation(this.provider, this.modelId, systemPrompt);
+    const forked = new AIConversation(this._provider, this._modelId, systemPrompt);
     if (this.routing) forked.setProviderRouting(this.routing);
     return forked;
   }

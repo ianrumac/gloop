@@ -1,84 +1,39 @@
 /**
- * gloop core — Re-exports the core loop from @hypen-space/gloop-loop
- * and provides gloop-specific wiring (debug logging, spawn classification).
+ * gloop core — re-exports of the actor-style API from @hypen-space/gloop-loop.
+ *
+ * Gloop-specific wiring (debug logging, spawn classification, reboot
+ * handling) is applied at the call site where the `AgentLoop` is constructed
+ * (bin/index.ts, src/core/headless.ts), not here.
  */
 
-import { debugLogRaw } from "./debug.ts";
-import { parseGloopTaskBashCommand } from "./task-mode.ts";
-
-// Re-export everything from the library
 export {
-  // Form constructors
-  Think,
-  Invoke,
-  Confirm,
-  Ask,
-  Remember,
-  Forget,
-  Emit,
-  Refresh,
-  Done,
-  Seq,
-  Nil,
-  Install,
-  ListTools,
-  Spawn,
-  // World
+  AgentLoop,
   AbortError,
-  mkWorld,
-  // Interpreter
-  eval_,
-  toolCallsToForm,
-  formatResults,
-  parseInput,
 } from "@hypen-space/gloop-loop";
 
 export type {
-  Form,
+  AgentLoopOptions,
+  AgentMessage,
+  AgentMessageRole,
+  AgentEvent,
+  AgentEventListener,
   SpawnResult,
-  Continuation,
-  World,
-  Effects,
-  LoopConfig,
+  // Per-variant named aliases.
+  TurnStartEvent,
+  TurnEndEvent,
+  BusyEvent,
+  IdleEvent,
+  QueueChangedEvent,
+  StreamChunkEvent,
+  StreamDoneEvent,
+  ToolStartEvent,
+  ToolDoneEvent,
+  MemoryEvent,
+  SystemRefreshedEvent,
+  TaskCompleteEvent,
+  InterruptedEvent,
+  ErrorEvent,
+  FatalEvent,
+  ConfirmRequestEvent,
+  AskRequestEvent,
 } from "@hypen-space/gloop-loop";
-
-import {
-  run as libRun,
-  type World,
-  type Effects,
-  type LoopConfig,
-  type ToolCall,
-} from "@hypen-space/gloop-loop";
-
-/** Gloop-specific spawn classifier: detects `gloop --task "..."` in Bash calls */
-function gloopClassifySpawn(call: ToolCall): string | null {
-  if (call.name !== "Bash") return null;
-  const req = parseGloopTaskBashCommand(call.rawArgs[0] ?? "");
-  return req ? req.task : null;
-}
-
-/**
- * run — Gloop-specific entry point that wires in:
- * - Debug logging via fx.log
- * - Spawn classification for `gloop --task` commands
- */
-export async function run(
-  input: string,
-  world: World,
-  fx: Effects,
-  config?: LoopConfig,
-): Promise<void> {
-  // Wire debug logging into Effects if not already set
-  const wiredFx: Effects = {
-    ...fx,
-    log: fx.log ?? ((label, content) => debugLogRaw(label, content)),
-  };
-
-  // Wire gloop-specific spawn classifier
-  const wiredConfig: LoopConfig = {
-    classifySpawn: gloopClassifySpawn,
-    ...config, // User config overrides
-  };
-
-  return libRun(input, world, wiredFx, wiredConfig);
-}

@@ -12,7 +12,7 @@ export async function buildSystemPrompt(options: SystemPromptOptions = {}): Prom
 
   let prompt = `
 Mindset: Lisp, Type safety, SICP, recursion, elegance, taste.
-Design: Bauhaus, Technofuturism, 1970s, Pino Tovalgia, Penguin/Pelican, Dieter Rams, Neominimalism, Brutalism.
+Design: Bauhaus, Technofuturism, 1970s, Pino Tovalgia, Penguin/Pelican, Neominimalism, Brutalism.
 
 You are running on a unix system and are allowed to use tools to help you complete tasks.
 
@@ -85,6 +85,13 @@ If you need to patch a file or just modify a part of it, use Patch_file instead 
 ==== TOOL CALLING ====
 Tools are available as function calls. The system will present available tools and you can call them directly.
 Tool results will be returned to you for further processing.
+
+==== TASK COMPLETION ====
+When you finish a task, call CompleteTask with a short summary. That is the explicit "done" signal — the harness uses it to mark the task complete and stop the turn cleanly.
+
+Do not bail mid-investigation by emitting plain text like "Let me check..." or "Looking at this..." without following up with tool calls. If you say you're going to do something, do it in the same response. A turn ends the moment you emit text without tool calls, so prose-only responses should only happen when you are actually answering the user.
+
+For investigative tasks, be thorough. Read related files, check git history, verify assumptions. A user asking "what happened to X?" wants a real answer, not a guess after one grep. Keep calling tools until you have enough information to answer confidently — then either answer directly (for simple Q&A) or call CompleteTask (for multi-step tasks).
 `;
 
   if (memory) {

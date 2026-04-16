@@ -422,7 +422,7 @@
 
       agent = new AgentLoop({
         provider: new OpenRouterProvider({ apiKey }),
-        model: "anthropic/claude-sonnet-4",
+        model: "anthropic/claude-sonnet-4.5",
         system: [
           "You are a helpful assistant running in a browser.",
           "You have tools to manage a todo list (ReadTodos, AddTodo, CompleteTodo)",
@@ -431,16 +431,13 @@
           "Keep responses concise.",
         ].join(" "),
         tools: browserTools,
-        onStream: (text) => appendStream(text),
-        onToolStatus: (name, status) => {
-          addMessage("tool", `[${name}] ${status}`);
-        },
+        // Direct ask/confirm callbacks (non-interactive path).  Using the
+        // event stream's confirm_request/ask_request would also work.
         ask: async (question) => {
           addMessage("tool", `? ${question}`);
           return prompt(question) || "";
         },
         confirm: async (command) => window.confirm(`Allow: ${command}?`),
-        onComplete: (summary) => addMessage("tool", `done: ${summary}`),
         remember: async (content) => {
           memory["note"] = content;
           renderMemory();
@@ -453,6 +450,21 @@
         },
       });
 
+      // Typed event subscribers — each handler's parameter is narrowed.
+      agent
+        .on("stream_chunk", (e) => appendStream(e.text))
+        .on("tool_start", (e) => addMessage("tool", `[${e.name}] ${e.preview}`))
+        .on("tool_done", (e) =>
+          addMessage("tool", `[${e.name}] ${e.ok ? "done" : "error: " + e.output.slice(0, 100)}`),
+        )
+        .on("task_complete", (e) => addMessage("tool", `done: ${e.summary}`))
+        .on("error", (e) => addMessage("error", `Error: ${e.error.message}`))
+        .on("turn_end", () => {
+          currentStream = null;
+          $inputBar.classList.remove("disabled");
+          $input.focus();
+        });
+
       $messages.innerHTML = "";
       addMessage("tool", "// Connected. Try: \"add 3 todos for a weekend trip\"");
       $inputBar.classList.remove("disabled");
@@ -462,7 +474,7 @@
         '<span class="status" style="color:#F0B323">connected</span>';
     };
 
-    window.sendMessage = async function () {
+    window.sendMessage = function () {
       const text = $input.value.trim();
       if (!text || !agent) return;
 
@@ -471,14 +483,8 @@
       $inputBar.classList.add("disabled");
 
       startStream();
-      try {
-        await agent.run(text);
-      } catch (e) {
-        addMessage("error", `Error: ${e.message}`);
-      }
-      currentStream = null;
-      $inputBar.classList.remove("disabled");
-      $input.focus();
+      // Fire-and-forget: the `turn_end` subscriber re-enables the input.
+      agent.send(text).start();
     };
   </script>
 </body>

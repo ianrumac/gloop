@@ -36,7 +36,7 @@ const models = [
 ];
 
 function buildLoopExample(model: string) {
-  return `import { AgentLoop, OpenRouterProvider } from "@hypen-space/gloop-loop";
+  return `import { AgentLoop, OpenRouterProvider, primitiveTools } from "@hypen-space/gloop-loop";
 
 const agent = new AgentLoop({
   provider: new OpenRouterProvider(),
@@ -57,7 +57,10 @@ const agent = new AgentLoop({
   ],
 });
 
-await agent.run("Deploy to staging");
+agent.on("stream_chunk", (e) => process.stdout.write(e.text));
+
+await agent.sendSync("Deploy to staging");
+await agent.stop();
 `;
 }
 
@@ -106,7 +109,7 @@ function highlightLine(line: string): string {
       // Classify the word
       if (['type', 'function', 'switch', 'case', 'return', 'import', 'from', 'const', 'new', 'await', 'async', 'export'].includes(word)) {
         result += `<span class="code-keyword">${word}</span>`;
-      } else if (['Form', 'World', 'Record', 'string', 'any', 'AgentLoop', 'OpenRouterProvider'].includes(word)) {
+      } else if (['Form', 'World', 'Record', 'string', 'any', 'AgentLoop', 'OpenRouterProvider', 'primitiveTools'].includes(word)) {
         result += `<span class="code-type">${word}</span>`;
       } else {
         result += `<span class="code-ident">${word}</span>`;

@@ -8,17 +8,25 @@
  * and exits when the agent calls CompleteTask (or hits the safety cap).
  */
 
-import { createAI } from "../ai/index.ts";
-import { ToolRegistry, registerBuiltins } from "../tools/index.ts";
+import { OpenRouterProvider } from "@hypen-space/gloop-loop";
+import { registerBuiltins } from "../tools/index.ts";
 import { ensureGloopDir, appendMemory, removeMemory } from "./memory.ts";
 import { buildSystemPrompt } from "./system.ts";
-import { enableDebug, debugLog } from "./debug.ts";
-import { loadRebootSession, saveRebootSession } from "./session.ts";
-import { run, mkWorld, type Effects } from "./core.ts";
-import { RebootError } from "../tools/builtins.ts";
+import { enableDebug, debugLog, debugLogRaw } from "./debug.ts";
+import {
+  loadRebootSession,
+  rebootIsFatal,
+  wireRebootHandler,
+} from "./session.ts";
+import { AgentLoop, type AgentEvent } from "./core.ts";
 import { appendFileSync } from "fs";
-import { appendTaskPromptSuffix, runTaskSubagent } from "./task-mode.ts";
+import {
+  appendTaskPromptSuffix,
+  parseGloopTaskBashCommand,
+  runTaskSubagent,
+} from "./task-mode.ts";
 import { installTool } from "../../bin/install-tool.ts";
+import { DEFAULT_GLOOP_MODEL } from "./default-model.ts";
 
 // ============================================================================
 // CLI PARSING
@@ -26,14 +34,14 @@ import { installTool } from "../../bin/install-tool.ts";
 
 function usage(): never {
   console.error(
-    'Usage: bun headless.ts --model <provider/model> [--provider <name>] [--output <path>] [--debug] [--task "<task>"] "<instruction>"'
+    'Usage: bun headless.ts --model <provider/model> [--provider <name>] [--output <path>] [--debug] [--task "<task>"] "<instruction>"',
   );
   process.exit(1);
 }
 
 const args = process.argv.slice(2);
 
-let model = "x-ai/grok-4.1-fast";
+let model = DEFAULT_GLOOP_MODEL;
 let outputPath = "gloop-output.jsonl";
 let debug = false;
 let providerName: string | undefined;
@@ -73,183 +81,196 @@ function logEvent(event: Record<string, unknown>): void {
 }
 
 // ============================================================================
-// SETUP (mirrors index.ts)
+// SETUP
 // ============================================================================
 
 if (debug) enableDebug();
 
-const ai = createAI({
-  apiKey: process.env.OPENROUTER_API_KEY!,
-  defaultModel: model,
-});
-
-const registry = new ToolRegistry();
-registerBuiltins(registry, { clone });
-
 await ensureGloopDir();
 
-// Load custom tools
-const reloadTool = registry.get("Reload");
-if (reloadTool) await reloadTool.execute({});
-
-let systemPrompt = await buildSystemPrompt(registry, { clone });
+let systemPrompt = await buildSystemPrompt({ clone });
 debugLog("SYSTEM", systemPrompt);
 
-const convo = ai.conversation({ system: systemPrompt });
-if (providerName) {
-  convo.setProviderRouting({ only: [providerName] });
-  debugLog("PROVIDER", `Routing to: ${providerName}`);
-}
-
-// Check for reboot session
 const rebootSession = await loadRebootSession();
-if (rebootSession) {
-  convo.setHistory(rebootSession.history);
-  debugLog("REBOOT", `Restored session: ${rebootSession.reason}`);
-}
 
 // ============================================================================
-// HEADLESS EFFECTS
+// BUILD THE ACTOR
 // ============================================================================
 
-// Track tokens across the run
-let totalPromptTokens = 0;
-let totalCompletionTokens = 0;
+const provider = new OpenRouterProvider({
+  apiKey: process.env.OPENROUTER_API_KEY!,
+});
 
-// Monkey-patch the conversation's stream to capture usage from the final chunk
-const origStream = convo.stream.bind(convo);
-convo.stream = async function* (message: string) {
-  const gen = origStream(message);
-  let result;
-  while (true) {
-    result = await gen.next();
-    if (result.done) break;
-    const chunk = result.value;
-    if (chunk.usage) {
-      totalPromptTokens += chunk.usage.promptTokens;
-      totalCompletionTokens += chunk.usage.completionTokens;
-    }
-    yield chunk;
-  }
-  return result.value;
-};
+const agent: AgentLoop = new AgentLoop({
+  provider,
+  model,
+  system: systemPrompt,
+  // Start empty; we register builtins into the actor's registry below so
+  // Reload/installTool see the same registry the loop uses.
+  tools: [],
+  log: debug ? (label, content) => debugLogRaw(label, content) : undefined,
+  // A RebootError stops the loop and fires a `fatal` event — see
+  // wireRebootHandler below.
+  isFatal: rebootIsFatal,
 
-let currentStreamText = "";
-
-logEvent({ type: "start", model, instruction });
-
-const world = mkWorld(convo, registry);
-
-const fx: Effects = {
-  streamChunk: (text) => {
-    currentStreamText += text;
-    process.stdout.write(text);
+  // Spawn classifier: detect `gloop --task "..."` in Bash calls.
+  classifySpawn: (call) => {
+    if (call.name !== "Bash") return null;
+    const req = parseGloopTaskBashCommand(call.args.command ?? "");
+    return req ? req.task : null;
   },
 
-  streamDone: () => {
-    if (currentStreamText) {
-      logEvent({ type: "assistant", content: currentStreamText });
-      currentStreamText = "";
-    }
-    process.stdout.write("\n");
-  },
-
-  toolStart: (name, preview) => {
-    console.log(`[tool] ${name}: ${preview}`);
-    logEvent({ type: "tool_start", name, preview });
-  },
-
-  toolDone: (name, ok, output) => {
-    const status = ok ? "ok" : "error";
-    console.log(`[tool] ${name}: ${status}`);
-    logEvent({ type: "tool_done", name, ok, output });
-  },
-
-  confirm: async (_command) => {
-    // Auto-approve everything in headless mode
-    return true;
-  },
-
-  ask: async (_question) => {
-    return "Please proceed with your best judgment.";
-  },
+  // Non-interactive: auto-approve everything.  No UI dialogs.
+  confirm: async () => true,
+  ask: async () => "Please proceed with your best judgment.",
 
   remember: async (content) => {
     await appendMemory(content);
-    logEvent({ type: "remember", content });
     debugLog("REMEMBER", content);
   },
-
   forget: async (content) => {
     await removeMemory(content);
-    logEvent({ type: "forget", content });
     debugLog("FORGET", content);
   },
 
   refreshSystem: async () => {
-    systemPrompt = await buildSystemPrompt(registry);
-    convo.setSystem(systemPrompt);
-    logEvent({ type: "refresh_system" });
+    systemPrompt = await buildSystemPrompt({ clone });
     debugLog("SYSTEM", "System prompt refreshed");
+    return systemPrompt;
   },
 
-  manageContext: async (instructions) => {
-    const { manageContextFork } = await import("./context-manager.ts");
-    return manageContextFork(convo, instructions);
-  },
+  installTool: (source) => installTool(source, agent.registry),
 
-  complete: (summary) => {
-    console.log(`\n[complete] ${summary}`);
-    logEvent({
-      type: "complete",
-      summary,
-      usage: {
-        promptTokens: totalPromptTokens,
-        completionTokens: totalCompletionTokens,
-        totalTokens: totalPromptTokens + totalCompletionTokens,
-      },
-    });
-  },
+  spawn: (task) => runTaskSubagent({ task, model }, { cwd: process.cwd() }),
+});
 
-  installTool: (source) => installTool(source, registry),
+// Register builtins into the actor's registry.
+registerBuiltins(agent.registry, { clone });
 
-  listTools: () => {
-    const names = registry.names();
-    return `${names.length} tools available: ${names.join(", ")}`;
-  },
+// Load custom tools via Reload.
+const reloadTool = agent.registry.get("Reload");
+if (reloadTool) await reloadTool.execute({});
 
-  spawn: async (task) => runTaskSubagent({ task, model }, { cwd: process.cwd() }),
-};
+// Wire provider routing.
+if (providerName) {
+  agent.convo.setProviderRouting({ only: [providerName] });
+  debugLog("PROVIDER", `Routing to: ${providerName}`);
+}
+
+// Restore reboot session if present.
+if (rebootSession) {
+  agent.convo.setHistory(rebootSession.history);
+  debugLog("REBOOT", `Restored session: ${rebootSession.reason}`);
+}
+
+// Usage tracking is not currently surfaced through the text stream API.
+// Kept as zero for the final summary — switch to a provider-side hook if
+// per-turn cost tracking becomes a priority.
+const totalPromptTokens = 0;
+const totalCompletionTokens = 0;
 
 // ============================================================================
-// RUN
+// WIRE EVENTS → STDOUT + JSONL
+// ============================================================================
+
+let currentStreamText = "";
+
+agent.onEvent((event: AgentEvent) => {
+  switch (event.type) {
+    case "stream_chunk":
+      currentStreamText += event.text;
+      process.stdout.write(event.text);
+      break;
+
+    case "stream_done":
+      if (currentStreamText) {
+        logEvent({ type: "assistant", content: currentStreamText });
+        currentStreamText = "";
+      }
+      process.stdout.write("\n");
+      break;
+
+    case "tool_start":
+      console.log(`[tool] ${event.name}: ${event.preview}`);
+      logEvent({ type: "tool_start", name: event.name, preview: event.preview });
+      break;
+
+    case "tool_done":
+      console.log(`[tool] ${event.name}: ${event.ok ? "ok" : "error"}`);
+      logEvent({ type: "tool_done", name: event.name, ok: event.ok, output: event.output });
+      break;
+
+    case "memory":
+      logEvent({ type: event.op, content: event.content });
+      break;
+
+    case "system_refreshed":
+      logEvent({ type: "refresh_system" });
+      break;
+
+    case "task_complete":
+      console.log(`\n[complete] ${event.summary}`);
+      logEvent({
+        type: "complete",
+        summary: event.summary,
+        usage: {
+          promptTokens: totalPromptTokens,
+          completionTokens: totalCompletionTokens,
+          totalTokens: totalPromptTokens + totalCompletionTokens,
+        },
+      });
+      break;
+
+    case "error":
+      console.error(`\n[error] ${event.error.message}`);
+      logEvent({ type: "error", message: event.error.message });
+      break;
+
+    case "interrupted":
+      console.error("\n[interrupted]");
+      logEvent({ type: "interrupted" });
+      break;
+
+    // `fatal` (RebootError) is handled by wireRebootHandler below.
+  }
+});
+
+// Reboot handler: save session + respawn this very process, exit 0.
+wireRebootHandler(agent, async (reason) => {
+  logEvent({ type: "reboot", reason });
+  await agent.stop();
+  const argv = process.argv;
+  Bun.spawn([argv[0]!, ...argv.slice(1)], {
+    stdio: ["inherit", "inherit", "inherit"],
+    env: process.env,
+    cwd: process.cwd(),
+  });
+  process.exit(0);
+});
+
+// ============================================================================
+// RUN ONE TURN, THEN EXIT
 // ============================================================================
 
 debugLog("USER", instruction);
 console.log(`gloop headless | model=${model}`);
 console.log(`instruction: ${instruction}\n`);
+logEvent({ type: "start", model, instruction });
 
+// Send the instruction and wait for its turn to finish.  RebootError is
+// routed through `wireRebootHandler` above (it emits `fatal`, saves the
+// session, respawns, and calls process.exit — this script never resumes
+// past that point in the reboot case).  Regular errors are logged by the
+// event sink, so we just swallow the sendSync rejection here.
 try {
-  await run(instruction, world, fx);
-} catch (err: unknown) {
-  if (err instanceof RebootError) {
-    await saveRebootSession(convo, err.reason);
-    logEvent({ type: "reboot", reason: err.reason });
-    debugLog("REBOOT", `Restarting: ${err.reason}`);
-    const argv = process.argv;
-    Bun.spawn([argv[0]!, ...argv.slice(1)], {
-      stdio: ["inherit", "inherit", "inherit"],
-      env: process.env,
-      cwd: process.cwd(),
-    });
-    process.exit(0);
-  }
-  const msg = err instanceof Error ? err.message : String(err);
-  console.error(`\n[error] ${msg}`);
-  logEvent({ type: "error", message: msg });
+  await agent.sendSync(instruction);
+} catch {
+  // Event sink already logged the error.
 }
 
-// Always write final usage event
+await agent.stop();
+
+// Always write final usage event.
 logEvent({
   type: "usage",
   promptTokens: totalPromptTokens,
@@ -258,7 +279,7 @@ logEvent({
 });
 
 console.log(
-  `\ntokens: ${totalPromptTokens} prompt + ${totalCompletionTokens} completion = ${totalPromptTokens + totalCompletionTokens} total`
+  `\ntokens: ${totalPromptTokens} prompt + ${totalCompletionTokens} completion = ${totalPromptTokens + totalCompletionTokens} total`,
 );
 
 process.exit(0);

@@ -1,5 +1,10 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { appendMemory, removeMemory, readMemory } from "../src/defaults/memory.js";
+import {
+  appendMemory,
+  removeMemory,
+  readMemory,
+  createFileMemory,
+} from "../src/defaults/memory.js";
 import { mkdir, rm, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -165,6 +170,62 @@ describe("memory", () => {
 
       const content = await readMemory();
       expect(content).toBe("first\nsecond\nthird");
+    });
+  });
+
+  describe("createFileMemory", () => {
+    test("defaults write to .gloop/memory.md just like the top-level helpers", async () => {
+      const memory = createFileMemory();
+      await memory.remember("hello from factory");
+
+      const content = await readFile(join(tempDir, ".gloop", "memory.md"), "utf-8");
+      expect(content).toBe("hello from factory");
+    });
+
+    test("custom dir and file are respected", async () => {
+      const memory = createFileMemory({ dir: ".notes", file: "custom.md" });
+      await memory.remember("custom note");
+
+      const content = await readFile(join(tempDir, ".notes", "custom.md"), "utf-8");
+      expect(content).toBe("custom note");
+
+      // Default location should NOT have been touched.
+      await expect(readFile(join(tempDir, ".gloop", "memory.md"), "utf-8"))
+        .rejects.toThrow();
+    });
+
+    test("custom maxEntryLength truncates at the configured length", async () => {
+      const memory = createFileMemory({ dir: ".short", maxEntryLength: 20 });
+      await memory.remember("x".repeat(100));
+
+      const content = await memory.read();
+      expect(content.length).toBeLessThanOrEqual(20);
+      expect(content).toContain("[truncated]");
+    });
+
+    test("forget removes content from a custom-config memory", async () => {
+      const memory = createFileMemory({ dir: ".notes" });
+      await memory.remember("keep");
+      await memory.remember("remove me");
+      await memory.remember("also keep");
+
+      await memory.forget("remove me");
+
+      const content = await memory.read();
+      expect(content).toContain("keep");
+      expect(content).toContain("also keep");
+      expect(content).not.toContain("remove me");
+    });
+
+    test("two instances with different dirs are independent", async () => {
+      const a = createFileMemory({ dir: ".a" });
+      const b = createFileMemory({ dir: ".b" });
+
+      await a.remember("only in a");
+      await b.remember("only in b");
+
+      expect(await a.read()).toBe("only in a");
+      expect(await b.read()).toBe("only in b");
     });
   });
 });
