@@ -2,14 +2,13 @@
 
 All notable changes to `@hypen-space/gloop-loop` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.1.3]
 
-### Added
-- `AgentLoopOptions.maxTokens` — caps completion tokens per request. Defaults to `262_144` (256k) to prevent mid-turn truncation when the model is about to emit trailing tool calls.
-- `AIConversation.setMaxTokens(n)` — apply a per-request completion cap to all `send()` / `stream()` calls on that conversation.
-
-### Changed
-- **Breaking**: `LoopConfig.contextPruneInterval` default is now `0` (auto-pruning disabled). Previously `50`. Opt in explicitly if you want periodic `ManageContext` runs.
+### Breaking
+- Gloop loop has improved DX for looping agent runs. Check README.md for new DX updates.
+- Default tool call pruning set to 0 tool calls
+- Max tokens by default set to 256k
+- Remove hard memory file dependency
 
 ## [0.1.2] — prior
 
