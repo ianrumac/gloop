@@ -3,8 +3,10 @@ import { join } from "path";
 import type { ToolDefinition } from "./types.ts";
 import type { ToolRegistry } from "./registry.ts";
 import {
+  createInvokeSkillTool,
   registerBuiltins as libRegisterBuiltins,
   type BuiltinIO,
+  type Skill,
 } from "@hypen-space/gloop-loop";
 import { exec as shellExec, formatShellResult as gloopFormatShellResult } from "../../bin/shell.ts";
 
@@ -16,7 +18,20 @@ export class RebootError extends Error {
   }
 }
 
-const BUILTIN_NAMES = new Set(["ReadFile", "WriteFile", "Patch_file", "Bash", "CompleteTask", "Reload", "Reboot", "AskUser", "ManageContext", "Remember", "Forget"]);
+const BUILTIN_NAMES = new Set([
+  "ReadFile",
+  "WriteFile",
+  "Patch_file",
+  "Bash",
+  "CompleteTask",
+  "Reload",
+  "Reboot",
+  "AskUser",
+  "ManageContext",
+  "Remember",
+  "Forget",
+  "InvokeSkill",
+]);
 const TOOLS_DIR = join(process.cwd(), ".gloop", "tools");
 
 /** Bun-specific IO adapter for the lib's builtin tools */
@@ -44,11 +59,16 @@ const bunIO: BuiltinIO = {
 
 export interface BuiltinOptions {
   clone?: boolean;
+  /** When set, registers InvokeSkill so the agent can load skill bodies by name. */
+  skills?: Skill[];
 }
 
 export function registerBuiltins(registry: ToolRegistry, options: BuiltinOptions = {}): void {
   // Register all portable builtins from the lib
   libRegisterBuiltins(registry, bunIO);
+
+  const invokeSkill = createInvokeSkillTool(options.skills ?? []);
+  if (invokeSkill) registry.register(invokeSkill);
 
   // Gloop-specific: Reboot tool (only in clone mode)
   if (options.clone) {

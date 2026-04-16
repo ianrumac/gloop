@@ -12,6 +12,7 @@ import { OpenRouterProvider } from "@hypen-space/gloop-loop";
 import { registerBuiltins } from "../tools/index.ts";
 import { ensureGloopDir, appendMemory, removeMemory } from "./memory.ts";
 import { buildSystemPrompt } from "./system.ts";
+import { discoverSkills } from "./skills.ts";
 import { enableDebug, debugLog, debugLogRaw } from "./debug.ts";
 import {
   loadRebootSession,
@@ -88,6 +89,8 @@ if (debug) enableDebug();
 
 await ensureGloopDir();
 
+const skills = await discoverSkills(process.cwd());
+
 let systemPrompt = await buildSystemPrompt({ clone });
 debugLog("SYSTEM", systemPrompt);
 
@@ -105,6 +108,7 @@ const agent: AgentLoop = new AgentLoop({
   provider,
   model,
   system: systemPrompt,
+  skills,
   // Start empty; we register builtins into the actor's registry below so
   // Reload/installTool see the same registry the loop uses.
   tools: [],
@@ -145,7 +149,7 @@ const agent: AgentLoop = new AgentLoop({
 });
 
 // Register builtins into the actor's registry.
-registerBuiltins(agent.registry, { clone });
+registerBuiltins(agent.registry, { clone, skills });
 
 // Load custom tools via Reload.
 const reloadTool = agent.registry.get("Reload");

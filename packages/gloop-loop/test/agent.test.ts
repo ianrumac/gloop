@@ -189,6 +189,33 @@ describe("AgentLoop (construction & config)", () => {
     expect(systemMsg?.content).toBe("updated prompt");
   });
 
+  test("constructor merges skills into the system prompt", async () => {
+    const provider = new MockProvider([{ text: "ok" }]);
+    const agent = new AgentLoop({
+      provider,
+      model: "test-model",
+      system: "base",
+      tools: [],
+      skills: [
+        {
+          name: "demo",
+          description: "A demo skill",
+          dir: "/tmp/demo",
+          body: "body",
+        },
+      ],
+    });
+
+    await runOneTurn(agent, "hi");
+
+    const messages = provider.calls[0]?.messages;
+    const systemMsg = messages?.find((m) => m.role === "system");
+    expect(systemMsg?.content).toContain("base");
+    expect(systemMsg?.content).toContain("AVAILABLE SKILLS");
+    expect(systemMsg?.content).toContain("/demo");
+    expect(systemMsg?.content).toContain("A demo skill");
+  });
+
   test("setSystem() returns this for chaining", () => {
     const agent = new AgentLoop({
       provider: new MockProvider([]),

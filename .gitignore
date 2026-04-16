@@ -1,6 +1,7 @@
 # dependencies (bun install)
 node_modules
 .env
+.npmrc
 # output
 out
 dist

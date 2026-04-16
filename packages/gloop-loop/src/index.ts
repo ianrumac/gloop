@@ -88,6 +88,21 @@ export {
 export type { FileMemory, FileMemoryOptions } from "./defaults/memory.js";
 export { manageContextFork } from "./defaults/context-manager.js";
 
+// --- Skills (SKILL.md discovery is host-specific; helpers are portable) ---
+export type { Skill, ParsedSkillMarkdown, SkillSlashMatch } from "./skills.js";
+export {
+  parseSkillMarkdown,
+  findSkill,
+  mergeSkillsIntoSystem,
+  formatSkillsListing,
+  applySkillSubstitutions,
+  splitSkillArguments,
+  matchSkillSlash,
+  skillInvocationToThinkInput,
+  thinkInputFromSkillSubcommand,
+  createInvokeSkillTool,
+} from "./skills.js";
+
 // --- AgentLoop: high-level actor-style entry point ---
 export { AgentLoop } from "./agent.js";
 export type {

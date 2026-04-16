@@ -63,6 +63,8 @@ import {
   type SpawnResult,
 } from "./core/core.js";
 import { manageContextFork } from "./defaults/context-manager.js";
+import { mergeSkillsIntoSystem } from "./skills.js";
+import type { Skill } from "./skills.js";
 
 // ============================================================================
 // Message types — what you can send INTO the actor
@@ -201,6 +203,11 @@ export interface AgentLoopOptions {
   model: string;
   /** System prompt */
   system?: string;
+  /**
+   * Optional skills (discovered by the host). Names and descriptions are merged
+   * into the system prompt; `/skill-name` input is resolved to the skill body.
+   */
+  skills?: Skill[];
   /** Custom BuiltinIO for primitiveTools(). Only used when tools is not provided. */
   io?: BuiltinIO;
   /** Tools to use. Defaults to `primitiveTools(io)`. */
@@ -337,7 +344,8 @@ export class AgentLoop {
 
     // 2. Build conversation
     const ai = new AI(opts.provider, opts.model);
-    this.convo = ai.conversation({ model: opts.model, system: opts.system });
+    const system = mergeSkillsIntoSystem(opts.system, opts.skills ?? []);
+    this.convo = ai.conversation({ model: opts.model, system });
     this.convo.setMaxTokens(opts.maxTokens ?? 262_144);
 
     // 3. Build world.  `world.signal` is swapped in per-turn by runLoop() so
@@ -351,6 +359,7 @@ export class AgentLoop {
     this.loopConfig = {
       contextPruneInterval: opts.contextPruneInterval,
       classifySpawn: opts.classifySpawn,
+      skills: opts.skills,
     };
   }
 
@@ -847,7 +856,9 @@ export class AgentLoop {
       refreshSystem: async () => {
         if (opts.refreshSystem) {
           const next = await opts.refreshSystem();
-          if (typeof next === "string") this.convo.setSystem(next);
+          if (typeof next === "string") {
+            this.convo.setSystem(mergeSkillsIntoSystem(next, opts.skills ?? []));
+          }
         }
         this.emit({ type: "system_refreshed" });
       },

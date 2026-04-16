@@ -318,6 +318,36 @@ describe("parseInput", () => {
     expect(parseInput("/tools").tag).toBe("list-tools");
   });
 
+  test("/skills becomes Emit with listing", () => {
+    const skills = [
+      { name: "demo", description: "Demo skill", dir: "/x", body: "x" },
+    ];
+    const form = parseInput("/skills", { skills });
+    expect(form.tag).toBe("emit");
+    if (form.tag === "emit") {
+      expect(form.text).toContain("demo");
+      expect(form.text).toContain("Demo skill");
+    }
+  });
+
+  test("/skill <name> becomes Think with skill body", () => {
+    const skills = [
+      { name: "web-design-guidelines", description: "d", dir: "/x", body: "Review UI for $ARGUMENTS" },
+    ];
+    const form = parseInput("/skill web-design-guidelines src/App.tsx", { skills });
+    expect(form.tag).toBe("think");
+    if (form.tag === "think") {
+      expect(form.input).toContain("Review UI");
+      expect(form.input).toContain("src/App.tsx");
+    }
+  });
+
+  test("/skill without args becomes Emit usage", () => {
+    const form = parseInput("/skill", { skills: [] });
+    expect(form.tag).toBe("emit");
+    if (form.tag === "emit") expect(form.text).toContain("Usage");
+  });
+
   test("/install with arg becomes Install", () => {
     const form = parseInput("/install https://example.com/tool.ts");
     expect(form.tag).toBe("install");
@@ -340,6 +370,34 @@ describe("parseInput", () => {
     const form = parseInput("  hello  ");
     expect(form.tag).toBe("think");
     if (form.tag === "think") expect(form.input).toBe("hello");
+  });
+
+  test("/skill-name resolves to Think with skill body", () => {
+    const skills = [
+      {
+        name: "deploy",
+        description: "Deploy",
+        dir: "/x/deploy",
+        body: "Deploy steps:\n1. Test",
+      },
+    ];
+    const form = parseInput("/deploy", { skills });
+    expect(form.tag).toBe("think");
+    if (form.tag === "think") expect(form.input).toContain("Deploy steps");
+  });
+
+  test("skill overrides built-in when names collide", () => {
+    const skills = [
+      {
+        name: "install",
+        description: "Custom install skill",
+        dir: "/x/install",
+        body: "skill install body",
+      },
+    ];
+    const form = parseInput("/install", { skills });
+    expect(form.tag).toBe("think");
+    if (form.tag === "think") expect(form.input).toBe("skill install body");
   });
 });
 

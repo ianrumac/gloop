@@ -14,6 +14,13 @@ import type { ToolRegistry } from "../tools/registry.js";
 import type { ToolCall, ToolResult } from "../tools/types.js";
 import { jsonToolCallsToToolCalls } from "../tools/parser.js";
 import { requiresConfirmation } from "../tools/validator.js";
+import type { Skill } from "../skills.js";
+import {
+  formatSkillsListing,
+  matchSkillSlash,
+  skillInvocationToThinkInput,
+  thinkInputFromSkillSubcommand,
+} from "../skills.js";
 
 // ============================================================================
 // FORMS — The S-expressions of our agent loop
@@ -167,6 +174,13 @@ export interface LoopConfig {
 
   /** Number of tool calls between automatic context prune. 0 disables. Default: 0 */
   contextPruneInterval?: number;
+
+  /**
+   * Skills for `/skill-name` resolution. If a user message starts with `/` and
+   * matches a skill name, the skill body is sent as the turn input (after
+   * substitutions). Should match the listing merged into the system prompt.
+   */
+  skills?: Skill[];
 }
 
 // ============================================================================
@@ -513,12 +527,42 @@ async function evalInvoke(
 
 /** Parse raw user input into a Form: slash commands become special forms,
  *  everything else becomes Think. Like `read` in a Lisp REPL. */
-export function parseInput(input: string): Form {
+export function parseInput(input: string, config?: LoopConfig): Form {
   const t = input.trim();
   if (!t.startsWith("/")) return Think(t);
 
-  const [cmd, ...rest] = t.split(" ");
-  const arg = rest.join(" ").trim();
+  const firstSpace = t.search(/\s/);
+  const cmd = firstSpace === -1 ? t : t.slice(0, firstSpace);
+  const arg = firstSpace === -1 ? "" : t.slice(firstSpace + 1).trim();
+
+  // Built-ins that must not be treated as skill names (e.g. a skill named "skills").
+  if (cmd === "/skills") {
+    return Emit(formatSkillsListing(config?.skills), Nil);
+  }
+
+  // `/skill <name> [args]` — same as `/<name> [args]` (helps discovery / avoids typos in long names).
+  if (cmd === "/skill") {
+    if (!arg.trim()) {
+      return Emit(
+        "Usage: /skill <name> [arguments]\nExample: /skill web-design-guidelines",
+        Nil,
+      );
+    }
+    const input = thinkInputFromSkillSubcommand(arg, config?.skills);
+    if (input === null) {
+      const sp = arg.search(/\s/);
+      const skillName = (sp === -1 ? arg : arg.slice(0, sp)).trim();
+      if (!config?.skills?.length) {
+        return Emit("No skills are loaded.", Nil);
+      }
+      return Emit(`Unknown skill "${skillName}". Use /skills to list.`, Nil);
+    }
+    return Think(input);
+  }
+
+  // Skills take precedence over remaining built-ins (e.g. /install) when names collide.
+  const skillMatch = matchSkillSlash(t, config?.skills);
+  if (skillMatch) return Think(skillInvocationToThinkInput(skillMatch));
 
   switch (cmd) {
     case "/install": return arg ? Install(arg) : Emit("Usage: /install <url|path>", Nil);
@@ -542,5 +586,5 @@ export async function run(
   fx: Effects,
   config?: LoopConfig,
 ): Promise<void> {
-  return eval_(parseInput(input), world, fx, config);
+  return eval_(parseInput(input, config), world, fx, config);
 }
