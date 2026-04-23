@@ -11,7 +11,7 @@ bun add @hypen-space/gloop-loop
 
 You also need an `OPENROUTER_API_KEY` in the environment.
 
-## Quick start — a deploy bot with 5 tools
+## Quick start — a deploy bot with 3 tools
 
 ```ts
 import { AgentLoop, OpenRouterProvider } from "@hypen-space/gloop-loop";
@@ -44,19 +44,6 @@ const agent = new AgentLoop({
       askPermission: (args) => `Deploy ${args.version} to ${args.env}?`,
       execute: async (args) => `Deployed ${args.version} to ${args.env}`,
     },
-    {
-      name: "Rollback",
-      description: "Roll back an environment.",
-      arguments: [{ name: "env", description: "Environment" }],
-      askPermission: (args) => `Rollback ${args.env}?`,
-      execute: async (args) => `Rolled ${args.env} back`,
-    },
-    {
-      name: "CompleteTask",
-      description: "Call when you're done.",
-      arguments: [{ name: "summary", description: "What was done" }],
-      execute: async (args) => args.summary ?? "Done",
-    },
   ],
 
   confirm: async () => true, // auto-approve for a script; drop for TUIs
@@ -80,6 +67,29 @@ Everything you need to know:
 - **`sendSync(msg)`** auto-starts the loop, runs one turn, resolves/rejects when that turn finishes.
 
 If you don't pass `tools`, you get the full built-in set — `ReadFile`, `WriteFile`, `Patch_file`, `Bash`, `AskUser`, `Remember`, `Forget`, `ManageContext`, `CompleteTask` — for free.
+
+### Skills (Agent Skills / `SKILL.md`)
+
+Skills are markdown playbooks discovered by **your app** (the library does not read the filesystem for them). You pass an array of **`Skill`** objects (`name`, `description`, `dir`, `body` — usually from parsing each `<dir>/SKILL.md`).
+
+**Agent DX**
+
+- Pass **`skills?: Skill[]`** on **`AgentLoop`**. Names and descriptions are merged into the system prompt so the model knows what exists; the full body is not inlined until invoked.
+- Optionally register **`createInvokeSkillTool(skills)`** so the model can call **`InvokeSkill(name, arguments)`** and receive the same rendered text as a slash invocation.
+- **`refreshSystem`** should return a base prompt string; the loop re-applies the skills block automatically when refreshing.
+
+**REPL / `run()` DX** (when `LoopConfig.skills` is set — `AgentLoop` wires this for you)
+
+| Input | Effect |
+| --- | --- |
+| `/skills` | Print a short list of skills (names + descriptions). |
+| `/skill <name> [args]` | Load that skill’s body with `$ARGUMENTS` / `$0`… substitutions (same as `/<name> [args]`). |
+| `/<name> [args]` | Same as above when `name` matches a skill (takes precedence over `/install` if a skill collides). |
+| Plain text | Normal user turn. |
+
+Helpers (all exportable from the package): **`parseSkillMarkdown`**, **`mergeSkillsIntoSystem`**, **`formatSkillsListing`**, **`findSkill`**, **`applySkillSubstitutions`**, **`thinkInputFromSkillSubcommand`**, **`matchSkillSlash`**, **`skillInvocationToThinkInput`**, **`createInvokeSkillTool`**.
+
+**Gloop CLI** (downstream) discovers `SKILL.md` under `.claude/skills`, `.agent/skills`, and `.gloop/skills` by default and passes the result into the loop + builtins.
 
 ## Features
 
@@ -386,6 +396,7 @@ Discriminated union on `.type`:
 | `provider` | **required** | `AIProvider` (e.g. `new OpenRouterProvider({apiKey})`) |
 | `model` | **required** | Model id (e.g. `"anthropic/claude-sonnet-4.5"`) |
 | `system` | — | Initial system prompt |
+| `skills` | — | `Skill[]` — merged into system prompt; powers `/…` parsing and should pair with `createInvokeSkillTool` if you want **`InvokeSkill`** |
 | `tools` | `primitiveTools()` | Tool set |
 | `io` | `createNodeIO()` | Custom fs/shell adapter for `primitiveTools()` |
 | `confirm` | emit `confirm_request` event | Direct answer to a permission prompt |
@@ -407,7 +418,8 @@ Discriminated union on `.type`:
 - **Tools**: `ToolDefinition`, `ToolCall`, `ToolResult`, `ToolRegistry`, `primitiveTools`, `registerBuiltins`
 - **Memory**: `createFileMemory`, `FileMemory`, `FileMemoryOptions`, `appendMemory`, `removeMemory`, `readMemory`
 - **Errors**: `AbortError`
-- **Low-level interpreter** (advanced): `run`, `eval_`, `mkWorld`, Form constructors (`Think`, `Invoke`, `Done`, ...), `Effects`, `World`, `LoopConfig`
+- **Skills**: `Skill`, `parseSkillMarkdown`, `mergeSkillsIntoSystem`, `formatSkillsListing`, `findSkill`, `applySkillSubstitutions`, `thinkInputFromSkillSubcommand`, `matchSkillSlash`, `skillInvocationToThinkInput`, `createInvokeSkillTool`, `ParsedSkillMarkdown`, `SkillSlashMatch`
+- **Low-level interpreter** (advanced): `run`, `eval_`, `mkWorld`, Form constructors (`Think`, `Invoke`, `Done`, ...), `Effects`, `World`, `LoopConfig` (includes optional `skills` for `parseInput`)
 
 ## Runtime compatibility
 

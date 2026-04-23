@@ -1,0 +1,33 @@
+{
+  "name": "@hypen-space/gloop-effect",
+  "version": "0.1.0",
+  "description": "Effect-TS wrapper for gloop-loop — typed, composable, observable agent loops",
+  "type": "module",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "bun run build",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hypen-space/gloop-loop": "workspace:*",
+    "effect": "^3.16.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  },
+  "peerDependencies": {
+    "effect": ">=3.10.0"
+  },
+  "license": "MIT"
+}

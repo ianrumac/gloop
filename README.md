@@ -132,6 +132,8 @@ Builtins: `ReadFile`, `WriteFile`, `Bash`, `AskUser`, `CompleteTask`, `Reload`, 
 
 **Custom**: `.gloop/tools/MyTool.ts` → `Reload()`.
 
+**Skills**: put `SKILL.md` in `.claude/skills/<name>/`, `.agent/skills/<name>/`, or `.gloop/skills/<name>/`. The agent gets a catalog in-system; you can run `/skills`, `/skill <name> [args]`, `/<name> [args]`, or the model can call **`InvokeSkill`**. See the **Skills** subsection in the [gloop-loop README](packages/gloop-loop/README.md).
+
 ## Memory
 
 Persist via `<remember>note</remember>` / `<forget>note</forget>` tags → `.gloop/memory.md`.
