@@ -12,7 +12,6 @@ import {
   type AIProviderConfig,
   type AIRequestConfig,
   type AIResponse,
-  type JsonToolCall,
 } from "@hypen-space/gloop-loop"
 import { AIProvider, type StreamResponse } from "../AIProvider.js"
 import { AIProviderError } from "../Errors.js"
@@ -55,15 +54,18 @@ const adaptStream = (
 
   const result: Effect.Effect<AIResponse, AIProviderError> = Effect.tryPromise(
     {
-      try: () => underlying.toolCalls,
+      try: async () => ({
+        toolCalls: await underlying.toolCalls,
+        finishReason: await underlying.finishReason,
+      }),
       catch: toError,
     },
   ).pipe(
-    Effect.map((toolCalls: JsonToolCall[]): AIResponse => ({
+    Effect.map(({ toolCalls, finishReason }): AIResponse => ({
       id: "",
       model,
       content: bufferState.text,
-      finishReason: toolCalls.length > 0 ? "tool_calls" : "stop",
+      finishReason: finishReason ?? (toolCalls.length > 0 ? "tool_calls" : "stop"),
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
     })),
     Effect.withSpan("OpenRouterProvider.stream.result", {
