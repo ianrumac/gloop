@@ -58,6 +58,7 @@ class ContextMockProvider implements AIProvider {
     return {
       textStream,
       toolCalls: Promise.resolve(resp.toolCalls ?? []),
+      finishReason: Promise.resolve(null),
       cancel: async () => {},
     };
   }

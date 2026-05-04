@@ -43,6 +43,45 @@ test("Bash completes commands within timeoutMs", async () => {
   expect(output.trim()).toBe("ok");
 });
 
+test("Patch_file tolerates miscounted hunk headers (regression: 2026-04-28 debug.log)", async () => {
+  const registry = setupRegistry();
+  const patchTool = registry.get("Patch_file");
+  if (!patchTool) throw new Error("Missing Patch_file tool");
+
+  const filename = `.tmp-patch-miscount-${Date.now()}.tsx`;
+  // 4-line file; patch will claim "5,5" in the header.
+  await Bun.write(
+    filename,
+    `import { useState, useRef } from 'react';
+import { Foo, Zap } from 'lucide-react';
+import { Button } from './components/Button';
+import './index.css';
+`,
+  );
+
+  // Header says -1,5 +1,5 but the body only contains 4 old / 4 new lines.
+  // This is the exact failure shape from .gloop/debug.log line ~2816.
+  const patch = `--- a/${filename}
++++ b/${filename}
+@@ -1,5 +1,5 @@
+ import { useState, useRef } from 'react';
+-import { Foo, Zap } from 'lucide-react';
++import { Foo } from 'lucide-react';
+ import { Button } from './components/Button';
+ import './index.css';
+`;
+
+  try {
+    const result = await patchTool.execute({ patch });
+    expect(result).toContain("Patch applied successfully");
+    const updated = await Bun.file(filename).text();
+    expect(updated).toContain("import { Foo } from 'lucide-react';");
+    expect(updated).not.toContain("Zap");
+  } finally {
+    await unlink(filename).catch(() => {});
+  }
+});
+
 test("Patch_file applies a unified diff patch", async () => {
   const registry = setupRegistry();
   const patchTool = registry.get("Patch_file");

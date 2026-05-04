@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "skills": {
+    "effect-best-practices": {
+      "source": "makisuo/skills",
+      "sourceType": "github",
+      "computedHash": "241513d240f805e1651f86311089b521592cdf298eafaa3ba5ccc089ea0c97c6"
+    },
+    "effect-review": {
+      "source": "makisuo/skills",
+      "sourceType": "github",
+      "computedHash": "d469d3f08a27261fd48d9e5777b26b1ba5c80d270c1279aa862b5f11eb001700"
+    },
+    "web-design-guidelines": {
+      "source": "vercel-labs/agent-skills",
+      "sourceType": "github",
+      "computedHash": "f3bc47f890f42a44db1007ab390709ec368e4b8c089baee6b0007182236ac474"
+    }
+  }
+}

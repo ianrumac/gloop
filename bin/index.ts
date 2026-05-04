@@ -12,7 +12,13 @@ import { registerBuiltins } from "../src/tools/index.ts";
 import { ensureGloopDir, appendMemory, removeMemory } from "../src/core/memory.ts";
 import { buildSystemPrompt } from "../src/core/system.ts";
 import { discoverSkills } from "../src/core/skills.ts";
-import { enableDebug, debugLog, debugLogRaw } from "../src/core/debug.ts";
+import {
+  enableDebug,
+  debugLog,
+  debugLogRaw,
+  debugTracer,
+  debugInterceptor,
+} from "../src/core/debug.ts";
 import {
   loadRebootSession,
   rebootIsFatal,
@@ -84,6 +90,8 @@ const provider = new OpenRouterProvider({
   apiKey: process.env.OPENROUTER_API_KEY!,
 });
 
+const debugInt = debugInterceptor();
+
 const agent: AgentLoop = new AgentLoop({
   provider,
   model,
@@ -93,6 +101,10 @@ const agent: AgentLoop = new AgentLoop({
   // below so Reload/installTool see the same registry the loop uses.
   tools: [],
   log: debug ? (label, content) => debugLogRaw(label, content) : undefined,
+  // --debug also enables a tracer (span tree per turn) and an interceptor
+  // (boundary payloads + timings).  Both write to `.gloop/debug.log`.
+  tracer: debugTracer(),
+  interceptors: debugInt ? [debugInt] : undefined,
   // A RebootError from the Reboot tool stops the loop and fires a `fatal`
   // event — see wireRebootHandler below.
   isFatal: rebootIsFatal,

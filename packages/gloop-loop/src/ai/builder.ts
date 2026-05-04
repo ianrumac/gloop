@@ -134,13 +134,14 @@ export class AIBuilder {
     }
 
     const toolCalls = await result.toolCalls;
+    const finishReason = await result.finishReason;
     const model = this.config.model ? resolve(this.config.model) : "";
 
     return {
       id: "",
       model,
       content: fullContent || null,
-      finishReason: toolCalls.length > 0 ? "tool_calls" : "stop",
+      finishReason: finishReason ?? (toolCalls.length > 0 ? "tool_calls" : "stop"),
       ...(toolCalls.length > 0 && { toolCalls }),
     };
   }
@@ -278,6 +279,7 @@ export class AIConversation {
     return {
       textStream: wrappedTextStream,
       toolCalls: result.toolCalls,
+      finishReason: result.finishReason,
       cancel: () => result.cancel(),
     };
   }

@@ -103,6 +103,37 @@ export {
   createInvokeSkillTool,
 } from "./skills.js";
 
+// --- Tracing: optional, OTEL-shaped, no deps ---
+export type {
+  Tracer,
+  Span,
+  SpanOptions,
+  SpanStatus,
+  AttributeValue,
+  ConsoleTracerOptions,
+} from "./trace.js";
+export {
+  NoopTracer,
+  ConsoleTracer,
+  withSpan,
+  withSpanSync,
+} from "./trace.js";
+
+// --- Interceptors: onion-middleware around every boundary ---
+export type {
+  Interceptor,
+  InterceptorFn,
+  LlmCallContext,
+  LlmCallResult,
+  ToolCallContext,
+  ToolCallResult,
+  ConfirmContext,
+  AskContext,
+  MemoryContext,
+  SpawnContext,
+} from "./interceptors.js";
+export { chain, chainBoundary } from "./interceptors.js";
+
 // --- AgentLoop: high-level actor-style entry point ---
 export { AgentLoop } from "./agent.js";
 export type {

@@ -64,11 +64,13 @@ export interface AIRequestConfig {
   toolChoice?: ToolChoice;
 }
 
+export type FinishReason = "stop" | "length" | "content_filter" | "tool_calls" | null;
+
 export interface AIResponse {
   id: string;
   model: string;
   content: string | null;
-  finishReason: "stop" | "length" | "content_filter" | "tool_calls" | null;
+  finishReason: FinishReason;
   toolCalls?: JsonToolCall[];
   usage?: {
     promptTokens: number;
@@ -81,6 +83,8 @@ export interface AIResponse {
 export interface StreamResult {
   textStream: AsyncIterableIterator<string>;
   toolCalls: Promise<JsonToolCall[]>;
+  /** Resolves with the finish reason from the final chunk, or null if absent. */
+  finishReason: Promise<FinishReason>;
   cancel(): Promise<void>;
 }
 

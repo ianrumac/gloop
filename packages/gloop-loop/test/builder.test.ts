@@ -38,6 +38,7 @@ class MockProvider implements AIProvider {
     return {
       textStream,
       toolCalls: Promise.resolve([]),
+      finishReason: Promise.resolve(null),
       cancel: async () => {},
     };
   }
@@ -366,7 +367,8 @@ describe("AIConversation", () => {
       },
       stream(): StreamResult {
         const textStream: AsyncIterableIterator<string> = (async function* () {})();
-        return { textStream, toolCalls: Promise.resolve([]), cancel: async () => {} };
+        return { textStream, toolCalls: Promise.resolve([]),
+      finishReason: Promise.resolve(null), cancel: async () => {} };
       },
     };
 

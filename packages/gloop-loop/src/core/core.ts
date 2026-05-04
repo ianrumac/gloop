@@ -21,6 +21,20 @@ import {
   skillInvocationToThinkInput,
   thinkInputFromSkillSubcommand,
 } from "../skills.js";
+import type { Span, Tracer } from "../trace.js";
+import { NoopTracer, withSpan } from "../trace.js";
+import type {
+  Interceptor,
+  LlmCallContext,
+  LlmCallResult,
+  ToolCallContext,
+  ToolCallResult,
+  ConfirmContext,
+  AskContext,
+  MemoryContext,
+  SpawnContext,
+} from "../interceptors.js";
+import { chainBoundary } from "../interceptors.js";
 
 // ============================================================================
 // FORMS — The S-expressions of our agent loop
@@ -108,6 +122,19 @@ export interface World {
   registry: ToolRegistry;
   toolCalls: number;
   signal?: AbortSignal;
+  /** Optional tracer. When undefined, every `withSpan` short-circuits. */
+  tracer?: Tracer;
+  /**
+   * Current span — child spans use this as parent. Mutated as the
+   * interpreter descends into nested boundaries; `withWorldSpan` saves
+   * and restores it.
+   */
+  span?: Span;
+  /**
+   * Optional interceptor chain applied at every interpreter boundary.
+   * `interceptors[0]` is outermost. Empty / undefined → no overhead.
+   */
+  interceptors?: ReadonlyArray<Interceptor>;
 }
 
 export class AbortError extends Error {
@@ -130,12 +157,53 @@ export const mkWorld = (
   convo: AIConversation,
   registry: ToolRegistry,
   signal?: AbortSignal,
+  tracer?: Tracer,
+  interceptors?: ReadonlyArray<Interceptor>,
 ): World => ({
   convo,
   registry,
   toolCalls: 0,
   signal,
+  tracer,
+  interceptors,
 });
+
+/**
+ * Thread a child span through the World during the lifetime of `fn`.
+ * Saves/restores `world.span` so nested calls inherit the new span as
+ * their parent automatically.
+ */
+async function withWorldSpan<T>(
+  world: World,
+  name: string,
+  attributes: Record<string, string | number | boolean | undefined> | undefined,
+  fn: (span: Span) => Promise<T>,
+): Promise<T> {
+  // Always pass a real Span (NoopTracer's when no tracer is configured) so
+  // call sites can call setAttribute / recordException unconditionally.
+  if (!world.tracer) {
+    const noop = NoopTracer.startSpan(name, { attributes });
+    try {
+      return await fn(noop);
+    } finally {
+      noop.end();
+    }
+  }
+  return withSpan(
+    world.tracer,
+    name,
+    { parent: world.span, attributes },
+    async (span) => {
+      const previous = world.span;
+      world.span = span;
+      try {
+        return await fn(span);
+      } finally {
+        world.span = previous;
+      }
+    },
+  );
+}
 
 // ============================================================================
 // EFFECTS — Side effects the interpreter can perform
@@ -291,21 +359,63 @@ export async function eval_(
       return eval_(form.then, world, fx, config);
 
     case "remember":
-      await fx.remember(form.content);
+      await withWorldSpan(
+        world,
+        "memory.remember",
+        { contentLength: form.content.length },
+        () =>
+          chainBoundary(world.interceptors, "memory", (ctx) =>
+            fx.remember(ctx.content),
+          )({ op: "remember", content: form.content } as MemoryContext),
+      );
       return eval_(form.then, world, fx, config);
 
     case "forget":
-      await fx.forget(form.content);
+      await withWorldSpan(
+        world,
+        "memory.forget",
+        { contentLength: form.content.length },
+        () =>
+          chainBoundary(world.interceptors, "memory", (ctx) =>
+            fx.forget(ctx.content),
+          )({ op: "forget", content: form.content } as MemoryContext),
+      );
       return eval_(form.then, world, fx, config);
 
     case "confirm": {
-      const ok = await fx.confirm(form.command);
+      const ok = await withWorldSpan(
+        world,
+        "request.confirm",
+        { command: form.command },
+        async (span) => {
+          const result = await chainBoundary(
+            world.interceptors,
+            "confirm",
+            (ctx) => fx.confirm(ctx.command),
+          )({ command: form.command } as ConfirmContext);
+          span.setAttribute("approved", result);
+          return result;
+        },
+      );
       const next = form.then(ok);
       return eval_(next, world, fx, config);
     }
 
     case "ask": {
-      const answer = await fx.ask(form.question);
+      const answer = await withWorldSpan(
+        world,
+        "request.ask",
+        { question: form.question },
+        async (span) => {
+          const result = await chainBoundary(
+            world.interceptors,
+            "ask",
+            (ctx) => fx.ask(ctx.question),
+          )({ question: form.question } as AskContext);
+          span.setAttribute("answerLength", result.length);
+          return result;
+        },
+      );
       const next = form.then(answer);
       return eval_(next, world, fx, config);
     }
@@ -340,7 +450,21 @@ export async function eval_(
     }
 
     case "spawn": {
-      const result = await fx.spawn(form.task);
+      const result = await withWorldSpan(
+        world,
+        "spawn",
+        { taskLength: form.task.length },
+        async (span) => {
+          const r = await chainBoundary(
+            world.interceptors,
+            "spawn",
+            (ctx) => fx.spawn(ctx.task),
+          )({ task: form.task } as SpawnContext);
+          span.setAttribute("ok", r.success);
+          span.setAttribute("exitCode", r.exitCode);
+          return r;
+        },
+      );
       return eval_(form.then(result), world, fx, config);
     }
   }
@@ -355,44 +479,79 @@ async function evalThink(
   fx: Effects,
   config?: LoopConfig,
 ): Promise<void> {
-  let fullText = "";
   fx.log?.("LLM_INPUT", input);
 
   // Set tools on the conversation for this request
   const jsonTools = world.registry.toJsonTools();
   world.convo.setJsonTools(jsonTools);
 
-  const result = world.convo.stream(input);
+  const llmResult = await withWorldSpan(
+    world,
+    "ai.stream",
+    {
+      model: world.convo.model,
+      historyLength: world.convo.getHistory().length,
+      toolCount: jsonTools.length,
+      inputLength: input.length,
+    },
+    async (span): Promise<LlmCallResult> => {
+      const ctx: LlmCallContext = {
+        input,
+        model: world.convo.model,
+        messages: world.convo.getHistory(),
+        tools: jsonTools,
+      };
 
-  try {
-    const iter = result.textStream[Symbol.asyncIterator]();
-    while (true) {
-      const { done, value } = await raceAbort(world.signal, iter.next());
-      if (done) break;
+      // The final handler runs the actual streaming call. Interceptors can
+      // observe `ctx`, mutate `ctx.input`, short-circuit (return a synthetic
+      // result), or wrap with retry / timing / caching logic.
+      const result = await chainBoundary(
+        world.interceptors,
+        "llmCall",
+        async (innerCtx): Promise<LlmCallResult> => {
+          let fullText = "";
+          const stream = world.convo.stream(innerCtx.input);
 
-      fx.streamChunk(value);
-      fullText += value;
-    }
-  } catch (err) {
-    if (err instanceof AbortError) {
-      await result.cancel().catch(() => {});
-      if (fullText) {
-        const h = world.convo.getHistory();
-        h.push({ role: "assistant", content: fullText });
-        world.convo.setHistory(h);
-      }
-      throw err;
-    }
-    throw err;
-  }
+          try {
+            const iter = stream.textStream[Symbol.asyncIterator]();
+            while (true) {
+              const { done, value } = await raceAbort(world.signal, iter.next());
+              if (done) break;
+              fx.streamChunk(value);
+              fullText += value;
+            }
+          } catch (err) {
+            if (err instanceof AbortError) {
+              await stream.cancel().catch(() => {});
+              if (fullText) {
+                const h = world.convo.getHistory();
+                h.push({ role: "assistant", content: fullText });
+                world.convo.setHistory(h);
+              }
+            }
+            throw err;
+          }
 
-  fx.streamDone();
-  fx.log?.("LLM_OUTPUT", fullText);
+          fx.streamDone();
+          const calls = await stream.toolCalls;
+          const finishReason = await stream.finishReason;
+          return { text: fullText, toolCalls: calls, finishReason };
+        },
+      )(ctx);
 
-  const jsonCalls = await result.toolCalls;
+      fx.log?.("LLM_OUTPUT", result.text);
+      span.setAttribute("outputLength", result.text.length);
+      span.setAttribute("toolCallsRequested", result.toolCalls.length);
+      span.setAttribute("finishReason", result.finishReason ?? "unknown");
+      return result;
+    },
+  );
 
-  if (jsonCalls.length > 0) {
-    const toolCalls = jsonToolCallsToToolCalls(jsonCalls, world.registry);
+  if (llmResult.toolCalls.length > 0) {
+    const toolCalls = jsonToolCallsToToolCalls(
+      [...llmResult.toolCalls],
+      world.registry,
+    );
     fx.log?.("TOOL_CALLS", JSON.stringify(toolCalls));
     const nextForm = toolCallsToForm(toolCalls, config?.classifySpawn);
     return eval_(nextForm, world, fx, config);
@@ -472,7 +631,13 @@ async function evalInvoke(
       danger = tool.askPermission(call.args);
     }
     if (danger !== null) {
-      const ok = await fx.confirm(danger);
+      // Route through the same `confirm` interceptor chain as form-level
+      // Confirm so policy interceptors apply to tool gating too.
+      const ok = await chainBoundary(
+        world.interceptors,
+        "confirm",
+        (ctx) => fx.confirm(ctx.command),
+      )({ command: danger } as ConfirmContext);
       if (!ok) {
         results.push({ name: call.name, output: "User denied execution", success: false });
         fx.toolDone(call.name, false, "denied by user");
@@ -488,17 +653,50 @@ async function evalInvoke(
       .join(", ");
     fx.toolStart(call.name, preview);
 
-    try {
-      const output = await tool.execute(call.args);
-      results.push({ name: call.name, output, success: true });
-      fx.toolDone(call.name, true, "ok");
-    } catch (err: unknown) {
-      const msg = err instanceof Error
-        ? `${err.message}${err.stack ? "\n" + err.stack.split("\n").slice(1, 4).join("\n") : ""}`
-        : String(err);
-      results.push({ name: call.name, output: msg, success: false });
-      fx.toolDone(call.name, false, msg);
-    }
+    await withWorldSpan(
+      world,
+      `tool.${call.name}`,
+      { tool: call.name, argCount: Object.keys(call.args).length },
+      async (span) => {
+        const ctx: ToolCallContext = { name: call.name, args: call.args };
+        const result = await chainBoundary(
+          world.interceptors,
+          "toolCall",
+          async (innerCtx): Promise<ToolCallResult> => {
+            // Re-resolve the tool if an interceptor renamed it.
+            const resolved =
+              innerCtx.name === call.name ? tool : world.registry.get(innerCtx.name);
+            if (!resolved) {
+              return {
+                success: false,
+                output: `Unknown tool: ${innerCtx.name}`,
+              };
+            }
+            try {
+              const output = await resolved.execute(innerCtx.args);
+              return { success: true, output };
+            } catch (err) {
+              const msg = err instanceof Error
+                ? `${err.message}${err.stack ? "\n" + err.stack.split("\n").slice(1, 4).join("\n") : ""}`
+                : String(err);
+              return { success: false, output: msg, error: err };
+            }
+          },
+        )(ctx);
+
+        results.push({
+          name: call.name,
+          output: result.output,
+          success: result.success,
+        });
+        fx.toolDone(call.name, result.success, result.success ? "ok" : result.output);
+        span.setAttribute("ok", result.success);
+        span.setAttribute("outputLength", result.output.length);
+        if (!result.success && "error" in result && result.error !== undefined) {
+          span.recordException(result.error);
+        }
+      },
+    );
   }
 
   // Refresh system prompt if Reload was called

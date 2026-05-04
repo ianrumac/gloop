@@ -62,6 +62,7 @@ class MockProvider implements AIProvider {
     return {
       textStream,
       toolCalls: Promise.resolve(resp.toolCalls ?? []),
+      finishReason: Promise.resolve(null),
       cancel: async () => {},
     };
   }
@@ -721,6 +722,7 @@ describe("AgentLoop — role: \"system\" inbox messages", () => {
       return {
         textStream,
         toolCalls: Promise.resolve([]),
+      finishReason: Promise.resolve(null),
         cancel: async () => {},
       };
     }
@@ -865,7 +867,8 @@ describe("AgentLoop — isFatal / fatal event", () => {
         const textStream: AsyncIterableIterator<string> = (async function* () {
           yield "ok";
         })();
-        return { textStream, toolCalls: Promise.resolve([]), cancel: async () => {} };
+        return { textStream, toolCalls: Promise.resolve([]),
+      finishReason: Promise.resolve(null), cancel: async () => {} };
       }
     }
 

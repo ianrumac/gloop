@@ -4,10 +4,21 @@ import type {
   AIProviderConfig,
   AIRequestConfig,
   AIResponse,
+  FinishReason,
   JsonTool,
   JsonToolCall,
   StreamResult,
 } from "./types.ts";
+
+const FINISH_REASONS: ReadonlySet<string> = new Set([
+  "stop", "length", "content_filter", "tool_calls",
+]);
+
+function coerceFinishReason(raw: unknown): FinishReason {
+  return typeof raw === "string" && FINISH_REASONS.has(raw)
+    ? (raw as FinishReason)
+    : null;
+}
 
 export class OpenRouterProvider implements AIProvider {
   readonly name = "openrouter";
@@ -36,11 +47,12 @@ export class OpenRouterProvider implements AIProvider {
     const text = typeof choice?.message?.content === "string" ? choice.message.content : null;
     const toolCalls = extractChatToolCalls(choice?.message?.toolCalls);
 
+    const apiFinish = coerceFinishReason(choice?.finishReason);
     return {
       id: response.id ?? "",
       model: response.model ?? config.model,
       content: text,
-      finishReason: toolCalls.length > 0 ? "tool_calls" : "stop",
+      finishReason: apiFinish ?? (toolCalls.length > 0 ? "tool_calls" : "stop"),
       ...(toolCalls.length > 0 && { toolCalls }),
       ...(response.usage && {
         usage: {
@@ -67,6 +79,14 @@ export class OpenRouterProvider implements AIProvider {
       resolveToolCalls = resolve;
     });
 
+    // Capture finish reason from the final chunk(s). Providers usually send it
+    // on the last delta, sometimes split across two chunks — keep the latest.
+    let lastFinishReason: FinishReason = null;
+    let resolveFinishReason: (r: FinishReason) => void;
+    const finishReasonPromise = new Promise<FinishReason>((resolve) => {
+      resolveFinishReason = resolve;
+    });
+
     // Get the underlying async iterator once and reuse across next() calls
     let iteratorPromise: Promise<AsyncIterator<any>> | null = null;
     function getIterator() {
@@ -78,7 +98,7 @@ export class OpenRouterProvider implements AIProvider {
       return iteratorPromise;
     }
 
-    function finalizeToolCalls() {
+    function finalize() {
       const calls: JsonToolCall[] = [];
       for (const [, tc] of toolCallAcc) {
         if (tc.name) {
@@ -90,6 +110,11 @@ export class OpenRouterProvider implements AIProvider {
         }
       }
       resolveToolCalls(calls);
+      // Synthesize tool_calls if the provider didn't explicitly send a finish
+      // reason but we accumulated tool deltas — keeps semantics aligned with
+      // the non-streaming path's fallback.
+      const finish = lastFinishReason ?? (calls.length > 0 ? "tool_calls" : null);
+      resolveFinishReason(finish);
     }
 
     const textStream: AsyncIterableIterator<string> = {
@@ -100,13 +125,15 @@ export class OpenRouterProvider implements AIProvider {
         while (true) {
           const result = await iter.next();
           if (result.done) {
-            finalizeToolCalls();
+            finalize();
             return { value: undefined as any, done: true };
           }
 
           const chunk = result.value;
           const choice = chunk?.choices?.[0];
           if (!choice) continue;
+          const reason = coerceFinishReason(choice.finishReason);
+          if (reason !== null) lastFinishReason = reason;
           const delta = choice.delta;
 
           // Accumulate tool call deltas
@@ -136,7 +163,7 @@ export class OpenRouterProvider implements AIProvider {
         }
       },
       async return() {
-        finalizeToolCalls();
+        finalize();
         return { value: undefined as any, done: true };
       },
       async throw(e) { throw e; },
@@ -145,6 +172,7 @@ export class OpenRouterProvider implements AIProvider {
     return {
       textStream,
       toolCalls: toolCallsPromise,
+      finishReason: finishReasonPromise,
       cancel: async () => {
         // EventStream extends ReadableStream, cancel it if possible
         const es = await streamPromise;

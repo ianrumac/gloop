@@ -24,6 +24,7 @@ class NoopProvider implements AIProvider {
     return {
       textStream: (async function* () {})(),
       toolCalls: Promise.resolve([]),
+      finishReason: Promise.resolve(null),
       cancel: async () => {},
     };
   }

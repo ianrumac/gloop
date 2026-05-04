@@ -3,6 +3,40 @@ import type { ToolDefinition } from "./types.js";
 import type { ToolRegistry } from "./registry.js";
 import { createNodeIO } from "../defaults/io.js";
 
+// Models routinely emit unified-diff hunks with miscounted headers — they
+// confuse "lines 1..5 of the file" with "5 hunk body lines" and write
+// `@@ -1,5 +1,5 @@` for a 4-line body. `parsePatch` then fails with the
+// opaque "Hunk at line N contained invalid line". Recount before parsing.
+export function normalizeHunkCounts(patch: string): string {
+  const lines = patch.split("\n");
+  const out: string[] = [];
+  const hunkHeader = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/;
+  let i = 0;
+  while (i < lines.length) {
+    const m = lines[i]!.match(hunkHeader);
+    if (!m) { out.push(lines[i++]!); continue; }
+    const headerIdx = out.length;
+    const oldStart = m[1], newStart = m[2], tail = m[3];
+    out.push(""); // placeholder, rewritten after counting body
+    i++;
+    let oldN = 0, newN = 0;
+    while (i < lines.length) {
+      const line = lines[i]!;
+      if (hunkHeader.test(line) || line.startsWith("--- ") || line.startsWith("diff ")) break;
+      const c = line[0];
+      if (c === " ") { oldN++; newN++; }
+      else if (c === "-") oldN++;
+      else if (c === "+") newN++;
+      else if (c === "\\") { /* "\ No newline at end of file" — uncounted */ }
+      else break; // empty line / unknown prefix terminates the hunk body
+      out.push(line);
+      i++;
+    }
+    out[headerIdx] = `@@ -${oldStart},${oldN} +${newStart},${newN} @@${tail}`;
+  }
+  return out.join("\n");
+}
+
 // ---------------------------------------------------------------------------
 // IO interface — abstracts runtime-specific file and process operations
 // ---------------------------------------------------------------------------
@@ -130,7 +164,7 @@ function _buildTools(io: BuiltinIO): ToolDefinition[] {
       }
 
       // Strip git-style a/ b/ prefixes from parsed patches so paths resolve correctly
-      const parsed = parsePatch(patch);
+      const parsed = parsePatch(normalizeHunkCounts(patch));
       for (const file of parsed) {
         if (file.oldFileName) file.oldFileName = file.oldFileName.replace(/^[ab]\//, "");
         if (file.newFileName) file.newFileName = file.newFileName.replace(/^[ab]\//, "");

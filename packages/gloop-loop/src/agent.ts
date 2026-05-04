@@ -65,6 +65,7 @@ import {
 import { manageContextFork } from "./defaults/context-manager.js";
 import { mergeSkillsIntoSystem } from "./skills.js";
 import type { Skill } from "./skills.js";
+import { withSpan } from "./trace.js";
 
 // ============================================================================
 // Message types — what you can send INTO the actor
@@ -277,6 +278,37 @@ export interface AgentLoopOptions {
   /** Debug logger for internal events. */
   log?: (label: string, content: string) => void;
 
+  /**
+   * Optional tracer.  When provided, every turn opens an `agent.turn` span
+   * with child spans for each LLM call (`ai.stream`), tool execution
+   * (`tool.{name}`), memory op (`memory.{op}`), and user request
+   * (`request.confirm` / `request.ask`).  When omitted, tracing is a noop.
+   *
+   * The shape is OpenTelemetry-compatible; pass `new ConsoleTracer()` for
+   * local debugging or adapt `@opentelemetry/api`'s tracer.
+   */
+  tracer?: import("./trace.js").Tracer;
+
+  /**
+   * Optional onion-style interceptors applied at every boundary
+   * (LLM call, tool call, memory op, confirm/ask, spawn).  Each
+   * interceptor can observe, mutate inputs, transform outputs,
+   * short-circuit, or retry.  `interceptors[0]` is outermost.
+   *
+   * @example
+   * ```ts
+   * import type { Interceptor } from "@hypen-space/gloop-loop";
+   *
+   * const redactPii: Interceptor = {
+   *   name: "redact-pii",
+   *   llmCall: async (ctx, next) => next({ ...ctx, input: redact(ctx.input) }),
+   * };
+   *
+   * new AgentLoop({ provider, model, interceptors: [redactPii] });
+   * ```
+   */
+  interceptors?: ReadonlyArray<import("./interceptors.js").Interceptor>;
+
   // ---- Loop config ----
   /** Number of tool calls between automatic context prune. 0 disables. Default: 0 */
   contextPruneInterval?: number;
@@ -350,7 +382,14 @@ export class AgentLoop {
 
     // 3. Build world.  `world.signal` is swapped in per-turn by runLoop() so
     //    `interrupt()` only aborts the current turn and not the whole actor.
-    this.world = mkWorld(this.convo, this.registry);
+    //    `world.span` is also swapped in per-turn so each turn is a span tree.
+    this.world = mkWorld(
+      this.convo,
+      this.registry,
+      undefined,
+      opts.tracer,
+      opts.interceptors,
+    );
 
     // 4. Build effects that route through the event bus.
     this.effects = this.buildEffects();
@@ -768,16 +807,37 @@ export class AgentLoop {
       this.emit({ type: "turn_start", message: msg });
 
       try {
-        if (msg.role === "system") {
-          // System messages update the conversation's system prompt and
-          // do NOT call the LLM.  They still go through the normal
-          // turn_start / turn_end lifecycle so `sendSync` and any other
-          // per-turn correlation keeps working.
-          this.convo.setSystem(msg.content);
-          this.emit({ type: "system_refreshed" });
-        } else {
-          await runCore(msg.content, this.world, this.effects, this.loopConfig);
-        }
+        // Open the per-turn span; `withSpan` is a noop when no tracer.
+        // Child spans inside `runCore` use `world.span` as their parent.
+        await withSpan(
+          this.options.tracer,
+          "agent.turn",
+          {
+            attributes: {
+              messageId: msg.id ?? "",
+              role: msg.role,
+              contentLength: msg.content.length,
+            },
+          },
+          async (span) => {
+            const previous = this.world.span;
+            this.world.span = span;
+            try {
+              if (msg.role === "system") {
+                // System messages update the conversation's system prompt and
+                // do NOT call the LLM.  They still go through the normal
+                // turn_start / turn_end lifecycle so `sendSync` and any other
+                // per-turn correlation keeps working.
+                this.convo.setSystem(msg.content);
+                this.emit({ type: "system_refreshed" });
+              } else {
+                await runCore(msg.content, this.world, this.effects, this.loopConfig);
+              }
+            } finally {
+              this.world.span = previous;
+            }
+          },
+        );
       } catch (err) {
         if (err instanceof AbortError) {
           this.emit({ type: "interrupted" });
