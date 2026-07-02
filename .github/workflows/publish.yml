@@ -8,9 +8,16 @@ name: Publish
 # Requires the NPM_TOKEN secret in the "Publish" environment (an npm
 # automation token with publish rights to the @hypen-space scope).
 #
-# `bun publish` is used instead of `npm publish` because gloop-effect
-# depends on gloop-loop via the workspace: protocol, which bun rewrites to
-# the real version at pack time (npm would publish the literal "workspace:*").
+# Packing and publishing are split between the two tools on purpose:
+#   - `bun pm pack` rewrites gloop-effect's workspace: dependency on
+#     gloop-loop to the real version (npm would pack the literal
+#     "workspace:*" and produce an uninstallable package).
+#   - `npm publish <tarball>` does the upload, because bun's publish auth
+#     does not read ~/.npmrc tokens in CI ("missing authentication"),
+#     while npm reads ~/.npmrc reliably.
+# NOTE: bun.lock snapshots each workspace package's version — regenerate it
+# (rm bun.lock && bun install) after bumping versions, or the packed
+# dependency range will point at the OLD version.
 
 on:
   push:
@@ -35,9 +42,6 @@ jobs:
         run: bun install --frozen-lockfile
 
       # gloop-loop first — gloop-effect depends on it.
-      # bun publish does not read setup-node's env-templated .npmrc (it lives
-      # behind NPM_CONFIG_USERCONFIG, which bun ignores), so write ~/.npmrc
-      # with the token directly. npm view on public packages needs no auth.
       - name: Publish changed packages
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -49,8 +53,13 @@ jobs:
             version=$(bun -e "console.log(require('./$pkg/package.json').version)")
             if npm view "$name@$version" version >/dev/null 2>&1; then
               echo "$name@$version already on npm — skipping"
-            else
-              echo "Publishing $name@$version"
-              (cd "$pkg" && bun publish --access public)
+              continue
             fi
+            echo "Publishing $name@$version"
+            (
+              cd "$pkg"
+              bun run build
+              bun pm pack --destination ./pack-out
+              npm publish ./pack-out/*.tgz --access public
+            )
           done
