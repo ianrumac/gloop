@@ -2,7 +2,7 @@
   "name": "gloop",
   "module": "bin/index.ts",
   "type": "module",
-  "version" : "0.1.4",
+  "version" : "0.2.0",
   "bin": {
     "gloop": "./bin/launcher.ts"
   },

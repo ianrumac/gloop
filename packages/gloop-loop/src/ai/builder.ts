@@ -242,7 +242,20 @@ export class AIConversation {
 
   stream(message: string): StreamResult {
     this.history.push({ role: "user", content: message });
+    return this.streamFromHistory();
+  }
 
+  /**
+   * Stream a continuation from the existing history WITHOUT appending a new
+   * user message.  Used after tool results have been written into history as
+   * native `role: "tool"` messages — the model should respond to those, not
+   * to a synthetic user turn.
+   */
+  streamContinue(): StreamResult {
+    return this.streamFromHistory();
+  }
+
+  private streamFromHistory(): StreamResult {
     const builder = new AIBuilder(this._provider, this._modelId);
     if (this.systemPrompt) builder.system(this.systemPrompt);
     if (this.routing) builder.providerRouting(this.routing);

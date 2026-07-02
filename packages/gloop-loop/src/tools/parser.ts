@@ -43,6 +43,6 @@ export function jsonToolCallsToToolCalls(
       }
     }
 
-    return { name: jc.function.name, args };
+    return { name: jc.function.name, args, ...(jc.id && { id: jc.id }) };
   });
 }

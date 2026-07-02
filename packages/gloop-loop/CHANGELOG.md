@@ -2,6 +2,23 @@
 
 All notable changes to `@hypen-space/gloop-loop` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.2.0]
+
+### Breaking
+- **Native tool-call conversation history.** Tool results are no longer fed back to the model as a synthetic `role: "user"` message wrapped in `<tool_result>` XML. When the provider supplies tool call ids, the assistant's tool calls are recorded on the assistant message (`Message.toolCalls`) and each result is recorded as a `role: "tool"` message keyed by `toolCallId` — the OpenAI-compatible wire format. This fixes two long-standing failure modes: the model "forgetting" it acted after a tools-only turn (and repeating the call), and tool output degrading the model's voice by appearing user-authored. Calls without provider ids still use the legacy user-message path.
+- `Message` gains `toolCalls?: JsonToolCall[]` (assistant) and `toolCallId?: string` (tool role); `MessageRole` adds `"tool"`. Hosts that render or persist history should handle the new role.
+- The `think` form's `input` is now `string | null` — `null` (built via the new `Continue()` constructor) streams a continuation from history without appending a user message.
+
+### Added
+- `ToolCall.id` / `ToolResult.id` — provider tool call ids are preserved through parsing and execution so results can be correlated natively.
+- `AIConversation.streamContinue()` — stream from the current history without pushing a new user message.
+- `LoopConfig.maxIterations` / `AgentLoopOptions.maxIterations` — opt-in cap on LLM calls per turn; exceeding it fails the turn with `MaxIterationsError` instead of spinning forever. Disabled by default.
+- `LoopConfig.llmIdleTimeoutMs` / `AgentLoopOptions.llmIdleTimeoutMs` — idle timeout for a single LLM stream (default 120 s, 0 disables); a provider that stops producing chunks now fails the turn with `LlmIdleTimeoutError` instead of hanging the whole request.
+- Context pruning is tool-call-group aware: deleting an assistant `toolCalls` message also deletes its `role: "tool"` responses (and vice versa) so pruning can never produce a history the provider rejects.
+
+### Fixed
+- Tool arguments are mapped **by key name** against the tool's declared argument list — never positionally. (The `Object.values()` positional mapping shipped in 0.1.2 scrambled arguments whenever the model emitted keys out of order or omitted one; 0.1.3+ sources already mapped by name, and 0.2.0 also preserves call ids.) Downstream workarounds that rebuilt argument JSON at the provider boundary are no longer needed.
+
 ## [0.1.4]
 
 ### Added

@@ -42,7 +42,7 @@ import { chainBoundary } from "../interceptors.js";
 
 /** A Form is a description of what to do next — pure data, no side effects */
 export type Form =
-  | { tag: "think"; input: string }                          // Send input to LLM, get response
+  | { tag: "think"; input: string | null }                   // Send input to LLM (null = continue from history), get response
   | { tag: "invoke"; calls: ToolCall[]; then: Continuation } // Execute tools, continue with results
   | { tag: "confirm"; command: string; then: (ok: boolean) => Form }
   | { tag: "ask"; question: string; then: (answer: string) => Form }
@@ -74,6 +74,14 @@ export type Continuation = (results: ToolResult[]) => Form;
 
 export const Think = (input: string): Form =>
   ({ tag: "think", input });
+
+/**
+ * Continue the conversation from history without a new user message.
+ * Used after tool results have been recorded as native `role: "tool"`
+ * messages — the model responds to those directly.
+ */
+export const Continue = (): Form =>
+  ({ tag: "think", input: null });
 
 export const Invoke = (calls: ToolCall[], then: Continuation): Form =>
   ({ tag: "invoke", calls, then });
@@ -121,6 +129,15 @@ export interface World {
   convo: AIConversation;
   registry: ToolRegistry;
   toolCalls: number;
+  /** LLM calls made in the current `run()` — checked against `LoopConfig.maxIterations`. */
+  llmCalls: number;
+  /**
+   * The assistant response whose tool calls are about to be invoked.
+   * Set by `evalThink` when the model returns id-bearing tool calls;
+   * consumed by `evalInvoke`, which records the assistant `toolCalls`
+   * message and its `role: "tool"` responses into history atomically.
+   */
+  pendingToolCalls?: { text: string; calls: JsonToolCall[] } | null;
   signal?: AbortSignal;
   /** Optional tracer. When undefined, every `withSpan` short-circuits. */
   tracer?: Tracer;
@@ -163,6 +180,7 @@ export const mkWorld = (
   convo,
   registry,
   toolCalls: 0,
+  llmCalls: 0,
   signal,
   tracer,
   interceptors,
@@ -244,11 +262,52 @@ export interface LoopConfig {
   contextPruneInterval?: number;
 
   /**
+   * Maximum LLM calls per `run()` (one user turn).  When set (> 0), a
+   * runaway think→invoke loop stops with a `MaxIterationsError` instead of
+   * spinning forever.  Default: 0 (disabled) — opt in per host.
+   */
+  maxIterations?: number;
+
+  /**
+   * Idle timeout for a single LLM stream, in milliseconds.  If the provider
+   * produces no chunk for this long, the stream is cancelled and the turn
+   * fails with an error instead of hanging the whole request.  0 disables.
+   * Default: 120000 (2 minutes).
+   */
+  llmIdleTimeoutMs?: number;
+
+  /**
    * Skills for `/skill-name` resolution. If a user message starts with `/` and
    * matches a skill name, the skill body is sent as the turn input (after
    * substitutions). Should match the listing merged into the system prompt.
    */
   skills?: Skill[];
+}
+
+/** Thrown when a turn exceeds `LoopConfig.maxIterations` LLM calls. */
+export class MaxIterationsError extends Error {
+  constructor(max: number) {
+    super(`Agent loop exceeded ${max} LLM calls in a single turn — aborting to prevent a runaway loop`);
+    this.name = "MaxIterationsError";
+  }
+}
+
+/** Thrown when an LLM stream produces nothing for `llmIdleTimeoutMs`. */
+export class LlmIdleTimeoutError extends Error {
+  constructor(ms: number) {
+    super(`LLM stream produced no output for ${ms}ms — cancelled to avoid hanging the request`);
+    this.name = "LlmIdleTimeoutError";
+  }
+}
+
+/** Race a promise against an idle timer.  0 or negative ms disables. */
+function raceIdleTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  if (ms <= 0) return promise;
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new LlmIdleTimeoutError(ms)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer)) as Promise<T>;
 }
 
 // ============================================================================
@@ -301,15 +360,22 @@ export function toolCallsToForm(toolCalls: ToolCall[], classifySpawn?: (call: To
     else plainCalls.push(call);
   }
 
+  // When every call carries a provider id, results are recorded natively in
+  // history by evalInvoke (assistant toolCalls + role:"tool" responses), so
+  // the follow-up think continues from history instead of receiving the
+  // results as a synthetic user message.
+  const native = regularCalls.every((c) => c.id);
+
   // No spawns: invoke tools, think with results
   if (spawnTasks.length === 0) {
-    return Invoke(regularCalls, (results) => Think(formatResults(results)));
+    return Invoke(regularCalls, (results) =>
+      native ? Continue() : Think(formatResults(results)));
   }
 
   // Mixed or all-spawn: invoke plain tools first (if any), then fold spawns, then think
   if (plainCalls.length > 0) {
     return Invoke(plainCalls, (toolResults) =>
-      chainSpawns(spawnTasks, Think(formatResults(toolResults)))
+      chainSpawns(spawnTasks, native ? Continue() : Think(formatResults(toolResults)))
     );
   }
 
@@ -472,14 +538,31 @@ export async function eval_(
 
 /**
  * Think: stream LLM response via callModel's text/tool streams, then recurse.
+ * `input === null` continues from history (after native tool results) without
+ * appending a new user message.
  */
 async function evalThink(
-  input: string,
+  input: string | null,
   world: World,
   fx: Effects,
   config?: LoopConfig,
 ): Promise<void> {
-  fx.log?.("LLM_INPUT", input);
+  fx.log?.("LLM_INPUT", input ?? "<continue from history>");
+
+  // A previous think's pending tool calls are consumed by evalInvoke; any
+  // leftover here belongs to a response whose calls never reached invoke
+  // (all-spawn / CompleteTask-only) — drop it so it can't leak into a later
+  // invoke's history writes.
+  world.pendingToolCalls = null;
+
+  // Runaway-loop guard: cap LLM calls per turn (opt-in, disabled by default).
+  const maxIterations = config?.maxIterations ?? 0;
+  world.llmCalls += 1;
+  if (maxIterations > 0 && world.llmCalls > maxIterations) {
+    throw new MaxIterationsError(maxIterations);
+  }
+
+  const idleMs = config?.llmIdleTimeoutMs ?? 120_000;
 
   // Set tools on the conversation for this request
   const jsonTools = world.registry.toJsonTools();
@@ -492,11 +575,11 @@ async function evalThink(
       model: world.convo.model,
       historyLength: world.convo.getHistory().length,
       toolCount: jsonTools.length,
-      inputLength: input.length,
+      inputLength: input?.length ?? 0,
     },
     async (span): Promise<LlmCallResult> => {
       const ctx: LlmCallContext = {
-        input,
+        input: input ?? "",
         model: world.convo.model,
         messages: world.convo.getHistory(),
         tools: jsonTools,
@@ -510,12 +593,17 @@ async function evalThink(
         "llmCall",
         async (innerCtx): Promise<LlmCallResult> => {
           let fullText = "";
-          const stream = world.convo.stream(innerCtx.input);
+          const stream = input === null
+            ? world.convo.streamContinue()
+            : world.convo.stream(innerCtx.input);
 
           try {
             const iter = stream.textStream[Symbol.asyncIterator]();
             while (true) {
-              const { done, value } = await raceAbort(world.signal, iter.next());
+              const { done, value } = await raceIdleTimeout(
+                raceAbort(world.signal, iter.next()),
+                idleMs,
+              );
               if (done) break;
               fx.streamChunk(value);
               fullText += value;
@@ -528,13 +616,15 @@ async function evalThink(
                 h.push({ role: "assistant", content: fullText });
                 world.convo.setHistory(h);
               }
+            } else if (err instanceof LlmIdleTimeoutError) {
+              await stream.cancel().catch(() => {});
             }
             throw err;
           }
 
           fx.streamDone();
-          const calls = await stream.toolCalls;
-          const finishReason = await stream.finishReason;
+          const calls = await raceIdleTimeout(stream.toolCalls, idleMs);
+          const finishReason = await raceIdleTimeout(stream.finishReason, idleMs);
           return { text: fullText, toolCalls: calls, finishReason };
         },
       )(ctx);
@@ -553,11 +643,56 @@ async function evalThink(
       world.registry,
     );
     fx.log?.("TOOL_CALLS", JSON.stringify(toolCalls));
+    // Stash the response so evalInvoke can record the assistant's tool calls
+    // and their results natively in history.  Only when every call has a
+    // provider id — otherwise there is nothing to correlate results against.
+    if (llmResult.toolCalls.every((c) => c.id)) {
+      world.pendingToolCalls = { text: llmResult.text, calls: [...llmResult.toolCalls] };
+    }
     const nextForm = toolCallsToForm(toolCalls, config?.classifySpawn);
     return eval_(nextForm, world, fx, config);
   }
 
   return;
+}
+
+/**
+ * Record the assistant's pending tool calls and their results as native
+ * history messages: one assistant message carrying `toolCalls`, followed by
+ * one `role: "tool"` response per call id.
+ *
+ * The streaming wrapper in `AIConversation` has already pushed the
+ * assistant's TEXT (when non-empty); the toolCalls are merged into that
+ * message so the response stays a single assistant turn.  Calls the
+ * interpreter handles outside evalInvoke (CompleteTask, spawn-classified
+ * tasks) get a synthetic response so the provider never sees an unanswered
+ * tool call id.
+ */
+function recordNativeToolMessages(world: World, results: ToolResult[]): void {
+  const pending = world.pendingToolCalls;
+  if (!pending) return;
+  world.pendingToolCalls = null;
+
+  const h = world.convo.getHistory();
+  const last = h[h.length - 1];
+  if (last && last.role === "assistant" && last.content === pending.text && !last.toolCalls) {
+    h[h.length - 1] = { ...last, toolCalls: pending.calls };
+  } else {
+    h.push({ role: "assistant", content: pending.text, toolCalls: pending.calls });
+  }
+
+  const byId = new Map(results.filter((r) => r.id).map((r) => [r.id!, r]));
+  for (const call of pending.calls) {
+    const r = byId.get(call.id);
+    h.push({
+      role: "tool",
+      toolCallId: call.id,
+      content: r
+        ? (r.success ? r.output : `Error: ${r.output}`)
+        : "(handled by the host — no tool output)",
+    });
+  }
+  world.convo.setHistory(h);
 }
 
 /** Invoke: execute tools (with confirmation), then continue */
@@ -582,7 +717,7 @@ async function evalInvoke(
       const question = call.args.question ?? "What would you like to do?";
       fx.toolStart("AskUser", question.substring(0, 60));
       const answer = await fx.ask(question);
-      results.push({ name: "AskUser", output: `User answered: ${answer}`, success: true });
+      results.push({ name: "AskUser", output: `User answered: ${answer}`, success: true, id: call.id });
       fx.toolDone("AskUser", true, "answered");
       continue;
     }
@@ -592,7 +727,7 @@ async function evalInvoke(
       const instructions = call.args.instructions ?? "Prune stale messages";
       fx.toolStart("ManageContext", instructions.substring(0, 60));
       const result = await fx.manageContext(instructions);
-      results.push({ name: "ManageContext", output: result, success: true });
+      results.push({ name: "ManageContext", output: result, success: true, id: call.id });
       fx.toolDone("ManageContext", true, result);
       continue;
     }
@@ -602,7 +737,7 @@ async function evalInvoke(
       const content = call.args.content ?? "";
       fx.toolStart("Remember", content.substring(0, 60));
       await fx.remember(content);
-      results.push({ name: "Remember", output: `Remembered: ${content}`, success: true });
+      results.push({ name: "Remember", output: `Remembered: ${content}`, success: true, id: call.id });
       fx.toolDone("Remember", true, "remembered");
       continue;
     }
@@ -612,7 +747,7 @@ async function evalInvoke(
       const content = call.args.content ?? "";
       fx.toolStart("Forget", content.substring(0, 60));
       await fx.forget(content);
-      results.push({ name: "Forget", output: `Forgot: ${content}`, success: true });
+      results.push({ name: "Forget", output: `Forgot: ${content}`, success: true, id: call.id });
       fx.toolDone("Forget", true, "forgotten");
       continue;
     }
@@ -620,7 +755,7 @@ async function evalInvoke(
     // Resolve the tool early so askPermission is available
     const tool = world.registry.get(call.name);
     if (!tool) {
-      results.push({ name: call.name, output: `Unknown tool: ${call.name}`, success: false });
+      results.push({ name: call.name, output: `Unknown tool: ${call.name}`, success: false, id: call.id });
       fx.toolDone(call.name, false, `Unknown tool: ${call.name}`);
       continue;
     }
@@ -639,7 +774,7 @@ async function evalInvoke(
         (ctx) => fx.confirm(ctx.command),
       )({ command: danger } as ConfirmContext);
       if (!ok) {
-        results.push({ name: call.name, output: "User denied execution", success: false });
+        results.push({ name: call.name, output: "User denied execution", success: false, id: call.id });
         fx.toolDone(call.name, false, "denied by user");
         continue;
       }
@@ -688,6 +823,7 @@ async function evalInvoke(
           name: call.name,
           output: result.output,
           success: result.success,
+          id: call.id,
         });
         fx.toolDone(call.name, result.success, result.success ? "ok" : result.output);
         span.setAttribute("ok", result.success);
@@ -698,6 +834,11 @@ async function evalInvoke(
       },
     );
   }
+
+  // Record the assistant's tool calls and their results natively in history
+  // BEFORE any reload/prune so the model's next request sees a consistent
+  // assistant-toolCalls → tool-responses pair.
+  recordNativeToolMessages(world, results);
 
   // Refresh system prompt if Reload was called
   if (hasReload) {
@@ -784,5 +925,7 @@ export async function run(
   fx: Effects,
   config?: LoopConfig,
 ): Promise<void> {
+  world.llmCalls = 0;
+  world.pendingToolCalls = null;
   return eval_(parseInput(input, config), world, fx, config);
 }

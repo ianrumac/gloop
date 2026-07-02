@@ -117,6 +117,22 @@ export async function manageContextFork(
   // Apply deletions.
   const deleteSet = new Set(toDelete);
 
+  // Providers reject an assistant `toolCalls` message without its `role:
+  // "tool"` responses (and vice versa) — expand deletions so each tool-call
+  // group (assistant message + its consecutive tool responses) lives or dies
+  // as a unit.
+  for (let i = 0; i < history.length; i++) {
+    const msg = history[i]!;
+    if (msg.role !== "assistant" || !msg.toolCalls?.length) continue;
+    const group = [i];
+    for (let j = i + 1; j < history.length && history[j]!.role === "tool"; j++) {
+      group.push(j);
+    }
+    if (group.some((idx) => deleteSet.has(idx))) {
+      for (const idx of group) deleteSet.add(idx);
+    }
+  }
+
   if (deleteSet.size === 0) {
     const result = `Context reviewed: no messages pruned, ${history.length} remaining`;
     log?.("MANAGE_CONTEXT", result);

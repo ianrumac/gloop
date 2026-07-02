@@ -188,10 +188,22 @@ export class OpenRouterProvider implements AIProvider {
 function buildChatParams(config: AIRequestConfig) {
   return {
     model: config.model,
-    messages: config.messages.map((m) => ({
-      role: m.role as "system" | "user" | "assistant",
-      content: m.content,
-    })),
+    messages: config.messages.map((m) => {
+      if (m.role === "tool") {
+        return { role: "tool" as const, content: m.content, toolCallId: m.toolCallId ?? "" };
+      }
+      return {
+        role: m.role as "system" | "user" | "assistant",
+        content: m.content,
+        ...(m.role === "assistant" && m.toolCalls?.length && {
+          toolCalls: m.toolCalls.map((tc) => ({
+            id: tc.id,
+            type: "function" as const,
+            function: { name: tc.function.name, arguments: tc.function.arguments },
+          })),
+        }),
+      };
+    }),
     ...(config.tools?.length && { tools: toSdkTools(config.tools) }),
     ...(config.temperature !== undefined && { temperature: config.temperature }),
     ...(config.maxTokens !== undefined && { maxTokens: config.maxTokens }),

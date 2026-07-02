@@ -68,6 +68,10 @@ describe("integration — pizza delivery", () => {
           "Do NOT modify test files. Always use ABSOLUTE file paths. " +
           "When done, ALWAYS call the CompleteTask tool with a summary.",
         io,
+        // The library default (256k) equals some endpoints' TOTAL context
+        // window, which makes OpenRouter reject input+output > context.
+        // 32k completion tokens is plenty for this task.
+        maxTokens: 32_000,
         // Non-interactive: auto-approve any confirmations.
         confirm: async () => true,
       });

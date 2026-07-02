@@ -101,23 +101,24 @@ export const jsonToolCallsToToolCalls = (
 ): ReadonlyArray<ToolCall> =>
   calls.map((call) => {
     const tool = lookup(call.function.name)
-    const parsed = Option.getOrElse(
-      parseJsonObject(call.function.arguments),
-      (): Record<string, unknown> => ({}),
-    )
     const args: Record<string, string> = {}
     if (Option.isSome(tool)) {
-      for (const arg of tool.value.arguments) {
-        const v = parsed[arg.name]
-        if (v !== undefined) args[arg.name] = String(v)
-      }
-      if (tool.value.arguments.length === 0 && Object.keys(parsed).length > 0) {
-        // Single-arg fallback: first parsed value.
-        const first = Object.values(parsed)[0]
-        if (first !== undefined) args[tool.value.arguments[0]?.name ?? "arg"] = String(first)
+      const parsed = parseJsonObject(call.function.arguments)
+      if (Option.isSome(parsed)) {
+        // Map declared argument names BY KEY — never positionally.
+        for (const arg of tool.value.arguments) {
+          const v = parsed.value[arg.name]
+          if (v !== undefined && v !== null) args[arg.name] = String(v)
+        }
+      } else if (call.function.arguments && tool.value.arguments.length > 0) {
+        // Arguments aren't a JSON object — bind the whole string to the
+        // first declared argument (the "Bash with malformed json" fallback).
+        args[tool.value.arguments[0]!.name] = call.function.arguments
       }
     }
-    return { name: call.function.name, args }
+    // Preserve the provider call id so results can be correlated back as
+    // native tool messages.
+    return { name: call.function.name, args, ...(call.id && { id: call.id }) }
   })
 
 // ============================================================================

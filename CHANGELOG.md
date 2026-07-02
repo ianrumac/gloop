@@ -2,6 +2,12 @@
 
 All notable changes to `gloop` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.0]
+
+### Changed
+- Picks up `@hypen-space/gloop-loop` 0.2.0 and `@hypen-space/gloop-effect` 0.2.0 — **native tool-call conversation history**. Tool results now go back to the model as `role: "tool"` messages tied to the assistant's recorded `toolCalls` instead of a synthetic user message wrapped in `<tool_result>` XML. The model no longer forgets it acted after a tools-only turn (which caused repeated tool calls), and tool output no longer reads as user-authored.
+- New opt-in loop guards available on `AgentLoop` construction: `maxIterations` (cap LLM calls per turn, off by default) and `llmIdleTimeoutMs` (fail a hung provider stream, default 120 s).
+
 ## [0.1.4]
 
 ### Added

@@ -91,6 +91,19 @@ export interface AgentMakeOptions {
   readonly maxTokens?: number
   readonly contextPruneInterval?: number
   readonly classifySpawn?: LoopConfig["classifySpawn"]
+  /**
+   * Maximum LLM calls per turn — when set (> 0), stops a runaway
+   * think→invoke loop with a `FatalAgentError` instead of spinning forever.
+   * Default: 0 (disabled) — opt in per host.
+   */
+  readonly maxIterations?: number
+  /**
+   * Idle timeout for a single LLM stream (ms).  If the provider produces no
+   * chunk for this long the stream is cancelled and the turn fails with an
+   * `AIProviderError` instead of hanging the request.  0 disables.
+   * Default: 120000 (2 minutes).
+   */
+  readonly llmIdleTimeoutMs?: number
 
   /** Override the default `confirm_request` + `respondToConfirm` handshake. */
   readonly confirm?: (command: string) => Effect.Effect<boolean>
@@ -418,6 +431,8 @@ export const make = (
           : runInterpreter(msg.content, world, {
               classifySpawn: options.classifySpawn,
               contextPruneInterval: options.contextPruneInterval,
+              maxIterations: options.maxIterations,
+              llmIdleTimeoutMs: options.llmIdleTimeoutMs,
               skills: skillsArr,
             }).pipe(Effect.provideService(AgentHooksTag, hooks))
 

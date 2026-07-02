@@ -20,10 +20,18 @@ export interface ToolCall {
    * registered `ToolDefinition.arguments` so only declared keys appear here.
    */
   args: Record<string, string>;
+  /**
+   * Provider-assigned tool call id (from `JsonToolCall.id`).  When present,
+   * the interpreter records the call and its result natively in conversation
+   * history (assistant `toolCalls` + a `role: "tool"` response message).
+   */
+  id?: string;
 }
 
 export interface ToolResult {
   name: string;
   output: string;
   success: boolean;
+  /** Tool call id this result answers (copied from `ToolCall.id`). */
+  id?: string;
 }

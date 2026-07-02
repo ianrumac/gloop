@@ -14,7 +14,7 @@
  *     and folded into `ToolResult { success: false }` to continue the turn.
  */
 
-import { Context, Effect, Either, Match, Option } from "effect"
+import { Context, Duration, Effect, Either, Match, Option, Stream } from "effect"
 import type { Form, SpawnResult } from "@hypen-space/gloop-loop"
 import {
   parseInput as loopParseInput,
@@ -24,14 +24,15 @@ import {
 import type {
   JsonToolCall,
   LoopConfig as LoopConfigInternal,
+  Message,
   ToolCall,
   ToolResult,
 } from "@hypen-space/gloop-loop"
 import type { ConversationHandle } from "./Conversation.js"
-import { AIProvider, consumeStream } from "./AIProvider.js"
+import { AIProvider, consumeStream, type StreamResponse } from "./AIProvider.js"
 import type { ToolRegistry } from "./Tool.js"
 import { jsonToolCallsToToolCalls, legacyBashConfirm } from "./Tool.js"
-import type { AgentError } from "./Errors.js"
+import { AIProviderError, FatalAgentError, type AgentError } from "./Errors.js"
 
 // ============================================================================
 // Hooks — the side-effect surface the interpreter depends on
@@ -73,12 +74,21 @@ export interface World {
   readonly registry: ToolRegistry
   /** Running count of tool calls this turn — used for auto-prune cadence. */
   toolCalls: number
+  /** LLM calls made in the current `run()` — checked against `LoopConfig.maxIterations`. */
+  llmCalls: number
+  /**
+   * The assistant response whose tool calls are about to be invoked.
+   * Set by `evalThink` when the model returns id-bearing tool calls;
+   * consumed by `evalInvoke`, which records the assistant `toolCalls`
+   * message and its `role: "tool"` responses into history atomically.
+   */
+  pendingToolCalls: { text: string; calls: ReadonlyArray<JsonToolCall> } | null
 }
 
 export const mkWorld = (
   convo: ConversationHandle,
   registry: ToolRegistry,
-): World => ({ convo, registry, toolCalls: 0 })
+): World => ({ convo, registry, toolCalls: 0, llmCalls: 0, pendingToolCalls: null })
 
 // ============================================================================
 // Loop config
@@ -87,6 +97,19 @@ export const mkWorld = (
 export interface LoopConfig {
   readonly classifySpawn?: LoopConfigInternal["classifySpawn"]
   readonly contextPruneInterval?: number
+  /**
+   * Maximum LLM calls per `run()` (one user turn).  When set (> 0), a
+   * runaway think→invoke loop fails with a `FatalAgentError` instead of
+   * spinning forever.  Default: 0 (disabled) — opt in per host.
+   */
+  readonly maxIterations?: number
+  /**
+   * Idle timeout for a single LLM stream, in milliseconds.  If the provider
+   * produces no chunk for this long, the stream is cancelled and the turn
+   * fails with an `AIProviderError` instead of hanging the whole request.
+   * 0 disables.  Default: 120000 (2 minutes).
+   */
+  readonly llmIdleTimeoutMs?: number
   readonly skills?: LoopConfigInternal["skills"]
 }
 
@@ -104,7 +127,11 @@ export const run = (
   world: World,
   config?: LoopConfig,
 ): Effect.Effect<void, AgentError, AgentHooksTag | AIProvider> =>
-  evalForm(parseInput(input, config), world, config)
+  Effect.suspend(() => {
+    world.llmCalls = 0
+    world.pendingToolCalls = null
+    return evalForm(parseInput(input, config), world, config)
+  })
 
 // ============================================================================
 // Interpreter
@@ -177,28 +204,68 @@ export const evalForm: (
 // Think — stream LLM response, follow up with any tool calls
 // ============================================================================
 
+/** Apply an idle timeout to a StreamResponse.  0 or negative ms disables. */
+const withIdleTimeout = (
+  stream: StreamResponse,
+  ms: number,
+): StreamResponse => {
+  if (ms <= 0) return stream
+  const onTimeout = () =>
+    new AIProviderError({
+      message: `LLM stream produced no output for ${ms}ms — cancelled to avoid hanging the request`,
+      op: "stream",
+    })
+  return {
+    chunks: stream.chunks.pipe(
+      Stream.timeoutFail(onTimeout, Duration.millis(ms)),
+    ),
+    result: stream.result.pipe(
+      Effect.timeoutFail({ duration: Duration.millis(ms), onTimeout }),
+    ),
+    cancel: stream.cancel,
+  }
+}
+
 const evalThink: (
-  input: string,
+  input: string | null,
   world: World,
   config: LoopConfig | undefined,
 ) => Effect.Effect<void, AgentError, AgentHooksTag | AIProvider> = Effect.fn(
   "Interpreter.evalThink",
-)(function* (input: string, world: World, config: LoopConfig | undefined) {
+)(function* (input: string | null, world: World, config: LoopConfig | undefined) {
   const hooks = yield* AgentHooksTag
-  yield* hooks.log("LLM_INPUT", input)
+  yield* hooks.log("LLM_INPUT", input ?? "<continue from history>")
+
+  // A previous think's pending tool calls are consumed by evalInvoke; any
+  // leftover here belongs to a response whose calls never reached invoke —
+  // drop it so it can't leak into a later invoke's history writes.
+  world.pendingToolCalls = null
+
+  // Runaway-loop guard: cap LLM calls per turn (opt-in, disabled by default).
+  const maxIterations = config?.maxIterations ?? 0
+  world.llmCalls += 1
+  if (maxIterations > 0 && world.llmCalls > maxIterations) {
+    return yield* new FatalAgentError({
+      message: `Agent loop exceeded ${maxIterations} LLM calls in a single turn — aborting to prevent a runaway loop`,
+      phase: "interpreter",
+    })
+  }
 
   // Refresh tools on the conversation right before the request.
   const jsonTools = yield* world.registry.toJsonTools
   yield* world.convo.setJsonTools(jsonTools)
 
-  const stream = yield* world.convo.stream(input)
+  const rawStream = yield* (input === null
+    ? world.convo.streamContinue
+    : world.convo.stream(input))
+  const stream = withIdleTimeout(rawStream, config?.llmIdleTimeoutMs ?? 120_000)
 
   let fullText = ""
   const response = yield* consumeStream(stream, (chunk) =>
     Effect.sync(() => {
       fullText += chunk
     }).pipe(Effect.zipRight(hooks.streamChunk(chunk))),
-  )
+  ).pipe(Effect.tapError(() => stream.cancel))
 
   yield* hooks.streamDone
   yield* hooks.log("LLM_OUTPUT", fullText)
@@ -210,6 +277,12 @@ const evalThink: (
   const toolCalls = jsonToolCallsToToolCalls(jsonCalls, lookup)
 
   yield* hooks.log("TOOL_CALLS", JSON.stringify(toolCalls))
+  // Stash the response so evalInvoke can record the assistant's tool calls
+  // and their results natively in history.  Only when every call has a
+  // provider id — otherwise there is nothing to correlate results against.
+  if (jsonCalls.every((c) => c.id)) {
+    world.pendingToolCalls = { text: fullText, calls: jsonCalls }
+  }
   const nextForm = toolCallsToForm([...toolCalls], config?.classifySpawn)
   yield* evalForm(nextForm, world, config)
 })
@@ -236,8 +309,17 @@ const evalInvoke: (
   const hasReload = calls.some((c) => c.name === "Reload")
 
   const results = yield* Effect.forEach(calls, (call) =>
-    dispatchCall(call, world, hooks),
+    dispatchCall(call, world, hooks).pipe(
+      // Thread the provider call id onto the result so it can be recorded
+      // as a native `role: "tool"` response.
+      Effect.map((r): ToolResult => ({ ...r, id: call.id })),
+    ),
   )
+
+  // Record the assistant's tool calls and their results natively in history
+  // BEFORE any reload/prune so the model's next request sees a consistent
+  // assistant-toolCalls → tool-responses pair.
+  yield* recordNativeToolMessages(world, results)
 
   if (hasReload) yield* hooks.refreshSystem
 
@@ -258,6 +340,57 @@ const evalInvoke: (
 
   yield* evalForm(then(results), world, config)
 })
+
+// ============================================================================
+// Native tool-call history recording
+// ============================================================================
+
+/**
+ * Record the assistant's pending tool calls and their results as native
+ * history messages: one assistant message carrying `toolCalls`, followed by
+ * one `role: "tool"` response per call id.
+ *
+ * The conversation's stream commit has already pushed the assistant's TEXT
+ * (when non-empty); the toolCalls are merged into that message so the
+ * response stays a single assistant turn.  Calls handled outside evalInvoke
+ * (CompleteTask, spawn-classified tasks) get a synthetic response so the
+ * provider never sees an unanswered tool call id.
+ */
+const recordNativeToolMessages = (
+  world: World,
+  results: ReadonlyArray<ToolResult>,
+): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    const pending = world.pendingToolCalls
+    if (!pending) return
+    world.pendingToolCalls = null
+
+    const h: Message[] = [...(yield* world.convo.getHistory)]
+    const last = h[h.length - 1]
+    if (
+      last &&
+      last.role === "assistant" &&
+      last.content === pending.text &&
+      !last.toolCalls
+    ) {
+      h[h.length - 1] = { ...last, toolCalls: [...pending.calls] }
+    } else {
+      h.push({ role: "assistant", content: pending.text, toolCalls: [...pending.calls] })
+    }
+
+    const byId = new Map(results.filter((r) => r.id).map((r) => [r.id!, r]))
+    for (const call of pending.calls) {
+      const r = byId.get(call.id)
+      h.push({
+        role: "tool",
+        toolCallId: call.id,
+        content: r
+          ? (r.success ? r.output : `Error: ${r.output}`)
+          : "(handled by the host — no tool output)",
+      })
+    }
+    yield* world.convo.setHistory(h)
+  })
 
 // ============================================================================
 // Dispatch a single tool call → ToolResult (never fails the surrounding turn)

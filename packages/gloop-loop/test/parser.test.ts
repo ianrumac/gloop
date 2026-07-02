@@ -75,7 +75,7 @@ describe("jsonToolCallsToToolCalls", () => {
       }],
       makeRegistry(),
     );
-    expect(result).toEqual([{ name: "ReadFile", args: { path: "./README.md" } }]);
+    expect(result).toEqual([{ name: "ReadFile", args: { path: "./README.md" }, id: "call_1" }]);
   });
 
   test("multiple tool calls", () => {
@@ -209,6 +209,6 @@ describe("jsonToolCallsToToolCalls", () => {
       }],
       makeRegistry(),
     );
-    expect(result).toEqual([{ name: "Mystery", args: {} }]);
+    expect(result).toEqual([{ name: "Mystery", args: {}, id: "c1" }]);
   });
 });

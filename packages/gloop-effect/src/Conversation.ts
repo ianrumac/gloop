@@ -59,6 +59,13 @@ export interface ConversationHandle {
     content: string,
   ) => Effect.Effect<StreamResponse, never, AIProvider>
 
+  /**
+   * Streaming request from the CURRENT history without appending a new user
+   * message.  Used after tool results have been written into history as
+   * native `role: "tool"` messages — the model responds to those directly.
+   */
+  readonly streamContinue: Effect.Effect<StreamResponse, never, AIProvider>
+
   readonly clear: Effect.Effect<void>
   readonly fork: Effect.Effect<ConversationHandle, never, AIProvider>
   readonly setSystem: (prompt: string | undefined) => Effect.Effect<void>
@@ -128,25 +135,24 @@ export const makeConversation = (
       return assistant
     })
 
-    const stream = Effect.fn("Conversation.stream")(function* (content: string) {
+    // Shared streaming body: request from the CURRENT state (system prompt +
+    // history), commit the assistant text back when the stream resolves (or
+    // is cancelled with partial text).
+    const streamFromHistory = Effect.fn("Conversation.streamFromHistory")(function* () {
       const st = yield* Ref.get(state)
       yield* Effect.annotateCurrentSpan("model", options.model)
       yield* Effect.annotateCurrentSpan("historyLength", st.history.length)
       yield* Effect.annotateCurrentSpan("toolCount", st.jsonTools.length)
+      const msgs: Message[] = []
+      if (st.systemPrompt) msgs.push({ role: "system", content: st.systemPrompt })
+      msgs.push(...st.history)
       const baseStream = provider.stream({
         model: options.model,
-        messages: [...buildMessages(st, content)],
+        messages: msgs,
         maxTokens: st.maxTokens,
         tools: st.jsonTools.length > 0 ? [...st.jsonTools] : undefined,
         provider: st.providerRouting,
       })
-
-      // Commit user message eagerly so interrupts preserve the exchange
-      // structure (user asked, assistant reply may be partial).
-      yield* Ref.update(state, (s) => ({
-        ...s,
-        history: [...s.history, { role: "user", content } as const],
-      }))
 
       // Capture chunks as they flow so a cancel can still write a partial
       // assistant message to history.
@@ -176,6 +182,18 @@ export const makeConversation = (
 
       return { chunks, result, cancel } satisfies StreamResponse
     })
+
+    const stream = Effect.fn("Conversation.stream")(function* (content: string) {
+      // Commit user message eagerly so interrupts preserve the exchange
+      // structure (user asked, assistant reply may be partial).
+      yield* Ref.update(state, (s) => ({
+        ...s,
+        history: [...s.history, { role: "user", content } as const],
+      }))
+      return yield* streamFromHistory()
+    })
+
+    const streamContinue = streamFromHistory()
 
     const appendAssistant = (text: string) =>
       Ref.update(state, (s) => ({
@@ -219,6 +237,7 @@ export const makeConversation = (
       model: options.model,
       send,
       stream,
+      streamContinue,
       clear,
       fork,
       setSystem,

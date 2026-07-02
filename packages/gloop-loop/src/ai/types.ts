@@ -1,8 +1,18 @@
-export type MessageRole = "system" | "user" | "assistant";
+export type MessageRole = "system" | "user" | "assistant" | "tool";
 
 export interface Message {
   role: MessageRole;
   content: string;
+  /**
+   * Tool calls made by the assistant in this message (assistant role only).
+   * Recorded so the model sees its own prior tool use in later requests.
+   */
+  toolCalls?: JsonToolCall[];
+  /**
+   * ID of the assistant tool call this message responds to (tool role only).
+   * Must match a `toolCalls[].id` from the preceding assistant message.
+   */
+  toolCallId?: string;
 }
 
 export interface ProviderRouting {

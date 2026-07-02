@@ -52,6 +52,7 @@ export type {
 export {
   // Form constructors
   Think,
+  Continue,
   Invoke,
   Confirm,
   Ask,
@@ -67,6 +68,8 @@ export {
   Spawn,
   // World
   AbortError,
+  MaxIterationsError,
+  LlmIdleTimeoutError,
   raceAbort,
   mkWorld,
   // Interpreter

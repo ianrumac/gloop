@@ -868,3 +868,171 @@ describe("run — agent loop", () => {
     expect(confirmEvent.command).toContain("rm -rf");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Native tool messages, iteration cap, idle timeout
+// ---------------------------------------------------------------------------
+
+describe("native tool-call history", () => {
+  test("assistant toolCalls and role:tool responses are recorded in history", async () => {
+    const provider = new MockProvider([
+      { text: "Let me echo that.", toolCalls: [tc("c1", "Echo", { text: "hi" })] },
+      { text: "Done echoing." },
+    ]);
+    const convo = new AIConversation(provider, "m");
+    const registry = createTestRegistry();
+    const { fx } = createRecordingFx();
+    const world = mkWorld(convo, registry);
+
+    await run("echo hi", world, fx);
+
+    const h = convo.getHistory();
+    // [user, assistant(text+toolCalls), tool, assistant(text)]
+    expect(h.map((m) => m.role)).toEqual(["user", "assistant", "tool", "assistant"]);
+    expect(h[1]!.content).toBe("Let me echo that.");
+    expect(h[1]!.toolCalls).toEqual([tc("c1", "Echo", { text: "hi" })]);
+    expect(h[2]!.toolCallId).toBe("c1");
+    expect(h[2]!.content).toBe("hi");
+    // No synthetic user message carrying <tool_result>.
+    expect(h.some((m) => m.role === "user" && m.content.includes("<tool_result"))).toBe(false);
+  });
+
+  test("tools-only response still records the assistant turn", async () => {
+    const provider = new MockProvider([
+      { toolCalls: [tc("c1", "Echo", { text: "silent" })] },
+      { text: "ok" },
+    ]);
+    const convo = new AIConversation(provider, "m");
+    const registry = createTestRegistry();
+    const { fx } = createRecordingFx();
+    const world = mkWorld(convo, registry);
+
+    await run("go", world, fx);
+
+    const h = convo.getHistory();
+    expect(h.map((m) => m.role)).toEqual(["user", "assistant", "tool", "assistant"]);
+    expect(h[1]!.content).toBe("");
+    expect(h[1]!.toolCalls?.length).toBe(1);
+  });
+
+  test("second LLM request contains the tool response messages", async () => {
+    const provider = new MockProvider([
+      { toolCalls: [tc("c1", "Echo", { text: "ping" })] },
+      { text: "pong" },
+    ]);
+    const convo = new AIConversation(provider, "m");
+    const registry = createTestRegistry();
+    const { fx } = createRecordingFx();
+    const world = mkWorld(convo, registry);
+
+    await run("go", world, fx);
+
+    expect(provider.calls.length).toBe(2);
+    const second = provider.calls[1]!.messages;
+    expect(second.some((m) => m.role === "tool" && m.toolCallId === "c1")).toBe(true);
+    expect(second.some((m) => m.role === "assistant" && m.toolCalls?.length === 1)).toBe(true);
+    // The continuation adds NO new user message.
+    expect(second.filter((m) => m.role === "user").length).toBe(1);
+  });
+
+  test("failed tool results are recorded with an Error prefix", async () => {
+    const provider = new MockProvider([
+      { toolCalls: [tc("c1", "Fail", { msg: "kaboom" })] },
+      { text: "noted" },
+    ]);
+    const convo = new AIConversation(provider, "m");
+    const registry = createTestRegistry();
+    const { fx } = createRecordingFx();
+    const world = mkWorld(convo, registry);
+
+    await run("go", world, fx);
+
+    const toolMsg = convo.getHistory().find((m) => m.role === "tool");
+    expect(toolMsg!.content.startsWith("Error:")).toBe(true);
+    expect(toolMsg!.content).toContain("kaboom");
+  });
+
+  test("mixed tool + CompleteTask answers every tool call id", async () => {
+    const provider = new MockProvider([
+      { toolCalls: [
+        tc("c1", "Echo", { text: "last one" }),
+        tc("c2", "CompleteTask", { summary: "all done" }),
+      ] },
+    ]);
+    const convo = new AIConversation(provider, "m");
+    const registry = createTestRegistry();
+    const { fx, events } = createRecordingFx();
+    const world = mkWorld(convo, registry);
+
+    await run("finish", world, fx);
+
+    expect(events.some((e) => e.type === "complete")).toBe(true);
+    const h = convo.getHistory();
+    const toolIds = h.filter((m) => m.role === "tool").map((m) => m.toolCallId);
+    expect(toolIds.sort()).toEqual(["c1", "c2"]);
+  });
+
+  test("calls without provider ids fall back to user-message results", async () => {
+    const provider = new MockProvider([
+      { toolCalls: [{ id: "", type: "function", function: { name: "Echo", arguments: '{"text":"legacy"}' } }] },
+      { text: "ok" },
+    ]);
+    const convo = new AIConversation(provider, "m");
+    const registry = createTestRegistry();
+    const { fx } = createRecordingFx();
+    const world = mkWorld(convo, registry);
+
+    await run("go", world, fx);
+
+    const h = convo.getHistory();
+    expect(h.some((m) => m.role === "tool")).toBe(false);
+    expect(h.some((m) => m.role === "user" && m.content.includes("<tool_result"))).toBe(true);
+  });
+});
+
+describe("loop guards", () => {
+  test("maxIterations stops a runaway tool loop", async () => {
+    // Provider that ALWAYS responds with another tool call.
+    const provider: AIProvider = {
+      name: "runaway",
+      complete: async () => { throw new Error("unused"); },
+      stream: () => ({
+        textStream: (async function* () {})(),
+        toolCalls: Promise.resolve([tc(`c${Math.random()}`, "Echo", { text: "again" })]),
+        finishReason: Promise.resolve("tool_calls" as const),
+        cancel: async () => {},
+      }),
+    };
+    const convo = new AIConversation(provider, "m");
+    const registry = createTestRegistry();
+    const { fx } = createRecordingFx();
+    const world = mkWorld(convo, registry);
+
+    await expect(run("loop forever", world, fx, { maxIterations: 5 }))
+      .rejects.toThrow(/exceeded 5 LLM calls/);
+  });
+
+  test("llmIdleTimeoutMs cancels a hung stream", async () => {
+    let cancelled = false;
+    const provider: AIProvider = {
+      name: "hung",
+      complete: async () => { throw new Error("unused"); },
+      stream: () => ({
+        textStream: (async function* () {
+          await new Promise(() => {}); // never yields
+        })(),
+        toolCalls: new Promise(() => {}),
+        finishReason: new Promise(() => {}),
+        cancel: async () => { cancelled = true; },
+      }),
+    };
+    const convo = new AIConversation(provider, "m");
+    const registry = createTestRegistry();
+    const { fx } = createRecordingFx();
+    const world = mkWorld(convo, registry);
+
+    await expect(run("hang", world, fx, { llmIdleTimeoutMs: 20 }))
+      .rejects.toThrow(/no output for 20ms/);
+    expect(cancelled).toBe(true);
+  });
+});

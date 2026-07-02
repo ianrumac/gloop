@@ -315,6 +315,19 @@ export interface AgentLoopOptions {
   /** Classify tool calls as spawn tasks. */
   classifySpawn?: LoopConfig["classifySpawn"];
   /**
+   * Maximum LLM calls per turn — when set (> 0), stops a runaway
+   * think→invoke loop with a `MaxIterationsError` instead of spinning
+   * forever.  Default: 0 (disabled) — opt in per host.
+   */
+  maxIterations?: number;
+  /**
+   * Idle timeout for a single LLM stream (ms).  If the provider produces no
+   * chunk for this long the stream is cancelled and the turn fails with an
+   * `LlmIdleTimeoutError` instead of hanging the request.  0 disables.
+   * Default: 120000 (2 minutes).
+   */
+  llmIdleTimeoutMs?: number;
+  /**
    * Cap completion tokens per request.  Passed to the provider as max_tokens.
    * Default: 262144 (256k) — large enough that a long response with trailing
    * tool calls won't be truncated mid-generation.  Reduce for cheaper runs.
@@ -398,6 +411,8 @@ export class AgentLoop {
     this.loopConfig = {
       contextPruneInterval: opts.contextPruneInterval,
       classifySpawn: opts.classifySpawn,
+      maxIterations: opts.maxIterations,
+      llmIdleTimeoutMs: opts.llmIdleTimeoutMs,
       skills: opts.skills,
     };
   }
@@ -697,6 +712,8 @@ export class AgentLoop {
   clear(): this {
     this.convo.clear();
     this.world.toolCalls = 0;
+    this.world.llmCalls = 0;
+    this.world.pendingToolCalls = null;
     return this;
   }
 

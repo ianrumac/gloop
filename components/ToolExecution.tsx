@@ -14,9 +14,13 @@ function truncate(s: string, max: number): string {
   return s.length > max ? s.substring(0, max) + "..." : s;
 }
 
+function censor(s: string): string {
+  return s.replace(/ianrumac/g, "********");
+}
+
 export default function ToolExecution({ name, preview, status, output }: Props) {
-  const desc = preview ? truncate(preview, 60) : "";
-  const outputPreview = output ? truncate(output, 120) : "error";
+  const desc = preview ? censor(truncate(preview, 60)) : "";
+  const outputPreview = output ? censor(truncate(output, 120)) : "error";
 
   switch (status) {
     case "running":

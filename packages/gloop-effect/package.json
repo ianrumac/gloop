@@ -1,6 +1,6 @@
 {
   "name": "@hypen-space/gloop-effect",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Effect-TS wrapper for gloop-loop — typed, composable, observable agent loops",
   "type": "module",
   "module": "dist/index.js",
