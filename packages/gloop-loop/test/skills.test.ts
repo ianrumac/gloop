@@ -7,7 +7,7 @@ import {
   parseSkillMarkdown,
   splitSkillArguments,
   thinkInputFromSkillSubcommand,
-} from "../src/skills.ts";
+} from "../src/skills.js";
 
 describe("parseSkillMarkdown", () => {
   test("parses frontmatter and body", () => {

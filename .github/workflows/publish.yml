@@ -5,8 +5,8 @@ name: Publish
 # package.json is not yet on the registry. Bump the version + changelog in
 # the PR; the merge does the publish.
 #
-# Requires the NPM_TOKEN repository secret (an npm automation token with
-# publish rights to the @hypen-space scope).
+# Requires the NPM_TOKEN secret in the "Publish" environment (an npm
+# automation token with publish rights to the @hypen-space scope).
 #
 # `bun publish` is used instead of `npm publish` because gloop-effect
 # depends on gloop-loop via the workspace: protocol, which bun rewrites to
@@ -31,22 +31,19 @@ jobs:
         with:
           bun-version: latest
 
-      # Writes ~/.npmrc with //registry.npmjs.org/:_authToken=$NODE_AUTH_TOKEN,
-      # which both npm (view) and bun (publish) pick up.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
-
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
       # gloop-loop first — gloop-effect depends on it.
+      # bun publish does not read setup-node's env-templated .npmrc (it lives
+      # behind NPM_CONFIG_USERCONFIG, which bun ignores), so write ~/.npmrc
+      # with the token directly. npm view on public packages needs no auth.
       - name: Publish changed packages
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
+          echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
           for pkg in packages/gloop-loop packages/gloop-effect; do
             name=$(bun -e "console.log(require('./$pkg/package.json').name)")
             version=$(bun -e "console.log(require('./$pkg/package.json').version)")
