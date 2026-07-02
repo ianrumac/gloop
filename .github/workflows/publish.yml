@@ -23,6 +23,7 @@ jobs:
   publish:
     name: Publish packages
     runs-on: ubuntu-latest
+    environment: Publish
     steps:
       - uses: actions/checkout@v4
 
