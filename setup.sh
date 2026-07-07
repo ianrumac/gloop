@@ -19,10 +19,12 @@ if command -v bun &>/dev/null; then
   PM="bun"
   INSTALL="bun install"
   LINK="bun link"
+  BUILD="bun run --filter '*' build"
 elif command -v npm &>/dev/null; then
   PM="npm"
   INSTALL="npm install"
   LINK="npm link"
+  BUILD="npm run build --workspaces --if-present"
 else
   echo "Error: Neither bun nor npm found. Install bun (https://bun.sh) or Node.js first."
   exit 1
@@ -32,18 +34,28 @@ echo -e "${DIM}Using ${PM}${RESET}"
 echo ""
 
 # 1. Install dependencies
-echo -e "${BOLD}[1/3] Installing dependencies...${RESET}"
+echo -e "${BOLD}[1/4] Installing dependencies...${RESET}"
 $INSTALL
 echo ""
 
-# 2. Link globally
-echo -e "${BOLD}[2/3] Linking gloop globally...${RESET}"
+# 2. Build workspace packages
+#    The root app imports @hypen-space/gloop-loop, whose package "exports"
+#    resolve to ./dist for node/tsc consumers. dist/ is gitignored and absent
+#    on a fresh clone, so without this step `gloop` fails with
+#    "Cannot find module '@hypen-space/gloop-loop'".
+echo -e "${BOLD}[2/4] Building workspace packages...${RESET}"
+eval "$BUILD"
+echo -e "${GREEN}✓${RESET} workspace packages built"
+echo ""
+
+# 3. Link globally
+echo -e "${BOLD}[3/4] Linking gloop globally...${RESET}"
 $LINK
 echo -e "${GREEN}✓${RESET} gloop is now available as a global command"
 echo ""
 
-# 3. API key setup
-echo -e "${BOLD}[3/3] OpenRouter API key setup${RESET}"
+# 4. API key setup
+echo -e "${BOLD}[4/4] OpenRouter API key setup${RESET}"
 echo ""
 
 if [ -f .env ] && grep -q "OPENROUTER_API_KEY" .env 2>/dev/null; then

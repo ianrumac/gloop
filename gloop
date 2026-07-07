@@ -2,4 +2,4 @@
 # gloop wrapper
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec bun "${SCRIPT_DIR}/launcher.ts" "$@"
+exec bun "${SCRIPT_DIR}/bin/launcher.ts" "$@"
