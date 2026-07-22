@@ -20,6 +20,7 @@ import { Effect, Layer, Stream } from "effect"
 import { AIProvider, type AIProviderImpl } from "../src/index.js"
 import {
   buildAgent,
+  directive,
   group,
   model,
   system,
@@ -45,9 +46,10 @@ function ChatAgent() {
 
   return group(
     model("strong-responder"),
-    system("You are a helpful assistant."),
-    // The stack: the thinker's thoughts become the responder's instructions.
-    guidance && system(`Private guidance from your inner voice:\n${guidance}`),
+    system("You are a helpful assistant."), // standing identity — unchanged
+    // The stack: the thinker's thoughts steer THIS answer only, as an
+    // ephemeral directive — not a system section, not persisted.
+    guidance && directive(`(inner voice) ${guidance}`),
   )
 }
 
@@ -71,12 +73,13 @@ const stub: AIProviderImpl = {
     })
   },
   stream: (req) => {
+    // The guidance now arrives as an ephemeral directive message, not system.
+    const note = req.messages.find((m) => m.content.includes("(inner voice)"))
+    const guided = note ? note.content.replace("(inner voice)", "").trim() : "(no guidance)"
     const sys = req.messages.find((m) => m.role === "system")?.content ?? ""
-    const guided = sys.includes("inner voice:")
-      ? sys.split("inner voice:")[1]!.trim().split("\n")[0]
-      : "(no guidance)"
-    const user = [...req.messages].reverse().find((m) => m.role === "user")?.content ?? ""
-    const text = `[steered by → ${guided}]\nHere's my reply about "${user}".`
+    const user = req.messages.filter((m) => !m.content.includes("(inner voice)"))
+      .reverse().find((m) => m.role === "user")?.content ?? ""
+    const text = `[system stays: "${sys}"]\n[steered by → ${guided}]\nHere's my reply about "${user}".`
     return {
       chunks: Stream.fromIterable(text.match(/.{1,24}/g) ?? [text]),
       result: Effect.succeed({ id: "resp", model: req.model, content: text, finishReason: "stop" }),

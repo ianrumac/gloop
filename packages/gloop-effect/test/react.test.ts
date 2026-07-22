@@ -15,6 +15,7 @@ import { Effect, Fiber, Layer, Stream } from "effect"
 import { AIProvider, type AgentEvent, type AIProviderImpl } from "../src/index.js"
 import {
   buildAgent,
+  directive,
   group,
   model,
   system,
@@ -155,7 +156,8 @@ describe("react — buildAgent (return-a-tree)", () => {
     expect(captured).toBe("PONG")
   })
 
-  it("stacks a thinker LLM into the responder's prompt (Suspense)", async () => {
+  it("steers via ephemeral directive, not the system prompt (Suspense)", async () => {
+    const seenByResponder: string[] = []
     // complete() serves the thinker; stream() serves the responder.
     const provider: AIProviderImpl = {
       name: "stub",
@@ -166,11 +168,14 @@ describe("react — buildAgent (return-a-tree)", () => {
           content: "FOCUS::BILLING",
           finishReason: "stop",
         }),
-      stream: (req) => ({
-        chunks: Stream.empty,
-        result: Effect.succeed({ id: "r", model: req.model, content: "", finishReason: "stop" }),
-        cancel: Effect.void,
-      }),
+      stream: (req) => {
+        seenByResponder.push(...req.messages.map((m) => m.content))
+        return {
+          chunks: Stream.empty,
+          result: Effect.succeed({ id: "r", model: req.model, content: "ok", finishReason: "stop" }),
+          cancel: Effect.void,
+        }
+      },
     }
 
     await Effect.runPromise(
@@ -186,15 +191,21 @@ describe("react — buildAgent (return-a-tree)", () => {
             return group(
               model("responder"),
               system("You are helpful."),
-              guidance ? system(`guidance: ${guidance}`) : false,
+              guidance ? directive(guidance) : false,
             )
           }
 
-          // Mount suspends on the thinker; by the time buildAgent returns, the
-          // guidance is already merged into the system prompt.
           const app = yield* buildAgent(App)
+          yield* app.send("hello")
+
+          // 1. The responder saw the thinker's guidance this turn…
+          expect(seenByResponder.some((c) => c.includes("FOCUS::BILLING"))).toBe(true)
+          // 2. …but it never entered the standing system prompt…
           const sys = yield* app.agent.conversation.getSystem
-          expect(sys).toContain("FOCUS::BILLING")
+          expect(sys).toBe("You are helpful.")
+          // 3. …and it was stripped from history after the turn.
+          const history = yield* app.agent.conversation.getHistory
+          expect(history.some((m) => m.content.includes("FOCUS::BILLING"))).toBe(false)
         }),
       ).pipe(Effect.provide(Layer.succeed(AIProvider, provider))),
     )

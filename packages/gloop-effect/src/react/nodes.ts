@@ -35,6 +35,11 @@ export interface SkillNode {
   readonly _tag: "skill"
   readonly skill: Skill
 }
+export interface DirectiveNode {
+  readonly _tag: "directive"
+  readonly text: string
+  readonly as: "user" | "assistant"
+}
 export interface GroupNode {
   readonly _tag: "group"
   readonly children: Children
@@ -45,6 +50,7 @@ export type Node =
   | SystemNode
   | MaxTokensNode
   | SkillNode
+  | DirectiveNode
   | GroupNode
 
 /** Anything valid as a child: a node, a bare tool, a nested array, or falsy. */
@@ -70,6 +76,18 @@ export const model = (id: string): ModelNode => ({ _tag: "model", id })
 export const system = (text: string): SystemNode => ({ _tag: "system", text })
 export const maxTokens = (n: number): MaxTokensNode => ({ _tag: "maxTokens", n })
 export const skill = (s: Skill): SkillNode => ({ _tag: "skill", skill: s })
+
+/**
+ * An ephemeral, per-turn instruction delivered as a hidden message — NOT the
+ * standing system prompt. Injected just before the responder generates and
+ * stripped from history afterward, so it steers only this one answer.
+ * `as: "assistant"` prefills the responder's own voice; `"user"` (default)
+ * reads as an out-of-band directive.
+ */
+export const directive = (
+  text: string,
+  as: "user" | "assistant" = "user",
+): DirectiveNode => ({ _tag: "directive", text, as })
 
 /** Group children into one node — the fragment / `<>…</>` of this world. */
 export const group = (...children: Children): GroupNode => ({
@@ -108,6 +126,9 @@ export const flatten = (child: Rendered, draft: Draft): void => {
         return
       case "skill":
         draft.skills.push(node.skill)
+        return
+      case "directive":
+        draft.directives.push({ text: node.text, as: node.as })
         return
       case "group":
         flatten(node.children as Rendered, draft)

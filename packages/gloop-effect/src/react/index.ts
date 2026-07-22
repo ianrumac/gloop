@@ -22,6 +22,7 @@ export {
   system,
   maxTokens,
   skill,
+  directive,
   group,
   flatten,
   type Node,

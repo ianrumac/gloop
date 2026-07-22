@@ -40,6 +40,12 @@ export interface PendingEffect {
 export type EffectSetup = () => void | EffectCleanup
 export type EffectCleanup = () => void
 
+/** An ephemeral, per-turn instruction — NOT standing system config. */
+export interface Directive {
+  readonly text: string
+  readonly as: "user" | "assistant"
+}
+
 export interface Draft {
   systemParts: string[]
   tools: AnyTool[]
@@ -47,6 +53,8 @@ export interface Draft {
   model: string | undefined
   maxTokens: number | undefined
   effects: PendingEffect[]
+  /** Injected for this turn only, then stripped from history. */
+  directives: Directive[]
 }
 
 export const emptyDraft = (): Draft => ({
@@ -56,6 +64,7 @@ export const emptyDraft = (): Draft => ({
   model: undefined,
   maxTokens: undefined,
   effects: [],
+  directives: [],
 })
 
 // ----------------------------------------------------------------------------

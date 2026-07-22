@@ -123,21 +123,32 @@ function ChatAgent() {
 
   return group(
     model("strong-responder"),
-    system("You are a helpful assistant."),
-    guidance && system(`Private guidance from your inner voice:\n${guidance}`),
+    system("You are a helpful assistant."), // standing identity — never mutated
+    // Steer THIS answer only. `directive` is ephemeral: injected as a hidden
+    // message for this turn, then stripped — it never touches the system prompt.
+    guidance && directive(`(inner voice) ${guidance}`),
   )
 }
 ```
 
 Per turn the runtime renders, sees the thinker's pending promise, **awaits it and
-re-renders**, then runs the responder conditioned on the guidance. The thinker
-never talks to the user — it only shapes the responder's *config*, so it can
-direct more than the prompt: pick the model (`useModel` on difficulty), gate
-tools, set `maxTokens`. A cheap LLM rendering the config for an expensive one.
+re-renders**, then runs the responder steered by the guidance. Crucially the
+guidance is **not** a system section — the system prompt is standing config that
+persists across every turn, whereas the thinker's thoughts are per-turn. So they
+ride in as a `directive`: injected into history just before the responder
+generates, stripped immediately after (see the test — the guidance reaches the
+responder, never enters `getSystem`, and is gone from history afterward).
+
+The thinker never talks to the user; it shapes the responder's turn. Beyond
+`directive`, it can steer any config the tree exposes: pick the model
+(`model(hard ? "opus" : "haiku")`), gate tools, set `maxTokens` — a cheap LLM
+rendering the config for an expensive one.
 
 - `useAsync(fn, deps)` — the Suspense primitive: run a promise as part of render
 - `useSubAgent({ model, system, input })` — a nested one-shot LLM, returns its text
 - `useThinker(...)` — `useSubAgent` framed as an inner monologue
+- `directive(text, as?)` — ephemeral per-turn steer (`as: "assistant"` prefills
+  the responder's own voice; `"user"` reads as an out-of-band instruction)
 
 Runnable: `bun run examples/react-thinker.ts` (scripted stub, no API key).
 

@@ -255,7 +255,30 @@ export const buildAgent = (
         turnNo += 1
         const draft = yield* renderSettled(message, turnNo)
         yield* commit(draft)
-        yield* agent.sendSync(message)
+
+        if (draft.directives.length === 0) {
+          yield* agent.sendSync(message)
+          return
+        }
+
+        // Inject per-turn directives as hidden messages, run the turn, then
+        // strip them so nothing persists into standing history or system.
+        const snapshot = yield* agent.conversation.getHistory
+        const notes = draft.directives.map((d) => ({
+          role: d.as,
+          content: d.text,
+        }))
+        yield* agent.conversation.setHistory([...snapshot, ...notes])
+
+        const strip = Effect.gen(function* () {
+          const after = yield* agent.conversation.getHistory
+          yield* agent.conversation.setHistory([
+            ...after.slice(0, snapshot.length),
+            ...after.slice(snapshot.length + notes.length),
+          ])
+        })
+
+        yield* agent.sendSync(message).pipe(Effect.ensuring(strip))
       })
 
     const rerender: AgentApp["rerender"] = Effect.gen(function* () {
