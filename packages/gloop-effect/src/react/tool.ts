@@ -11,8 +11,8 @@
  *   - `confirmWhen` — gate the call behind a confirmation prompt
  *
  * The builder is immutable — every combinator returns a fresh builder — and
- * coerces to a plain `Tool<ToolExecutionError>` via `toTool()`, so it drops
- * straight into `useTool` or `Agent.make({ tools })`.
+ * is structurally a `Tool<ToolExecutionError>`, so it's a valid child in a
+ * component tree *and* drops straight into `Agent.make({ tools })`.
  */
 
 import { Effect, Option } from "effect"

@@ -8,16 +8,12 @@
  * should be, this turn".
  */
 
-import { Option } from "effect"
-import type { Skill } from "@hypen-space/gloop-loop"
-import type { AnyTool } from "../Tool.js"
 import {
   nextCell,
   useInstance,
   type EffectSetup,
   type MemoryBridge,
 } from "./internal.js"
-import type { ToolBuilder } from "./tool.js"
 
 const depsChanged = (
   a: ReadonlyArray<unknown> | undefined,
@@ -99,46 +95,6 @@ export const useMemo = <T>(
     cell.deps = deps
   }
   return cell.value as T
-}
-
-// ----------------------------------------------------------------------------
-// Configuration hooks — these push into the draft
-// ----------------------------------------------------------------------------
-
-/** Declare the model for this turn. (Prototype: honored at mount.) */
-export const useModel = (model: string): void => {
-  useInstance().draft.model = model
-}
-
-/**
- * Contribute a section to the system prompt. Multiple calls compose in order —
- * prompt sections behave like rendered children, not one monolithic string.
- */
-export const useSystemPrompt = (text: string): void => {
-  useInstance().draft.systemParts.push(text)
-}
-
-/** Cap output tokens for this turn. */
-export const useMaxTokens = (n: number): void => {
-  useInstance().draft.maxTokens = n
-}
-
-/** Make a skill available this turn. Conditionally include based on state. */
-export const useSkill = (skill: Skill): void => {
-  useInstance().draft.skills.push(skill)
-}
-
-/** Register a single tool for this turn. */
-export const useTool = (t: ToolBuilder | AnyTool): void => {
-  useInstance().draft.tools.push(t as AnyTool)
-}
-
-/** Register several tools for this turn. */
-export const useTools = (
-  tools: ReadonlyArray<ToolBuilder | AnyTool>,
-): void => {
-  const draft = useInstance().draft
-  for (const t of tools) draft.tools.push(t as AnyTool)
 }
 
 // ----------------------------------------------------------------------------

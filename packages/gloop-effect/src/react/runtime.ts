@@ -1,5 +1,5 @@
 /**
- * gloop-effect/react/runtime — `renderAgent`: mount a component, reconcile it
+ * gloop-effect/react/runtime — `buildAgent`: mount a component, reconcile it
  * into a live `Agent`, re-render once per turn.
  *
  * The loop:
@@ -34,13 +34,17 @@ import {
   type PersistBridge,
   type RenderInstance,
 } from "./internal.js"
+import { flatten, type Rendered } from "./nodes.js"
 
 const DEFAULT_MODEL = "anthropic/claude-sonnet-4.5"
 
-/** A component: a plain function re-run each turn. It declares via hooks. */
-export type AgentComponent = () => void
+/**
+ * A component: a plain function re-run each turn. It uses hooks for state and
+ * effects, and *returns* a node tree describing the agent's config this turn.
+ */
+export type AgentComponent = () => Rendered
 
-export interface RenderAgentOptions {
+export interface BuildAgentOptions {
   /** Backing store for `usePersistentState`. Defaults to in-memory. */
   readonly persist?: PersistBridge
   /** Backing store for `useMemory`. Defaults to in-memory. */
@@ -89,12 +93,12 @@ const inMemoryMemory = (): MemoryBridge => {
 }
 
 // ----------------------------------------------------------------------------
-// renderAgent
+// buildAgent
 // ----------------------------------------------------------------------------
 
-export const renderAgent = (
+export const buildAgent = (
   component: AgentComponent,
-  options: RenderAgentOptions = {},
+  options: BuildAgentOptions = {},
 ): Effect.Effect<AgentApp, never, AIProvider | Scope.Scope> =>
   Effect.gen(function* () {
     let dirty = false
@@ -117,11 +121,14 @@ export const renderAgent = (
       instance.draft = emptyDraft()
       instance.turn = { message, turn }
       setCurrent(instance)
+      let output: Rendered
       try {
-        component()
+        output = component()
       } finally {
         setCurrent(null)
       }
+      // Hooks filled draft.effects; the returned tree fills the config.
+      flatten(output, instance.draft)
       dirty = false
       return instance.draft
     }
@@ -191,7 +198,7 @@ export const renderAgent = (
         }
         if (draft.model !== undefined && draft.model !== model) {
           yield* Effect.logWarning(
-            `useModel: model is fixed at mount in this prototype ` +
+            `model(): model is fixed at mount in this prototype ` +
               `(requested "${draft.model}", running "${model}")`,
           )
         }
