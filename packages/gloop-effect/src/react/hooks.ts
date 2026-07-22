@@ -123,6 +123,86 @@ export const useEffect = (
 }
 
 // ----------------------------------------------------------------------------
+// Async / Suspense — the primitive behind stacked LLMs
+// ----------------------------------------------------------------------------
+
+/**
+ * Run an async computation as part of the render. On first encounter (or when
+ * `deps` change) it starts the promise and registers it with the runtime, which
+ * awaits it and re-renders — so by the settled render the resolved value is
+ * available synchronously. Returns `undefined` while pending.
+ *
+ * This is the agent-world analogue of Suspense: the parent render "blocks" on
+ * child data before committing the turn.
+ */
+export const useAsync = <T>(
+  run: () => Promise<T>,
+  deps: ReadonlyArray<unknown>,
+): T | undefined => {
+  const inst = useInstance()
+  const cell = nextCell(() => ({
+    kind: "async" as const,
+    deps: undefined as ReadonlyArray<unknown> | undefined,
+    status: "pending" as "pending" | "done" | "error",
+    value: undefined as unknown,
+    error: undefined as unknown,
+  }))
+  if (depsChanged(cell.deps, deps)) {
+    cell.deps = deps
+    cell.status = "pending"
+    const p = run().then(
+      (v) => {
+        cell.status = "done"
+        cell.value = v
+      },
+      (e) => {
+        cell.status = "error"
+        cell.error = e
+      },
+    )
+    inst.pending.push(p)
+  }
+  return cell.status === "done" ? (cell.value as T) : undefined
+}
+
+export interface SubAgentSpec {
+  /** Which model runs this nested LLM. */
+  readonly model: string
+  /** Its system prompt — the sub-agent's job description. */
+  readonly system: string
+  /** The input it observes this turn (e.g. the user's message). */
+  readonly input: string
+  readonly maxTokens?: number
+}
+
+/**
+ * Run a nested one-shot LLM and return its text — the building block for
+ * *stacking* LLMs. The parent turn waits for this to settle, so the result can
+ * flow into the parent's rendered config (system section, model choice, tool
+ * gating). Re-runs when `input`/`model`/`system` change.
+ */
+export const useSubAgent = (spec: SubAgentSpec): string | undefined => {
+  const inst = useInstance()
+  return useAsync(
+    () =>
+      inst.llm({
+        model: spec.model,
+        system: spec.system,
+        input: spec.input,
+        maxTokens: spec.maxTokens,
+      }),
+    [spec.model, spec.system, spec.input],
+  )
+}
+
+/**
+ * A "thinker": a sub-agent framed as an inner monologue. Returns its private
+ * guidance, which the caller typically injects into the responder's prompt.
+ */
+export const useThinker = (spec: SubAgentSpec): string | undefined =>
+  useSubAgent(spec)
+
+// ----------------------------------------------------------------------------
 // Resources
 // ----------------------------------------------------------------------------
 

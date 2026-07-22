@@ -79,13 +79,26 @@ export interface MemoCell {
   value: unknown
 }
 
+export interface AsyncCell {
+  readonly kind: "async"
+  deps: ReadonlyArray<unknown> | undefined
+  status: "pending" | "done" | "error"
+  value: unknown
+  error: unknown
+}
+
 export interface EffectCell {
   readonly kind: "effect"
   deps: ReadonlyArray<unknown> | undefined
   cleanup: EffectCleanup | undefined
 }
 
-export type HookCell = StateCell | PersistCell | MemoCell | EffectCell
+export type HookCell =
+  | StateCell
+  | PersistCell
+  | MemoCell
+  | EffectCell
+  | AsyncCell
 
 // ----------------------------------------------------------------------------
 // Bridges — the host capabilities the runtime injects
@@ -107,6 +120,18 @@ export interface MemoryBridge {
   readonly forget: (content: string) => void
 }
 
+/** A one-shot LLM call — the primitive behind stacked/sub-agent hooks. */
+export interface LLMRequest {
+  readonly model: string
+  readonly system?: string
+  readonly input: string
+  readonly maxTokens?: number
+}
+
+export interface LLMBridge {
+  (req: LLMRequest): Promise<string>
+}
+
 // ----------------------------------------------------------------------------
 // The render instance
 // ----------------------------------------------------------------------------
@@ -120,6 +145,13 @@ export interface RenderInstance {
   scheduleRerender: () => void
   persist: PersistBridge
   memory: MemoryBridge
+  /** Run a nested one-shot LLM (stacked agents). Wired by the runtime. */
+  llm: LLMBridge
+  /**
+   * Promises a render pass is waiting on (Suspense). The runtime awaits these
+   * and re-renders until the list drains before committing the turn.
+   */
+  pending: Array<Promise<unknown>>
 }
 
 let current: RenderInstance | null = null

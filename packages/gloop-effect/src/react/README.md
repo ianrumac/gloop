@@ -103,6 +103,44 @@ level):
 - `useMemory()` — the long-term notes bridge (`notes()`, `remember`, `forget`)
 - `useTurn()` — `{ message, turn }`
 
+## Stacking LLMs (nested agents / Suspense)
+
+One agent = one LLM. *Stacking* = one component's config computed by another LLM.
+A "thinker" observes each message and steers the responder — two models, one
+thread:
+
+```ts
+function ChatAgent() {
+  const turn = useTurn()
+
+  // A nested one-shot LLM. The parent turn SUSPENDS until it resolves.
+  const guidance = useThinker({
+    model: "cheap-thinker",
+    system: "You are the assistant's inner monologue. In one line, say what to " +
+            "focus on and the tone. Never address the user.",
+    input: turn.message,
+  })
+
+  return group(
+    model("strong-responder"),
+    system("You are a helpful assistant."),
+    guidance && system(`Private guidance from your inner voice:\n${guidance}`),
+  )
+}
+```
+
+Per turn the runtime renders, sees the thinker's pending promise, **awaits it and
+re-renders**, then runs the responder conditioned on the guidance. The thinker
+never talks to the user — it only shapes the responder's *config*, so it can
+direct more than the prompt: pick the model (`useModel` on difficulty), gate
+tools, set `maxTokens`. A cheap LLM rendering the config for an expensive one.
+
+- `useAsync(fn, deps)` — the Suspense primitive: run a promise as part of render
+- `useSubAgent({ model, system, input })` — a nested one-shot LLM, returns its text
+- `useThinker(...)` — `useSubAgent` framed as an inner monologue
+
+Runnable: `bun run examples/react-thinker.ts` (scripted stub, no API key).
+
 ## The Tool monad
 
 A tool is a Kleisli arrow `args → Effect<output>`. `tool(name)` builds one

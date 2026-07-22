@@ -11,8 +11,8 @@
  */
 
 import { describe, expect, it } from "bun:test"
-import { Effect, Fiber, Stream } from "effect"
-import type { AgentEvent } from "../src/index.js"
+import { Effect, Fiber, Layer, Stream } from "effect"
+import { AIProvider, type AgentEvent, type AIProviderImpl } from "../src/index.js"
 import {
   buildAgent,
   group,
@@ -21,6 +21,8 @@ import {
   tool,
   useEffect,
   usePersistentState,
+  useThinker,
+  useTurn,
   type PersistBridge,
   type SetState,
 } from "../src/react/index.js"
@@ -151,6 +153,51 @@ describe("react — buildAgent (return-a-tree)", () => {
     expect(done?._tag === "ToolDone" && done.name).toBe("Ping")
     expect(done?._tag === "ToolDone" && done.ok).toBe(true)
     expect(captured).toBe("PONG")
+  })
+
+  it("stacks a thinker LLM into the responder's prompt (Suspense)", async () => {
+    // complete() serves the thinker; stream() serves the responder.
+    const provider: AIProviderImpl = {
+      name: "stub",
+      complete: (req) =>
+        Effect.succeed({
+          id: "t",
+          model: req.model,
+          content: "FOCUS::BILLING",
+          finishReason: "stop",
+        }),
+      stream: (req) => ({
+        chunks: Stream.empty,
+        result: Effect.succeed({ id: "r", model: req.model, content: "", finishReason: "stop" }),
+        cancel: Effect.void,
+      }),
+    }
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const App = () => {
+            const turn = useTurn()
+            const guidance = useThinker({
+              model: "thinker",
+              system: "inner voice",
+              input: turn.message || "start",
+            })
+            return group(
+              model("responder"),
+              system("You are helpful."),
+              guidance ? system(`guidance: ${guidance}`) : false,
+            )
+          }
+
+          // Mount suspends on the thinker; by the time buildAgent returns, the
+          // guidance is already merged into the system prompt.
+          const app = yield* buildAgent(App)
+          const sys = yield* app.agent.conversation.getSystem
+          expect(sys).toContain("FOCUS::BILLING")
+        }),
+      ).pipe(Effect.provide(Layer.succeed(AIProvider, provider))),
+    )
   })
 
   it("runs useEffect on mount and re-runs on dep change with cleanup", async () => {

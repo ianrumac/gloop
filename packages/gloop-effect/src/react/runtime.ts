@@ -15,7 +15,7 @@
  * hook state.
  */
 
-import { Effect, Scope } from "effect"
+import { Effect, Runtime, Scope } from "effect"
 import {
   createInvokeSkillTool,
   mergeSkillsIntoSystem,
@@ -103,6 +103,29 @@ export const buildAgent = (
   Effect.gen(function* () {
     let dirty = false
 
+    // Capture provider + runtime so hooks can run nested one-shot LLMs
+    // (stacked agents) as plain Promises during a render.
+    const provider = yield* AIProvider
+    const rt = yield* Effect.runtime<AIProvider>()
+    const llm = (req: {
+      model: string
+      system?: string
+      input: string
+      maxTokens?: number
+    }): Promise<string> =>
+      Runtime.runPromise(rt)(
+        provider
+          .complete({
+            model: req.model,
+            messages: [
+              ...(req.system ? [{ role: "system" as const, content: req.system }] : []),
+              { role: "user" as const, content: req.input },
+            ],
+            maxTokens: req.maxTokens ?? 1024,
+          })
+          .pipe(Effect.map((r) => r.content ?? "")),
+      )
+
     const instance: RenderInstance = {
       cells: [],
       cursor: 0,
@@ -113,12 +136,15 @@ export const buildAgent = (
       },
       persist: options.persist ?? inMemoryPersist(),
       memory: options.memory ?? inMemoryMemory(),
+      llm,
+      pending: [],
     }
 
     // --- A single synchronous render pass -------------------------------
     const render = (message: string, turn: number): Draft => {
       instance.cursor = 0
       instance.draft = emptyDraft()
+      instance.pending = []
       instance.turn = { message, turn }
       setCurrent(instance)
       let output: Rendered
@@ -132,6 +158,23 @@ export const buildAgent = (
       dirty = false
       return instance.draft
     }
+
+    // Render, then await any Suspense promises (nested LLMs) and re-render
+    // until the tree settles — so stacked sub-agents resolve before commit.
+    const renderSettled = (
+      message: string,
+      turn: number,
+    ): Effect.Effect<Draft> =>
+      Effect.gen(function* () {
+        let draft = render(message, turn)
+        let guard = 0
+        while (instance.pending.length > 0 && guard++ < 16) {
+          const ps = instance.pending
+          yield* Effect.promise(() => Promise.all(ps))
+          draft = render(message, turn)
+        }
+        return draft
+      })
 
     // --- Turn the draft into the tool list the model actually sees ------
     const resolveTools = (draft: Draft): ReadonlyArray<AnyTool> => {
@@ -163,7 +206,7 @@ export const buildAgent = (
       })
 
     // --- Mount: render #0, build the agent from it ---------------------
-    const mount = render("", 0)
+    const mount = yield* renderSettled("", 0)
     const model = mount.model ?? DEFAULT_MODEL
 
     const agent = yield* Agent.make({
@@ -210,14 +253,14 @@ export const buildAgent = (
     const send: AgentApp["send"] = (message) =>
       Effect.gen(function* () {
         turnNo += 1
-        const draft = render(message, turnNo)
+        const draft = yield* renderSettled(message, turnNo)
         yield* commit(draft)
         yield* agent.sendSync(message)
       })
 
-    const rerender: AgentApp["rerender"] = Effect.suspend(() => {
-      const draft = render(instance.turn.message, turnNo)
-      return commit(draft)
+    const rerender: AgentApp["rerender"] = Effect.gen(function* () {
+      const draft = yield* renderSettled(instance.turn.message, turnNo)
+      yield* commit(draft)
     })
 
     // `dirty` is read by callers who want to know a rerender is pending;

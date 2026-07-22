@@ -39,8 +39,13 @@ export {
   useSandbox,
   useMemory,
   useTurn,
+  // async / stacked LLMs
+  useAsync,
+  useSubAgent,
+  useThinker,
   type SetState,
   type SandboxSpec,
+  type SubAgentSpec,
 } from "./hooks.js"
 
 // --- The Tool monad (a tool() builder is a valid child on its own) ---------
