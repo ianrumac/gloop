@@ -220,8 +220,12 @@ export const actions: Record<string, Action> = {
         note = `Text "${args.text}" did not appear within ${secs}s.`;
       }
     } else {
-      await page.waitForTimeout(secs * 1000);
-      note = `Waited ${secs}s.`;
+      // Wait for the page to go idle, but never longer than requested; a
+      // fixed sleep wastes the task's time budget on already-settled pages.
+      const started = Date.now();
+      await page.waitForTimeout(Math.min(500, secs * 1000));
+      await page.waitForLoadState("networkidle", { timeout: Math.max(0, secs * 1000 - 500) }).catch(() => null);
+      note = `Page idle after ${((Date.now() - started) / 1000).toFixed(1)}s (asked for up to ${secs}s).`;
     }
     return `${note}\n${await pageHeader(page)}`;
   },
