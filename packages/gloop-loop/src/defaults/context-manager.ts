@@ -4,8 +4,19 @@
  */
 
 import type { AIConversation } from "../ai/builder.js";
+import type { Message } from "../ai/types.js";
 import { AgentLoop } from "../agent.js";
 import type { ToolDefinition } from "../tools/types.js";
+import type { EventLog } from "../log.js";
+
+export interface ManageContextOptions {
+  /** Share the parent's log so the fork's events land in the same graph. */
+  eventLog?: EventLog;
+  /** Agent id for the fork's events.  Default: `"context-manager"`. */
+  id?: string;
+  /** Called with the new history when messages were actually pruned. */
+  onReplaced?: (history: Message[], removed: number) => void;
+}
 
 const CONTEXT_MANAGER_SYSTEM_PROMPT = `You are a context manager. Your job is to review the conversation history, delete messages that are no longer useful, and produce a condensed summary of the deleted content.
 
@@ -29,6 +40,7 @@ export async function manageContextFork(
   convo: AIConversation,
   instructions: string,
   log?: (label: string, content: string) => void,
+  options: ManageContextOptions = {},
 ): Promise<string> {
   const history = convo.getHistory();
   log?.("MANAGE_CONTEXT", `Starting context management, ${history.length} messages: ${instructions}`);
@@ -106,6 +118,8 @@ export async function manageContextFork(
     confirm: async () => true,
     ask: async () => "",
     log,
+    ...(options.eventLog && { eventLog: options.eventLog }),
+    id: options.id ?? "context-manager",
   });
 
   // Drive a single turn and wait for completion.
@@ -151,6 +165,7 @@ export async function manageContextFork(
   }
 
   convo.setHistory(kept);
+  options.onReplaced?.(kept, deleteSet.size);
 
   const result = `Context pruned: removed ${deleteSet.size} messages, injected summary, ${kept.length} remaining`;
   log?.("MANAGE_CONTEXT", result);

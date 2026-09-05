@@ -30,9 +30,13 @@ await agent.stop();
 ```
 
 The loop is modelled as an actor: `sendSync` auto-starts the loop, enqueues the
-message, and resolves when that message's turn finishes. For pipelines,
-interactive UIs, typed per-event subscriptions, and the full API reference, see
-the [gloop-loop README](packages/gloop-loop/README.md).
+message, and resolves when that message's turn finishes. It is also
+event-sourced: everything the agent does lands in `agent.log`, state is a fold
+over that log (`agent.snapshot()`), `AgentLoop.resume({ store })` rebuilds an
+agent from a persisted log, and `agent.attach(hook)` / `bridgeAgents` let you
+hook other agents onto it. For pipelines, interactive UIs, typed per-event
+subscriptions, and the full API reference, see the
+[gloop-loop README](packages/gloop-loop/README.md).
 
 
 ## Gloop
@@ -71,7 +75,10 @@ gloop # Launch gloop using Grok 4.1 fast
 gloop --debug # Launch gloop with debug logs
 gloop [model] # Launch the agent (via bin/launcher.ts)
 gloop --task "task" # launch gloop in task mode
+gloop --resume # continue the most recent session from its event log
 ```
+
+Every session is an append-only event log in `.gloop/sessions/` — inputs, outputs, tool calls, memory ops, confirmations. `--resume` (or a `Reboot`) rebuilds the agent from it; a turn that was cut off is rolled back and re-run.
 
 ## Forms — S-expressions as Data
 

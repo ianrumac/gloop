@@ -36,4 +36,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # gloop self-copy (generated on first run)
 .gloop/src/
+# gloop session event logs + reboot pointer (generated per run)
+.gloop/sessions/
+.gloop/reboot_session.json
 pack-out/

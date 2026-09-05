@@ -42,7 +42,7 @@
     },
     "packages/gloop-loop": {
       "name": "@hypen-space/gloop-loop",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "dependencies": {
         "@openrouter/sdk": "^0.9.11",
         "diff": "^8.0.3",

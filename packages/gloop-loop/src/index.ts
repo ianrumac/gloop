@@ -46,6 +46,7 @@ export type {
   Continuation,
   World,
   Effects,
+  CoreEvent,
   LoopConfig,
 } from "./core/core.js";
 
@@ -90,6 +91,7 @@ export {
 } from "./defaults/memory.js";
 export type { FileMemory, FileMemoryOptions } from "./defaults/memory.js";
 export { manageContextFork } from "./defaults/context-manager.js";
+export type { ManageContextOptions } from "./defaults/context-manager.js";
 
 // --- Skills (SKILL.md discovery is host-specific; helpers are portable) ---
 export type { Skill, ParsedSkillMarkdown, SkillSlashMatch } from "./skills.js";
@@ -137,30 +139,75 @@ export type {
 } from "./interceptors.js";
 export { chain, chainBoundary } from "./interceptors.js";
 
-// --- AgentLoop: high-level actor-style entry point ---
-export { AgentLoop } from "./agent.js";
+// --- Events: the payload union, envelope, and helpers ---
 export type {
-  AgentLoopOptions,
   AgentMessage,
   AgentMessageRole,
   AgentEvent,
+  AgentEventType,
   AgentEventListener,
+  EventEnvelope,
+  EventRef,
+  ErrorInfo,
+  LogEvent,
+  TurnStatus,
   // Per-variant named aliases for consumer-side type annotations.
+  MessageQueuedEvent,
   TurnStartEvent,
   TurnEndEvent,
   BusyEvent,
   IdleEvent,
   QueueChangedEvent,
+  UserMessageEvent,
+  AssistantMessageEvent,
+  ToolMessageEvent,
+  HistoryReplacedEvent,
+  HistoryClearedEvent,
+  SystemSetEvent,
+  SystemRefreshedEvent,
+  ToolsChangedEvent,
+  LlmRequestEvent,
   StreamChunkEvent,
   StreamDoneEvent,
+  LlmResponseEvent,
+  LlmErrorEvent,
   ToolStartEvent,
   ToolDoneEvent,
+  RetryEvent,
   MemoryEvent,
-  SystemRefreshedEvent,
+  ConfirmRequestEvent,
+  ConfirmResponseEvent,
+  AskRequestEvent,
+  AskResponseEvent,
+  SpawnStartEvent,
+  SpawnDoneEvent,
   TaskCompleteEvent,
   InterruptedEvent,
   ErrorEvent,
   FatalEvent,
-  ConfirmRequestEvent,
-  AskRequestEvent,
-} from "./agent.js";
+  HookErrorEvent,
+  RestoredEvent,
+} from "./events.js";
+export { isEphemeralEvent, serializeEvent, toErrorInfo } from "./events.js";
+
+// --- Event log: append-only, subscribable, persistable ---
+export type { EventStore, EventLogOptions, AppendOptions, LogSubscriber } from "./log.js";
+export { EventLog, MemoryEventStore } from "./log.js";
+export type { JsonlEventStore, JsonlEventStoreOptions } from "./defaults/jsonl-store.js";
+export { createJsonlEventStore } from "./defaults/jsonl-store.js";
+
+// --- State: rebuild everything from the log ---
+export type { AgentState, TurnRecord } from "./state.js";
+export { initialState, reduce, projectState, messagesToRequeue } from "./state.js";
+
+// --- Retry ---
+export type { RetryPolicy, RetryConfig, RetryAttemptInfo, WithRetryOptions } from "./retry.js";
+export { withRetry, backoffDelay, defaultRetryIf } from "./retry.js";
+
+// --- Hooks: attach behaviour / other agents to the log ---
+export type { AgentHook, HookTarget, BridgeOptions } from "./hooks.js";
+export { bridgeAgents } from "./hooks.js";
+
+// --- AgentLoop: high-level actor-style entry point ---
+export { AgentLoop } from "./agent.js";
+export type { AgentLoopOptions, HydrateOptions } from "./agent.js";

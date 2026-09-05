@@ -1,6 +1,6 @@
 # @hypen-space/gloop-loop
 
-A recursive, actor-style agent loop for LLMs. Typed events, chainable builder, batteries-included for Node/Bun, portable to the browser.
+A recursive, actor-style, **event-sourced** agent loop for LLMs. Every input, output, tool call and memory write is an event in an append-only log; the agent's state is a fold over that log, so it can be persisted, replayed, resumed after a crash, inspected as a causal graph, and hooked by other agents. Typed events, chainable builder, batteries-included for Node/Bun, portable to the browser.
 
 ## Install
 
@@ -140,7 +140,7 @@ const logTool  = (e: ToolDoneEvent)    => log({ tool: e.name, ok: e.ok });
 agent.on("stream_chunk", logChunk).on("tool_done", logTool);
 ```
 
-16 per-variant aliases exported: `TurnStartEvent`, `TurnEndEvent`, `BusyEvent`, `IdleEvent`, `QueueChangedEvent`, `StreamChunkEvent`, `StreamDoneEvent`, `ToolStartEvent`, `ToolDoneEvent`, `MemoryEvent`, `SystemRefreshedEvent`, `TaskCompleteEvent`, `InterruptedEvent`, `ErrorEvent`, `FatalEvent`, `ConfirmRequestEvent`, `AskRequestEvent`.
+A per-variant alias is exported for every event (`TurnStartEvent`, `ToolDoneEvent`, `LlmResponseEvent`, `RestoredEvent`, …), plus `LogEvent<"tool_done">` when you want the envelope included.
 
 One-shot promise helper for "wait for next X":
 
@@ -217,6 +217,118 @@ If you don't opt in, the `memory` event still fires so your UI can react — but
 remember: async (content) => db.insert("memories", { content }),
 forget:   async (content) => db.delete("memories", { content }),
 ```
+
+### Event sourcing — the log is the state
+
+Everything the actor does goes through `agent.log`, an append-only `EventLog`. Each event is the payload you already know (`tool_done`, `stream_chunk`, …) plus an envelope:
+
+```ts
+{
+  type: "tool_done", id: "tool_3", name: "Bash", ok: true, output: "ok",
+  seq: 41,               // position in the log
+  eventId: "k3f9a1-41",  // unique: `${run}-${seq}`
+  ts: 1757062800123,
+  run: "k3f9a1",         // this process / EventLog instance
+  agent: "agent",        // which agent (logs can be shared)
+  turn: "msg_2",         // the message whose turn produced it, or null
+  parent: "k3f9a1-38",   // causal edge → the log is a graph
+}
+```
+
+Besides the UI events, the log records every state change: `message_queued`, `user_message`, `assistant_message`, `tool_message`, `history_replaced`, `history_cleared`, `system_set`, `tools_changed`, `memory`, `llm_request` / `llm_response` / `llm_error`, `confirm_response` / `ask_response`, `spawn_start` / `spawn_done`, `retry`, `hook_error`, `restored`, and `turn_end` now carries a `status`.
+
+**Rebuild state from the log:**
+
+```ts
+const state = agent.snapshot();     // projectState(agent.log.events(), agent.id)
+state.history                        // === agent.convo.getHistory()
+state.system, state.memory, state.tools
+state.turns                          // [{ id, message, status, llmCalls, toolCalls, summary }]
+state.inbox, state.currentTurn       // work queued / in flight
+state.committedHistory               // history as of the last turn boundary
+```
+
+`projectState` is a pure reducer (`reduce(state, event)`), exported so you can fold any slice of events yourself.
+
+**Persist and resume:**
+
+```ts
+import { AgentLoop, createJsonlEventStore, isEphemeralEvent } from "@hypen-space/gloop-loop";
+
+const store = createJsonlEventStore(".gloop/session.jsonl", {
+  filter: (e) => !isEphemeralEvent(e),   // skip stream_chunk / busy / idle / queue_changed
+});
+
+const agent = await AgentLoop.resume({ provider, model, system, tools, store });
+agent.start();
+```
+
+`resume` loads the store, replays it into the conversation, and keeps appending to it. If the previous process died mid-turn, the half-finished turn's writes are rolled back to the last `turn_end` (a `committedHistory`), the turn is closed as `abandoned`, and its message — plus anything still in the inbox — is re-queued so it simply runs again. Pass `history: "latest"` to keep the partial writes instead, or `requeue: false` to only restore.
+
+A `sendSync` promise settles only after that turn's events have been handed to the store, and `stop()` flushes before returning. Store failures never stop the agent (`onStoreError` on `EventLog` sees them).
+
+Bring your own store — two methods:
+
+```ts
+const store: EventStore = {
+  append: (e) => db.insert("events", e),      // called in order, awaited
+  load:   () => db.select("events").orderBy("seq"),
+};
+```
+
+`MemoryEventStore` is included for tests. Share one log between agents with `eventLog: sharedLog` so a parent and the sub-agents it forks (the context manager runs as `${id}/context`) end up in one graph; `projectState(events, agentId)` picks one agent back out.
+
+**Walk the graph:**
+
+```ts
+agent.log.get(eventId)
+agent.log.ancestors(eventId)   // follow `parent` back to the message that caused it
+agent.log.children(eventId)    // e.g. every stream_chunk of an llm_request
+```
+
+Within a turn each event's `parent` is the previous event (a causal chain); pairs point at each other explicitly (`tool_done → tool_start`, `llm_response → llm_request`, `confirm_response → confirm_request`), `turn_start → message_queued`, and a message sent by `bridgeAgents` carries `cause: { agent, eventId }` pointing into the other agent's log.
+
+### Hooks — attach behaviour (and other agents)
+
+Interceptors sit *in* the call path and can rewrite, short-circuit or retry a boundary. Hooks sit *on the log*: they see every event after it happened, may be async, and can never break the loop — a throw or rejection becomes a `hook_error` event.
+
+```ts
+const detach = agent.attach({
+  name: "audit",
+  types: ["tool_done", "task_complete"],   // default: all
+  scope: "self",                           // "all" = every agent on a shared log
+  handle: async (event, agent) => { await audit.write(event); },
+});
+```
+
+Wire two agents together through the log:
+
+```ts
+import { bridgeAgents } from "@hypen-space/gloop-loop";
+
+// Whenever the coder completes a task, the reviewer gets a message
+// whose `cause` points at the coder's task_complete event.
+bridgeAgents(coder, reviewer, {
+  on: "task_complete",
+  map: (e) => `Review this work: ${e.summary}`,   // return null to skip
+});
+```
+
+`hooks: [...]` in the constructor attaches at build time.
+
+### Retry — safe, opt-in, logged
+
+```ts
+const agent = new AgentLoop({
+  provider, model,
+  retry: {
+    llm:  { attempts: 3, backoffMs: 500, maxBackoffMs: 10_000 },
+    tool: { attempts: 2 },   // only tools that declare `retryable: true`
+  },
+});
+```
+
+Every retry is a `retry` event (`boundary`, `attempt`, `delayMs`, `error`). An LLM call is never retried once it has streamed output (that would duplicate text), and an `AbortError` is never retried. `retryIf(error, attempt)` narrows further. Retry is off unless you pass a policy.
 
 ### Fatal errors and process-level restart (reboot pattern)
 
@@ -303,7 +415,12 @@ agent.addTool({
 | Change system prompt inbox-ordered | `agent.send({ role: "system", content: prompt })` |
 | Pin to one OpenRouter provider | `agent.convo.setProviderRouting({ only: ["anthropic"] })` |
 | Get conversation history | `agent.convo.getHistory()` |
-| Restore conversation history | `agent.convo.setHistory([...])` |
+| Restore conversation history | `agent.setHistory([...])` (logged) |
+| Rebuild state from the log | `agent.snapshot()` |
+| Persist / resume a session | `AgentLoop.resume({ ..., store })` |
+| Wait until the log is durable | `await agent.flush()` |
+| Attach a hook / another agent | `agent.attach(hook)`, `bridgeAgents(a, b, {...})` |
+| Read the raw log | `agent.log.events()` |
 
 ### Built-in tools (when you don't pass `tools`)
 
@@ -361,27 +478,50 @@ A complete browser example lives in `examples/browser.html`.
 | `.clear()` | `this` | ✓ | — |
 | `.respondToConfirm(id, ok)` | `this` | ✓ | — |
 | `.respondToAsk(id, answer)` | `this` | ✓ | — |
+| `.setHistory(messages, reason?)` | `this` | ✓ | — |
+| `.attach(hook)` | `() => void` (detach) | — | — |
+| `.snapshot()` | `AgentState` | — | — |
+| `.hydrate(events?, opts?)` | `AgentState` | — | — |
+| `.flush()` | `Promise<void>` | — | — |
+| `AgentLoop.resume(opts)` | `Promise<AgentLoop>` | — | no |
 | `.isRunning()` | `boolean` | — | — |
 | `.pending()` | `number` | — | — |
 
-Readable state: `agent.convo`, `agent.registry`, `agent.world`.
+Readable state: `agent.id`, `agent.log`, `agent.convo`, `agent.registry`, `agent.world`.
 
 ### AgentEvent
 
-Discriminated union on `.type`:
+Discriminated union on `.type`. Every delivered event also carries the envelope (`seq`, `eventId`, `ts`, `run`, `agent`, `turn`, `parent`) — the `LogEvent` type.
 
 | Type | Payload | When |
 |---|---|---|
+| `message_queued` | `{ message }` | A message entered the inbox |
 | `turn_start` | `{ message }` | About to process a message |
-| `turn_end` | — | Turn finished (normally, errored, or interrupted) |
+| `turn_end` | `{ status }` | Turn finished: `ok` / `error` / `interrupted` / `fatal` |
 | `busy` / `idle` | — | Loop state |
 | `queue_changed` | `{ pending }` | Inbox size changed |
 | `stream_chunk` | `{ text }` | Assistant text chunk |
 | `stream_done` | — | Stream finished (tools may follow) |
 | `tool_start` | `{ id, name, preview }` | Tool invocation started |
 | `tool_done` | `{ id, name, ok, output }` | Tool invocation finished |
+| `user_message` | `{ content }` | A user message was appended to history |
+| `assistant_message` | `{ content, toolCalls?, partial? }` | An assistant message was appended / completed |
+| `tool_message` | `{ toolCallId, content }` | A native tool response was appended |
+| `history_replaced` | `{ history, reason }` | History replaced (context prune, `setHistory`) |
+| `history_cleared` | — | `clear()` |
+| `system_set` | `{ system }` | System prompt changed |
+| `tools_changed` | `{ names }` | Tool set changed |
+| `llm_request` | `{ model, input, historyLength, toolCount }` | About to call the model |
+| `llm_response` | `{ text, toolCalls, finishReason }` | Model responded |
+| `llm_error` | `{ error, attempt }` | Model call failed |
+| `retry` | `{ boundary, name?, attempt, maxAttempts, delayMs, error }` | A boundary will be retried |
 | `memory` | `{ op, content }` | Agent called Remember / Forget |
 | `system_refreshed` | — | System prompt was updated |
+| `confirm_response` | `{ id, ok }` | A confirmation was answered |
+| `ask_response` | `{ id, answer }` | A question was answered |
+| `spawn_start` / `spawn_done` | `{ task }` / `{ ok, exitCode, summary }` | Subagent lifecycle |
+| `hook_error` | `{ hook, eventType, error }` | An attached hook threw |
+| `restored` | `{ fromSeq, turns, requeued, history, system? }` | State rebuilt from the log |
 | `task_complete` | `{ summary }` | `CompleteTask` was called |
 | `interrupted` | — | Current turn aborted |
 | `error` | `{ error: Error }` | Turn failed (non-fatal) |
@@ -408,6 +548,11 @@ Discriminated union on `.type`:
 | `listTools` | registry names | Human-readable tool list |
 | `spawn` | not configured stub | Delegate to a subagent process |
 | `isFatal` | — | Classify an error as fatal (stops the loop) |
+| `id` | `"agent"` | Agent id stamped on every event |
+| `store` | — | `EventStore` to persist the log (see `createJsonlEventStore`) |
+| `eventLog` | fresh `EventLog` | Share a log with other agents |
+| `hooks` | — | `AgentHook[]` attached at construction |
+| `retry` | off | `{ llm?, tool? }` retry policies |
 | `contextPruneInterval` | 50 | Tool-call count between auto-prunes |
 | `classifySpawn` | — | Classify tool calls as spawn tasks |
 | `log` | — | Debug logger |
@@ -417,6 +562,10 @@ Discriminated union on `.type`:
 - **Providers**: `OpenRouterProvider`, `AI`, `AIBuilder`, `AIConversation`
 - **Tools**: `ToolDefinition`, `ToolCall`, `ToolResult`, `ToolRegistry`, `primitiveTools`, `registerBuiltins`
 - **Memory**: `createFileMemory`, `FileMemory`, `FileMemoryOptions`, `appendMemory`, `removeMemory`, `readMemory`
+- **Event sourcing**: `EventLog`, `MemoryEventStore`, `createJsonlEventStore`, `EventStore`, `LogEvent`, `EventEnvelope`, `isEphemeralEvent`, `serializeEvent`, `toErrorInfo`
+- **State**: `projectState`, `reduce`, `initialState`, `messagesToRequeue`, `AgentState`, `TurnRecord`
+- **Hooks**: `AgentHook`, `bridgeAgents`, `HookTarget`
+- **Retry**: `withRetry`, `RetryPolicy`, `RetryConfig`, `backoffDelay`, `defaultRetryIf`
 - **Errors**: `AbortError`
 - **Skills**: `Skill`, `parseSkillMarkdown`, `mergeSkillsIntoSystem`, `formatSkillsListing`, `findSkill`, `applySkillSubstitutions`, `thinkInputFromSkillSubcommand`, `matchSkillSlash`, `skillInvocationToThinkInput`, `createInvokeSkillTool`, `ParsedSkillMarkdown`, `SkillSlashMatch`
 - **Low-level interpreter** (advanced): `run`, `eval_`, `mkWorld`, Form constructors (`Think`, `Invoke`, `Done`, ...), `Effects`, `World`, `LoopConfig` (includes optional `skills` for `parseInput`)

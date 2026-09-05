@@ -2,6 +2,17 @@
 
 All notable changes to `gloop` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.0]
+
+### Added
+- **Sessions are event logs.** Every run appends its events to `.gloop/sessions/<timestamp>.jsonl` (progress-only events filtered out) through `@hypen-space/gloop-loop` 0.3.0's event sourcing. `gloop --resume [path]` rebuilds the agent from a log (default: the newest session); a turn that was cut off mid-way is rolled back to the last turn boundary and re-run.
+- `--resume` documented in `gloop --help`.
+
+### Changed
+- Reboot (`Reboot` tool → exit 75 → relaunch) no longer snapshots the conversation into `reboot_session.json`; it flushes the session log and writes a pointer `{ reason, log }` to it. The relaunched process resumes from the same log, so nothing that happened before the reboot is lost — including tool calls, confirmations and memory ops. Pre-0.3.0 pointer files are ignored.
+- `wireRebootHandler(agent, logPath, onRestart)` and `saveRebootSession(logPath, reason, flush?)` take the log path instead of a conversation.
+- `.gloop/sessions/` and `.gloop/reboot_session.json` are git-ignored.
+
 ## [0.2.0]
 
 ### Changed

@@ -2,6 +2,27 @@
 
 All notable changes to `@hypen-space/gloop-loop` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.3.0]
+
+### Breaking
+- **Event-sourced actor.** Every input, output, tool call, memory write, prompt change and lifecycle transition is appended to an `EventLog` (`agent.log`). Subscribers (`on`, `onEvent`, `nextEvent`, `attach`) now receive `LogEvent`s: the same payloads as before plus an envelope — `seq`, `eventId`, `ts`, `run`, `agent`, `turn`, `parent`. Existing handlers keep working (fields were only added). `turn_end` now carries `status: "ok" | "error" | "interrupted" | "fatal"`.
+- `Effects` gains an optional `record(event)` callback and `toolStart` takes optional `args` / `callId`; the interpreter now owns every history write (via `AIConversation.append` + `request()`) instead of relying on the conversation's streaming wrapper. Hosts that implement `Effects` by hand are unaffected unless they relied on `convo.stream()` pushing history for them.
+- `manageContextFork` takes an optional 4th `options` argument (`eventLog`, `id`, `onReplaced`).
+- `AbortError` / `raceAbort` moved to `core/abort.ts` (still re-exported from the package root and `core/core.ts`).
+
+### Added
+- `EventLog` — append-only, ordered, subscribable log with pluggable `EventStore` persistence, `flush()`, load-time dedupe, and graph helpers (`get`, `ancestors`, `children`). `MemoryEventStore` and `createJsonlEventStore(path, { filter })` (one JSON line per event, corrupt lines skipped) are included; `isEphemeralEvent` identifies the progress-only events a store may drop.
+- New events: `message_queued`, `user_message`, `assistant_message`, `tool_message`, `history_replaced`, `history_cleared`, `system_set`, `tools_changed`, `llm_request`, `llm_response`, `llm_error`, `retry`, `confirm_response`, `ask_response`, `spawn_start`, `spawn_done`, `hook_error`, `restored`. `tool_start` now includes `args` and the provider `callId`.
+- `projectState(events, agent?)` / `reduce` — a pure reducer that rebuilds `history`, `system`, `memory`, `tools`, `inbox`, `turns`, pending confirm/ask requests, and a `committedHistory` at the last turn boundary. `agent.snapshot()` is the convenience form.
+- `AgentLoop.resume({ store, ... })` and `agent.hydrate(events?, { requeue, history })` — rebuild an actor from a log. A turn cut off by a crash is rolled back to the last turn boundary, closed as `abandoned`, and re-queued together with anything still in the inbox. `sendSync` settles only after the turn's events are handed to the store; `stop()` flushes.
+- `agent.attach(hook)` / `hooks` option — observe the log without ever breaking the loop (failures become `hook_error` events); `scope: "all"` sees every agent on a shared log. `bridgeAgents(from, to, { on, map })` routes one agent's events into another's inbox with `cause: { agent, eventId }` recorded for cross-agent causality.
+- `eventLog` option to share one log between agents; the context-manager fork now logs into the parent's log as `${id}/context`.
+- `retry` option (`{ llm?, tool? }`) with `withRetry` / `RetryPolicy` — exponential backoff, `retryIf`, abort-aware, every attempt logged as a `retry` event. An LLM call is never retried after it has streamed output; tools are retried only when they declare `retryable: true`.
+- `agent.setHistory(messages, reason)` (logged), `agent.id`, `agent.log`, `agent.flush()`, `AIConversation.request()` / `append()` / `getSystem()`.
+
+### Fixed
+- `confirm_request` / `ask_request` are now emitted after the resolver is registered, so a handler that answers synchronously from inside the event no longer hangs the turn.
+
 ## [0.2.0]
 
 ### Breaking

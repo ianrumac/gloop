@@ -16,6 +16,8 @@ import { discoverSkills } from "./skills.ts";
 import { enableDebug, debugLog, debugLogRaw } from "./debug.ts";
 import {
   loadRebootSession,
+  newSessionLogPath,
+  openSessionStore,
   rebootIsFatal,
   wireRebootHandler,
 } from "./session.ts";
@@ -95,6 +97,8 @@ let systemPrompt = await buildSystemPrompt({ clone });
 debugLog("SYSTEM", systemPrompt);
 
 const rebootSession = await loadRebootSession();
+const sessionLogPath = rebootSession?.log ?? newSessionLogPath();
+debugLog("SESSION", sessionLogPath);
 
 // ============================================================================
 // BUILD THE ACTOR
@@ -104,11 +108,13 @@ const provider = new OpenRouterProvider({
   apiKey: process.env.OPENROUTER_API_KEY!,
 });
 
-const agent: AgentLoop = new AgentLoop({
+const agent: AgentLoop = await AgentLoop.resume({
   provider,
   model,
   system: systemPrompt,
   skills,
+  id: "gloop",
+  store: openSessionStore(sessionLogPath),
   // Start empty; we register builtins into the actor's registry below so
   // Reload/installTool see the same registry the loop uses.
   tools: [],
@@ -161,9 +167,7 @@ if (providerName) {
   debugLog("PROVIDER", `Routing to: ${providerName}`);
 }
 
-// Restore reboot session if present.
 if (rebootSession) {
-  agent.convo.setHistory(rebootSession.history);
   debugLog("REBOOT", `Restored session: ${rebootSession.reason}`);
 }
 
@@ -240,7 +244,7 @@ agent.onEvent((event: AgentEvent) => {
 });
 
 // Reboot handler: save session + respawn this very process, exit 0.
-wireRebootHandler(agent, async (reason) => {
+wireRebootHandler(agent, sessionLogPath, async (reason) => {
   logEvent({ type: "reboot", reason });
   await agent.stop();
   const argv = process.argv;

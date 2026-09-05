@@ -43,6 +43,10 @@ OPTIONS
   --clone              Self-replicate: copy the agent's own source into
                        .gloop/src/ and run from there.  Enables the Reboot
                        tool and lets the agent modify its own code.
+  --resume [path]      Continue a previous session from its event log
+                       (.gloop/sessions/<timestamp>.jsonl).  Without a
+                       path, resumes the most recent session.  A turn that
+                       was cut off mid-way is rolled back and re-run.
   --debug              Enable debug logs to .gloop/debug.log.
   --help, -h           Show this help and exit.
   --version, -v        Show the installed version and exit.
@@ -65,6 +69,9 @@ EXAMPLES
 
   # Self-modifying mode (enables Reboot tool)
   gloop --clone
+
+  # Pick up where the last session left off
+  gloop --resume
 
   # Debug logging
   gloop --debug
