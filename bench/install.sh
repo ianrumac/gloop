@@ -28,6 +28,20 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# Resolve a branch/tag to its commit SHA so Docker's layer cache cannot serve
+# a stale clone when the branch moves (the clone layer's cache key is the
+# literal GLOOP_REF value). Falls back to the ref as given if lookup fails.
+GLOOP_REPO="${GLOOP_REPO:-https://github.com/ianrumac/gloop.git}"
+if ! [[ "$GLOOP_REF" =~ ^[0-9a-f]{40}$ ]]; then
+  RESOLVED="$(git ls-remote "$GLOOP_REPO" "$GLOOP_REF" "refs/heads/$GLOOP_REF" "refs/tags/$GLOOP_REF" 2>/dev/null | head -1 | cut -f1)"
+  if [ -n "$RESOLVED" ]; then
+    echo "gloop ref $GLOOP_REF -> $RESOLVED"
+    GLOOP_REF="$RESOLVED"
+  else
+    echo "warning: could not resolve '$GLOOP_REF' on $GLOOP_REPO; baking it in verbatim (Docker may reuse a cached clone)" >&2
+  fi
+fi
+
 stamp_ref() {
   # ClawBench builds without --build-arg, so bake the requested ref into the
   # Dockerfile default.

@@ -128,7 +128,9 @@ bench/install.sh --python "$PY" --harnessbench ./HarnessBench
   Tools import the client by its in-container path `/opt/gloop-harness/lib/client.ts`;
   symlink the directory there to typecheck locally (`ln -s "$PWD" /opt/gloop-harness`).
 * To benchmark a local branch, push it and pass `--ref <branch-or-sha>` to `install.sh`
-  (ClawBench builds without `--build-arg`, so the ref is baked into the Dockerfile default).
+  (ClawBench builds without `--build-arg`, so the ref is baked into the Dockerfile default;
+  a branch or tag is resolved to its commit SHA first so Docker's layer cache rebuilds the
+  clone whenever the branch moves).
 * Smoke test without an LLM: run the built image directly with a scripted
   OpenAI-compatible server as `BASE_URL` (see `docker_run` in clawbench's
   `runner/run_support/docker.py` for the env it expects).
