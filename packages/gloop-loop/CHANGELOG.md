@@ -19,6 +19,7 @@ All notable changes to `@hypen-space/gloop-loop` are documented here. Format fol
 - `eventLog` option to share one log between agents; the context-manager fork now logs into the parent's log as `${id}/context`.
 - `retry` option (`{ llm?, tool? }`) with `withRetry` / `RetryPolicy` — exponential backoff, `retryIf`, abort-aware, every attempt logged as a `retry` event. An LLM call is never retried after it has streamed output; tools are retried only when they declare `retryable: true`.
 - `agent.setHistory(messages, reason)` (logged), `agent.id`, `agent.log`, `agent.flush()`, `AIConversation.request()` / `append()` / `getSystem()`.
+- **Cross-agent graph.** `EventLog.ancestors` / `children` follow `message.cause` as well as `parent`, `descendants(eventId)` collects everything an event led to, and `causeOf(event)` exposes the single step. Fan-out from one event to several agents is several `message_queued` children. While a hook handler runs, the event it received is the *ambient cause*: every `send()` made synchronously inside it records `cause` automatically (`withCause` / `currentCause` exported). `projectGraph(events)` turns a shared log into `{ agents, nodes (turns), edges (messages with their causing turn/event), roots }`; `graphToMermaid` renders it.
 
 ### Fixed
 - `confirm_request` / `ask_request` are now emitted after the resolver is registered, so a handler that answers synchronously from inside the event no longer hangs the turn.

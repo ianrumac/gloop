@@ -205,8 +205,12 @@ export type { RetryPolicy, RetryConfig, RetryAttemptInfo, WithRetryOptions } fro
 export { withRetry, backoffDelay, defaultRetryIf } from "./retry.js";
 
 // --- Hooks: attach behaviour / other agents to the log ---
-export type { AgentHook, HookTarget, BridgeOptions } from "./hooks.js";
-export { bridgeAgents } from "./hooks.js";
+export type { AgentHook, HookTarget, BridgeOptions, SendOptions } from "./hooks.js";
+export { bridgeAgents, withCause, currentCause, toEventRef } from "./hooks.js";
+
+// --- Graph: who talked to whom, because of what ---
+export type { AgentGraph, TurnNode, MessageEdge } from "./graph.js";
+export { projectGraph, graphToMermaid } from "./graph.js";
 
 // --- AgentLoop: high-level actor-style entry point ---
 export { AgentLoop } from "./agent.js";

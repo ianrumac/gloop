@@ -188,7 +188,24 @@ export class EventLog {
     return this._events.find((e) => e.eventId === eventId);
   }
 
-  /** Walk the `parent` chain from an event back to its root (inclusive). */
+  /**
+   * The event that caused `event`: its `parent` within the same turn, or —
+   * for a `message_queued` that was sent in reaction to another agent's
+   * event — that event, via `message.cause`.  Undefined at a root.
+   */
+  causeOf(event: LogEvent): LogEvent | undefined {
+    if (event.parent) return this.get(event.parent);
+    if (event.type === "message_queued" && event.message.cause) {
+      return this.get(event.message.cause.eventId);
+    }
+    return undefined;
+  }
+
+  /**
+   * Walk causes from an event back to its root (inclusive).  Follows
+   * `parent` within a turn and `cause` across agents, so from a sub-agent's
+   * tool call you reach the user message that ultimately triggered it.
+   */
   ancestors(eventId: string): LogEvent[] {
     const out: LogEvent[] = [];
     let cur = this.get(eventId);
@@ -196,14 +213,39 @@ export class EventLog {
     while (cur && !seen.has(cur.eventId)) {
       seen.add(cur.eventId);
       out.push(cur);
-      cur = cur.parent ? this.get(cur.parent) : undefined;
+      cur = this.causeOf(cur);
     }
     return out;
   }
 
-  /** Direct children of an event (events whose `parent` is `eventId`). */
+  /**
+   * Direct effects of an event: events whose `parent` is `eventId`, plus
+   * every `message_queued` (in any agent) whose `cause` is `eventId`.  A
+   * fan-out to several agents shows up here as several children.
+   */
   children(eventId: string): LogEvent[] {
-    return this._events.filter((e) => e.parent === eventId);
+    return this._events.filter(
+      (e) =>
+        e.parent === eventId ||
+        (e.type === "message_queued" && e.message.cause?.eventId === eventId),
+    );
+  }
+
+  /** Every event (transitively) caused by `eventId`, in log order. */
+  descendants(eventId: string): LogEvent[] {
+    const out: LogEvent[] = [];
+    const seen = new Set<string>([eventId]);
+    const frontier = [eventId];
+    while (frontier.length) {
+      const id = frontier.shift()!;
+      for (const child of this.children(id)) {
+        if (seen.has(child.eventId)) continue;
+        seen.add(child.eventId);
+        out.push(child);
+        frontier.push(child.eventId);
+      }
+    }
+    return out.sort((a, b) => a.seq - b.seq);
   }
 
   get size(): number {

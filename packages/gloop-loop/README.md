@@ -282,11 +282,24 @@ const store: EventStore = {
 
 ```ts
 agent.log.get(eventId)
-agent.log.ancestors(eventId)   // follow `parent` back to the message that caused it
-agent.log.children(eventId)    // e.g. every stream_chunk of an llm_request
+agent.log.ancestors(eventId)     // causes, back to the user message that started it all
+agent.log.children(eventId)      // direct effects — incl. messages this event sent to other agents
+agent.log.descendants(eventId)   // everything that (transitively) followed from it
 ```
 
-Within a turn each event's `parent` is the previous event (a causal chain); pairs point at each other explicitly (`tool_done → tool_start`, `llm_response → llm_request`, `confirm_response → confirm_request`), `turn_start → message_queued`, and a message sent by `bridgeAgents` carries `cause: { agent, eventId }` pointing into the other agent's log.
+Within a turn each event's `parent` is the previous event (a causal chain); pairs point at each other explicitly (`tool_done → tool_start`, `llm_response → llm_request`, `confirm_response → confirm_request`), and `turn_start → message_queued`. Across agents, a message carries `cause: { agent, eventId }`: `ancestors` and `children` follow it, so the graph is not one chain per agent but one graph per log. Fan-out — one event sending messages to two agents — is simply two `message_queued` children of that event.
+
+**Who talked to whom:**
+
+```ts
+import { projectGraph, graphToMermaid } from "@hypen-space/gloop-loop";
+
+const g = projectGraph(sharedLog.events());
+g.nodes   // turns: { agent, turn, status, message, summary }
+g.edges   // { from: "coder:msg_1", to: "reviewer:msg_1", causeType: "task_complete" }
+g.roots   // turns nobody caused (user input)
+console.log(graphToMermaid(g));
+```
 
 ### Hooks — attach behaviour (and other agents)
 
@@ -315,6 +328,20 @@ bridgeAgents(coder, reviewer, {
 ```
 
 `hooks: [...]` in the constructor attaches at build time.
+
+To link a message to the event it reacts to, pass the event as its cause — that single edge is what the whole cross-agent graph is built from:
+
+```ts
+coder.attach({
+  types: ["task_complete"],
+  handle: async (e) => {
+    reviewer.send(`Review: ${e.summary}`,  { cause: e });   // fan-out: two edges
+    docs.send(`Document: ${e.summary}`,    { cause: e });   // out of one event
+  },
+});
+```
+
+As a convenience, while a hook handler runs the event it received is the *ambient cause*: a `send()` made synchronously inside the handler without an explicit `cause` is linked automatically. An `await` ends that window, so prefer the explicit form in async handlers.
 
 ### Retry — safe, opt-in, logged
 
@@ -564,7 +591,8 @@ Discriminated union on `.type`. Every delivered event also carries the envelope 
 - **Memory**: `createFileMemory`, `FileMemory`, `FileMemoryOptions`, `appendMemory`, `removeMemory`, `readMemory`
 - **Event sourcing**: `EventLog`, `MemoryEventStore`, `createJsonlEventStore`, `EventStore`, `LogEvent`, `EventEnvelope`, `isEphemeralEvent`, `serializeEvent`, `toErrorInfo`
 - **State**: `projectState`, `reduce`, `initialState`, `messagesToRequeue`, `AgentState`, `TurnRecord`
-- **Hooks**: `AgentHook`, `bridgeAgents`, `HookTarget`
+- **Hooks**: `AgentHook`, `bridgeAgents`, `withCause`, `currentCause`, `HookTarget`
+- **Graph**: `projectGraph`, `graphToMermaid`, `AgentGraph`, `TurnNode`, `MessageEdge`
 - **Retry**: `withRetry`, `RetryPolicy`, `RetryConfig`, `backoffDelay`, `defaultRetryIf`
 - **Errors**: `AbortError`
 - **Skills**: `Skill`, `parseSkillMarkdown`, `mergeSkillsIntoSystem`, `formatSkillsListing`, `findSkill`, `applySkillSubstitutions`, `thinkInputFromSkillSubcommand`, `matchSkillSlash`, `skillInvocationToThinkInput`, `createInvokeSkillTool`, `ParsedSkillMarkdown`, `SkillSlashMatch`

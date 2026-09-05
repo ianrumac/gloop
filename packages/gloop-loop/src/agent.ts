@@ -70,7 +70,14 @@ import {
 import { EventLog, type EventStore } from "./log.js";
 import { projectState, messagesToRequeue, type AgentState } from "./state.js";
 import type { RetryConfig } from "./retry.js";
-import type { AgentHook, HookTarget } from "./hooks.js";
+import {
+  currentCause,
+  withCause,
+  toEventRef,
+  type AgentHook,
+  type HookTarget,
+  type SendOptions,
+} from "./hooks.js";
 
 // Re-exported so existing `import { AgentEvent } from "./agent.js"` keeps working.
 export type {
@@ -152,7 +159,7 @@ export interface AgentLoopOptions {
    */
   store?: EventStore;
   /** Hooks attached at construction — same as calling `attach` for each. */
-  hooks?: ReadonlyArray<AgentHook>;
+  hooks?: ReadonlyArray<AgentHook<AgentEventType>>;
   /**
    * Retry policies for the LLM and tool boundaries.  Off by default.
    *
@@ -467,7 +474,7 @@ export class AgentLoop implements HookTarget {
    * other agents; a throw or rejection becomes a `hook_error` event instead
    * of breaking the loop.  Returns a detach function.
    */
-  attach(hook: AgentHook): () => void {
+  attach<T extends AgentEventType>(hook: AgentHook<T>): () => void {
     const name = hook.name ?? "anonymous";
     const types = hook.types ? new Set<string>(hook.types) : null;
     const all = hook.scope === "all";
@@ -479,7 +486,9 @@ export class AgentLoop implements HookTarget {
         this.emit({ type: "hook_error", hook: name, eventType: event.type, error: toErrorInfo(err) });
       };
       try {
-        const r = hook.handle(event, this);
+        // Any send() made synchronously inside the handler — to this agent or
+        // another — is recorded as caused by `event`.
+        const r = withCause({ agent: event.agent, eventId: event.eventId }, () => hook.handle(event as LogEvent<T>, this));
         if (r && typeof (r as Promise<void>).then === "function") {
           (r as Promise<void>).catch(fail);
         }
@@ -563,8 +572,8 @@ export class AgentLoop implements HookTarget {
    * - An `id` is generated for the message if one was not provided.
    * - **Does NOT auto-start the actor.**  Call `.start()` (or use `sendSync`).
    */
-  send(message: AgentMessage | string): this {
-    this.enqueue(message);
+  send(message: AgentMessage | string, options?: SendOptions): this {
+    this.enqueue(message, options);
     return this;
   }
 
@@ -573,9 +582,9 @@ export class AgentLoop implements HookTarget {
    * *that specific message*'s turn ends (and its events are flushed to the
    * store).  Rejects with the turn's error, or `AbortError` on interrupt.
    */
-  async sendSync(message: AgentMessage | string): Promise<void> {
+  async sendSync(message: AgentMessage | string, options?: SendOptions): Promise<void> {
     if (!this.running) this.start();
-    const id = this.enqueue(message);
+    const id = this.enqueue(message, options);
     let ours = false;
     let caught: Error | undefined;
     return new Promise<void>((resolve, reject) => {
@@ -774,13 +783,17 @@ export class AgentLoop implements HookTarget {
   // --------------------------------------------------------------------------
 
   /** Core enqueue step shared by `send` and `sendSync`.  Returns the id. */
-  private enqueue(message: AgentMessage | string): string {
+  private enqueue(message: AgentMessage | string, options?: SendOptions): string {
     const id = typeof message === "object" && message.id
       ? message.id
       : `msg_${++this.messageIdCounter}`;
     const msg: AgentMessage = typeof message === "string"
       ? { id, role: "user", content: message }
       : { ...message, id };
+    // Causal link, most explicit first: `options.cause`, then `message.cause`,
+    // then the event a hook is currently handling (ambient), else none.
+    const cause = toEventRef(options?.cause) ?? msg.cause ?? currentCause();
+    if (cause) msg.cause = cause;
     this.inbox.push(msg);
     const queued = this.emit({ type: "message_queued", message: msg });
     this.queuedEventIds.set(id, queued.eventId);

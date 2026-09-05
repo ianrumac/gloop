@@ -17,27 +17,76 @@
  * event, so the cross-agent edge is part of the graph.
  */
 
-import type { AgentEventType, AgentMessage, LogEvent } from "./events.js";
+import type { AgentEventType, AgentMessage, EventRef, LogEvent } from "./events.js";
+
+// ============================================================================
+// Ambient cause — "which event am I reacting to right now?"
+// ============================================================================
+//
+// While a hook handler runs, the event it was given is the ambient cause.
+// Any `agent.send(...)` made during that handler (to ANY agent) records it as
+// `message.cause`, so fan-out to several agents from one event is captured
+// without every hook having to thread the reference by hand.  Only the
+// synchronous part of a handler is covered — an `await` inside the handler
+// ends the ambient window; pass `cause` explicitly after that.
+
+let ambientCause: EventRef | undefined;
+
+/** The event currently being handled by a hook, if any. */
+export function currentCause(): EventRef | undefined {
+  return ambientCause;
+}
+
+/** Run `fn` with `ref` as the ambient cause for every `send` it makes. */
+export function withCause<T>(ref: EventRef | undefined, fn: () => T): T {
+  const previous = ambientCause;
+  ambientCause = ref;
+  try {
+    return fn();
+  } finally {
+    ambientCause = previous;
+  }
+}
+
+/** Options for `send`. */
+export interface SendOptions {
+  /**
+   * The event this message is a reaction to.  Accepts a `LogEvent` (its
+   * `agent` / `eventId` are used) or a bare `EventRef`.  Recorded as
+   * `message.cause`, which is what links turns across agents in the graph.
+   */
+  cause?: EventRef | LogEvent;
+}
 
 /** Something that can be hooked — the subset of `AgentLoop` hooks need. */
 export interface HookTarget {
   readonly id: string;
-  attach(hook: AgentHook): () => void;
-  send(message: AgentMessage | string): unknown;
+  attach<T extends AgentEventType>(hook: AgentHook<T>): () => void;
+  send(message: AgentMessage | string, options?: SendOptions): unknown;
 }
 
-export interface AgentHook {
+/** Normalise a `cause` option to an `EventRef`. */
+export function toEventRef(cause: EventRef | LogEvent | undefined): EventRef | undefined {
+  if (!cause) return undefined;
+  return { agent: cause.agent, eventId: cause.eventId };
+}
+
+/**
+ * A hook.  When `types` is given, `handle` receives the narrowed union of
+ * just those variants — `types: ["task_complete"]` gives `e.summary`.
+ */
+export interface AgentHook<T extends AgentEventType = AgentEventType> {
   /** Name used in `hook_error` events.  Default: `"anonymous"`. */
   name?: string;
   /** Only receive these event types.  Default: all. */
-  types?: ReadonlyArray<AgentEventType>;
+  types?: ReadonlyArray<T>;
   /**
    * `"self"` (default): only the attached agent's own events.
    * `"all"`: every event in the (possibly shared) log.
    */
   scope?: "self" | "all";
   /** The handler.  May be async; rejections become `hook_error` events. */
-  handle: (event: LogEvent, agent: HookTarget) => void | Promise<void>;
+  handle: (event: LogEvent<T>, agent: HookTarget) => void | Promise<void>;
 }
 
 export interface BridgeOptions<T extends AgentEventType = AgentEventType> {
@@ -92,8 +141,8 @@ export function bridgeAgents<T extends AgentEventType>(
       const message: AgentMessage = typeof built === "string"
         ? { role: "user", content: built }
         : { ...built };
-      message.cause = { agent: event.agent, eventId: event.eventId };
-      to.send(message);
+      // Explicit, so the edge survives even if the handler was awaited.
+      to.send(message, { cause: event });
     },
   });
 }
