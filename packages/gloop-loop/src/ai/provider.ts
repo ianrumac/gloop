@@ -29,6 +29,9 @@ export class OpenRouterProvider implements AIProvider {
   constructor(config: AIProviderConfig) {
     this.client = new OpenRouter({
       apiKey: config.apiKey,
+      // Optional OpenAI-compatible base URL (e.g. a local LiteLLM proxy).
+      // Defaults to https://openrouter.ai/api/v1 inside the SDK.
+      ...(config.baseUrl && { serverURL: config.baseUrl }),
       ...(config.httpReferer && { httpReferer: config.httpReferer }),
       ...(config.xTitle && { xTitle: config.xTitle }),
     });

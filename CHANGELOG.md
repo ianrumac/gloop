@@ -2,6 +2,12 @@
 
 All notable changes to `gloop` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- `bench/`: a ClawBench / HarnessBench harness for gloop. Twelve `Browser*` tools (Playwright over CDP) let gloop drive the benchmark's Chrome; `bench/install.sh` registers the harness with an installed `clawbench-eval` and can lay the adapter into a HarnessBench checkout. See `bench/README.md`.
+- `OPENROUTER_BASE_URL` env var: routes gloop's OpenRouter client at an OpenAI-compatible proxy (used by the harness for non-OpenRouter models). Picks up `@hypen-space/gloop-loop` 0.2.1.
+
 ## [0.2.0]
 
 ### Changed

@@ -2,6 +2,11 @@
 
 All notable changes to `@hypen-space/gloop-loop` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.2.1]
+
+### Added
+- `OpenRouterProvider` honours `AIProviderConfig.baseUrl` (passed to the SDK as `serverURL`), so a host can point it at any OpenAI-compatible endpoint such as a local LiteLLM proxy. The field existed on the config type but was ignored.
+
 ## [0.2.0]
 
 ### Breaking

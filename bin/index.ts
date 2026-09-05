@@ -88,6 +88,9 @@ const rebootSession = await loadRebootSession();
 
 const provider = new OpenRouterProvider({
   apiKey: process.env.OPENROUTER_API_KEY!,
+  // OPENROUTER_BASE_URL lets a harness point gloop at an OpenAI-compatible
+  // proxy (e.g. LiteLLM) instead of openrouter.ai.
+  ...(process.env.OPENROUTER_BASE_URL && { baseUrl: process.env.OPENROUTER_BASE_URL }),
 });
 
 const debugInt = debugInterceptor();

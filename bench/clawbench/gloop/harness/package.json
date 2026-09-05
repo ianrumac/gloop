@@ -1,0 +1,17 @@
+{
+  "name": "gloop-clawbench-harness",
+  "private": true,
+  "type": "module",
+  "description": "Browser tools that let gloop drive ClawBench's Chrome over CDP.",
+  "dependencies": {
+    "playwright-core": "1.58.2"
+  },
+  "devDependencies": {
+    "@hypen-space/gloop-loop": "^0.2.0",
+    "@types/bun": "latest",
+    "typescript": "^5"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}

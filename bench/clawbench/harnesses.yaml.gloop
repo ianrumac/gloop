@@ -1,0 +1,28 @@
+  - name: gloop
+    image: clawbench-gloop
+    dockerfile: gloop/Dockerfile.gloop
+    setup_script: gloop/setup-gloop.sh
+    run_script: gloop/run-gloop.sh
+    usage_emitter: gloop/usage-emitter.py
+    extra_files:
+      - gloop/install-gloop.sh
+      - gloop/harness/package.json
+      - gloop/harness/memory.md
+      - gloop/harness/lib/browser.ts
+      - gloop/harness/tools/BrowserClick.ts
+      - gloop/harness/tools/BrowserExecuteJs.ts
+      - gloop/harness/tools/BrowserGetText.ts
+      - gloop/harness/tools/BrowserHover.ts
+      - gloop/harness/tools/BrowserNavigate.ts
+      - gloop/harness/tools/BrowserPressKey.ts
+      - gloop/harness/tools/BrowserScroll.ts
+      - gloop/harness/tools/BrowserSelect.ts
+      - gloop/harness/tools/BrowserSnapshot.ts
+      - gloop/harness/tools/BrowserTabs.ts
+      - gloop/harness/tools/BrowserType.ts
+      - gloop/harness/tools/BrowserWait.ts
+    agent_message_sources:
+      - type: file
+        path: /data/agent-messages.jsonl
+      - type: file
+        path: /data/gloop-stdout.txt

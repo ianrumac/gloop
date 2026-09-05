@@ -1,0 +1,36 @@
+# ClawBench / HarnessBench harness image for gloop
+# (https://github.com/ianrumac/gloop) — a self-modifying CLI agent.
+#
+# Layers Bun + a gloop checkout + Playwright-based browser tools on top of
+# clawbench-base. gloop drives the container's Chrome through custom
+# `.gloop/tools/Browser*.ts` tools that attach over CDP.
+#
+# GLOOP_REF is a branch, tag or commit of GLOOP_REPO. ClawBench builds
+# without --build-arg, so `bench/install.sh --ref <ref>` rewrites the
+# default below when you want to benchmark a specific revision.
+FROM oven/bun:1.3.11 AS bun-runtime
+
+FROM clawbench-base
+
+ARG GLOOP_REPO=https://github.com/ianrumac/gloop.git
+ARG GLOOP_REF=main
+
+COPY --from=bun-runtime /usr/local/bin/bun /usr/local/bin/bun
+RUN ln -sf /usr/local/bin/bun /usr/local/bin/bunx
+
+# LiteLLM proxy: only used when models.yaml points at a non-OpenRouter API
+# (gloop speaks the OpenRouter/OpenAI chat-completions dialect natively).
+RUN pip install --no-cache-dir 'litellm[proxy]==1.83.9'
+
+COPY harnesses/gloop/install-gloop.sh /install-gloop.sh
+RUN chmod +x /install-gloop.sh && GLOOP_REPO="$GLOOP_REPO" GLOOP_REF="$GLOOP_REF" /install-gloop.sh
+
+# Browser tools + shared CDP session module. Tools import the lib by this
+# absolute path, so the location is part of the contract.
+COPY harnesses/gloop/harness /opt/gloop-harness
+RUN cd /opt/gloop-harness && bun install --production && rm -rf /root/.bun/install/cache
+
+COPY harnesses/gloop/setup-gloop.sh /setup-gloop.sh
+COPY harnesses/gloop/run-gloop.sh /run-harness.sh
+COPY harnesses/gloop/usage-emitter.py /usage-emitter.py
+RUN chmod +x /setup-gloop.sh /run-harness.sh /usage-emitter.py
