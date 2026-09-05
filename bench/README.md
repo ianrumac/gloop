@@ -145,6 +145,18 @@ OpenAI-compatible model (LiteLLM route) produced the complete recording bundle
 with the interceptor matching the target request. A real leaderboard run
 still needs an OpenRouter (or other) API key in `models/models.yaml`.
 
+## Context control and cost
+
+gloop resends its whole history on every model call, and a page snapshot is
+a few thousand tokens, so the first real run (gemini-3.7-flash, 30 minutes,
+~450 tool calls) cost about $3.75 in input tokens alone. `run-gloop.sh`
+therefore starts gloop headless with `--keep-tool-outputs 8` (all but the
+last 8 tool outputs collapse to a short stub after each tool batch, no LLM
+call) and `--prune-interval 60` (gloop's own LLM context manager runs every
+60 tool calls and replaces stale history with a summary). Override with
+`GLOOP_KEEP_TOOL_OUTPUTS` / `GLOOP_PRUNE_INTERVAL` in the container env
+(edit `run-gloop.sh` or the installed copy); `0` disables either.
+
 ## Known gaps
 
 * Token usage: gloop-loop does not surface token counts from streamed

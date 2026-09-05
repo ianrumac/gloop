@@ -312,6 +312,14 @@ export interface AgentLoopOptions {
   // ---- Loop config ----
   /** Number of tool calls between automatic context prune. 0 disables. Default: 0 */
   contextPruneInterval?: number;
+  /**
+   * Keep the last N tool outputs verbatim and collapse older ones to a short
+   * prefix plus a marker after every tool batch (no LLM call). 0 disables.
+   * Default: 0.
+   */
+  toolOutputRetention?: number;
+  /** Characters kept from each trimmed tool output. Default: 240. */
+  trimmedToolOutputChars?: number;
   /** Classify tool calls as spawn tasks. */
   classifySpawn?: LoopConfig["classifySpawn"];
   /**
@@ -410,6 +418,8 @@ export class AgentLoop {
     // 5. Loop config
     this.loopConfig = {
       contextPruneInterval: opts.contextPruneInterval,
+      toolOutputRetention: opts.toolOutputRetention,
+      trimmedToolOutputChars: opts.trimmedToolOutputChars,
       classifySpawn: opts.classifySpawn,
       maxIterations: opts.maxIterations,
       llmIdleTimeoutMs: opts.llmIdleTimeoutMs,

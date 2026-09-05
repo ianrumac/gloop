@@ -47,6 +47,8 @@ export type {
   World,
   Effects,
   LoopConfig,
+  trimOldToolOutputs,
+  TRIMMED_TOOL_OUTPUT_MARKER,
 } from "./core/core.js";
 
 export {

@@ -92,9 +92,18 @@ echo "Starting gloop headless (model=${GLOOP_MODEL})..."
 : > /data/usage.jsonl
 # --task appends gloop's "call CompleteTask when done" suffix, which is what
 # ends the headless turn. --output is the agent-messages artifact.
+# Context control: gloop resends its whole history on every model call and a
+# page snapshot is a few thousand tokens, so without this a 30-minute run
+# costs several million input tokens. Keep the last N tool outputs verbatim
+# (older ones collapse to a stub) and run gloop's LLM context manager every
+# M tool calls. Override per run with GLOOP_KEEP_TOOL_OUTPUTS / GLOOP_PRUNE_INTERVAL.
+KEEP_TOOL_OUTPUTS="${GLOOP_KEEP_TOOL_OUTPUTS:-8}"
+PRUNE_INTERVAL="${GLOOP_PRUNE_INTERVAL:-60}"
 PATH="$SAFE_BIN" HOME=/root NO_COLOR=1 "$BUN_BIN" "$GLOOP_HOME/src/core/headless.ts" \
   --model "$GLOOP_MODEL" \
   --output /data/agent-messages.jsonl \
+  --keep-tool-outputs "$KEEP_TOOL_OUTPUTS" \
+  --prune-interval "$PRUNE_INTERVAL" \
   --task "$INSTRUCTION" \
   > /data/agent.log 2>&1 &
 AGENT_PID=$!

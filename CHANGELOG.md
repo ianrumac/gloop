@@ -7,6 +7,7 @@ All notable changes to `gloop` are documented here. Format follows [Keep a Chang
 ### Added
 - `bench/`: a ClawBench / HarnessBench harness for gloop. Twelve `Browser*` tools (Playwright over CDP) let gloop drive the benchmark's Chrome; `bench/install.sh` registers the harness with an installed `clawbench-eval` and can lay the adapter into a HarnessBench checkout. See `bench/README.md`.
 - `OPENROUTER_BASE_URL` env var: routes gloop's OpenRouter client at an OpenAI-compatible proxy (used by the harness for non-OpenRouter models). Picks up `@hypen-space/gloop-loop` 0.2.1.
+- Headless mode: `--keep-tool-outputs N` (collapse all but the last N tool outputs after each tool batch) and `--prune-interval N` (run the LLM context manager every N tool calls). Both off by default; the benchmark harness enables them because a 30-minute browser run otherwise resends millions of input tokens. Picks up `@hypen-space/gloop-loop` 0.2.2.
 
 ## [0.2.0]
 

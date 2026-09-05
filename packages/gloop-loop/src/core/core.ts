@@ -9,7 +9,7 @@
  */
 
 import type { AIConversation } from "../ai/builder.js";
-import type { JsonToolCall } from "../ai/types.js";
+import type { JsonToolCall, Message } from "../ai/types.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { ToolCall, ToolResult } from "../tools/types.js";
 import { jsonToolCallsToToolCalls } from "../tools/parser.js";
@@ -260,6 +260,17 @@ export interface LoopConfig {
 
   /** Number of tool calls between automatic context prune. 0 disables. Default: 0 */
   contextPruneInterval?: number;
+
+  /**
+   * Deterministic context trimming: keep the last N tool outputs verbatim and
+   * collapse every older one to its first `trimmedToolOutputChars` characters
+   * plus a marker. Runs after every tool batch, costs no LLM call, and is
+   * idempotent. 0 disables. Default: 0.
+   */
+  toolOutputRetention?: number;
+
+  /** Characters kept from a trimmed tool output. Default: 240. */
+  trimmedToolOutputChars?: number;
 
   /**
    * Maximum LLM calls per `run()` (one user turn).  When set (> 0), a
@@ -845,6 +856,14 @@ async function evalInvoke(
     await fx.refreshSystem();
   }
 
+  // Deterministic trim of stale tool outputs (0 disables)
+  const retention = config?.toolOutputRetention ?? 0;
+  if (retention > 0) {
+    world.convo.setHistory(
+      trimOldToolOutputs(world.convo.getHistory(), retention, config?.trimmedToolOutputChars),
+    );
+  }
+
   // Auto-prune context every N tool calls (0 disables)
   const interval = config?.contextPruneInterval ?? 0;
   world.toolCalls += calls.length;
@@ -858,6 +877,44 @@ async function evalInvoke(
   // Continue with the results
   const nextForm = then(results);
   return eval_(nextForm, world, fx, config);
+}
+
+// ============================================================================
+// TOOL OUTPUT TRIMMING — deterministic, LLM-free context control
+// ============================================================================
+
+export const TRIMMED_TOOL_OUTPUT_MARKER = "…[earlier tool output trimmed";
+
+function isToolOutputMessage(msg: Message): boolean {
+  return msg.role === "tool" || (msg.role === "user" && msg.content.startsWith("<tool_result"));
+}
+
+/**
+ * Return a copy of `history` where every tool output except the most recent
+ * `keepLast` is collapsed to its first `maxChars` characters plus a marker
+ * telling the model the rest was dropped. Already-trimmed messages and short
+ * outputs are left alone, so applying this repeatedly is a no-op.
+ */
+export function trimOldToolOutputs(
+  history: readonly Message[],
+  keepLast: number,
+  maxChars = 240,
+): Message[] {
+  if (keepLast <= 0) return [...history];
+  const toolIdx: number[] = [];
+  history.forEach((m, i) => {
+    if (isToolOutputMessage(m)) toolIdx.push(i);
+  });
+  const protect = new Set(toolIdx.slice(-keepLast));
+  return history.map((msg, i) => {
+    if (!isToolOutputMessage(msg) || protect.has(i)) return msg;
+    if (msg.content.length <= maxChars || msg.content.includes(TRIMMED_TOOL_OUTPUT_MARKER)) return msg;
+    const dropped = msg.content.length - maxChars;
+    return {
+      ...msg,
+      content: `${msg.content.slice(0, maxChars)}\n${TRIMMED_TOOL_OUTPUT_MARKER}: ${dropped} more chars removed; call the tool again if you need it]`,
+    };
+  });
 }
 
 // ============================================================================

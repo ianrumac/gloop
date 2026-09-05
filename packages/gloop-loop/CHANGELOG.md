@@ -2,6 +2,11 @@
 
 All notable changes to `@hypen-space/gloop-loop` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.2.2]
+
+### Added
+- `toolOutputRetention` / `trimmedToolOutputChars` (`AgentLoopOptions` and `LoopConfig`): deterministic, LLM-free context control. After every tool batch, all but the last N tool outputs are collapsed to their first few hundred characters plus a marker telling the model the rest was dropped. Idempotent; tool-call ids and roles are preserved so native tool-call history stays valid. Off by default. Exported helper: `trimOldToolOutputs`.
+
 ## [0.2.1]
 
 ### Added

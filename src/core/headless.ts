@@ -35,7 +35,7 @@ import { DEFAULT_GLOOP_MODEL } from "./default-model.ts";
 
 function usage(): never {
   console.error(
-    'Usage: bun headless.ts --model <provider/model> [--provider <name>] [--output <path>] [--debug] [--task "<task>"] "<instruction>"',
+    'Usage: bun headless.ts --model <provider/model> [--provider <name>] [--output <path>] [--debug] [--prune-interval N] [--keep-tool-outputs N] [--task "<task>"] "<instruction>"',
   );
   process.exit(1);
 }
@@ -48,6 +48,21 @@ let debug = false;
 let providerName: string | undefined;
 let clone = false;
 let instruction = "";
+// Context control for long unattended runs (both off by default, like the
+// interactive CLI): --prune-interval N runs gloop's LLM context manager every
+// N tool calls; --keep-tool-outputs N keeps only the last N tool outputs
+// verbatim and collapses older ones after every tool batch (no LLM call).
+let pruneInterval = 0;
+let keepToolOutputs = 0;
+
+function intFlag(name: string, raw: string | undefined): number {
+  const n = Number.parseInt(raw ?? "", 10);
+  if (!Number.isFinite(n) || n < 0) {
+    console.error(`${name} expects a non-negative integer, got ${JSON.stringify(raw)}`);
+    process.exit(1);
+  }
+  return n;
+}
 
 for (let i = 0; i < args.length; i++) {
   const arg = args[i]!;
@@ -57,6 +72,10 @@ for (let i = 0; i < args.length; i++) {
     outputPath = args[++i]!;
   } else if (arg === "--provider" && i + 1 < args.length) {
     providerName = args[++i]!;
+  } else if (arg === "--prune-interval" && i + 1 < args.length) {
+    pruneInterval = intFlag("--prune-interval", args[++i]);
+  } else if (arg === "--keep-tool-outputs" && i + 1 < args.length) {
+    keepToolOutputs = intFlag("--keep-tool-outputs", args[++i]);
   } else if (arg === "--clone") {
     clone = true;
   } else if (arg === "--debug") {
@@ -119,6 +138,10 @@ const agent: AgentLoop = new AgentLoop({
   // A RebootError stops the loop and fires a `fatal` event — see
   // wireRebootHandler below.
   isFatal: rebootIsFatal,
+
+  // Context control (see the CLI flags above).
+  contextPruneInterval: pruneInterval,
+  toolOutputRetention: keepToolOutputs,
 
   // Spawn classifier: detect `gloop --task "..."` in Bash calls.
   classifySpawn: (call) => {
@@ -260,7 +283,7 @@ wireRebootHandler(agent, async (reason) => {
 // ============================================================================
 
 debugLog("USER", instruction);
-console.log(`gloop headless | model=${model}`);
+console.log(`gloop headless | model=${model} | prune-interval=${pruneInterval} keep-tool-outputs=${keepToolOutputs}`);
 console.log(`instruction: ${instruction}\n`);
 logEvent({ type: "start", model, instruction });
 
