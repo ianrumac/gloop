@@ -32,7 +32,7 @@ import { parseGloopTaskBashCommand, parseTaskCliArgs, runTaskSubagent } from "..
 import { ensureSelfCopy } from "./self-copy.ts";
 import App from "../components/App.tsx";
 import { installTool } from "./install-tool.ts";
-import { DEFAULT_GLOOP_MODEL } from "../src/core/default-model.ts";
+import { parseGloopArgs } from "../src/core/cli-args.ts";
 
 // Special exit code that signals "please restart me"
 const REBOOT_EXIT_CODE = 75;
@@ -62,22 +62,7 @@ if (taskRequest) {
   process.exit(result.exitCode === 0 ? 1 : result.exitCode);
 }
 
-const debug = args.includes("--debug");
-const providerIdx = args.indexOf("--provider");
-const providerName = providerIdx !== -1 ? args[providerIdx + 1] : undefined;
-// --resume [path]: continue a previous session log (default: the newest one).
-const resumeIdx = args.indexOf("--resume");
-const resumeValue =
-  resumeIdx !== -1 && args[resumeIdx + 1] && !args[resumeIdx + 1]!.startsWith("--")
-    ? args[resumeIdx + 1]
-    : undefined;
-const model =
-  args.find(
-    (a, i) =>
-      !a.startsWith("--") &&
-      (providerIdx === -1 || i !== providerIdx + 1) &&
-      (resumeValue === undefined || i !== resumeIdx + 1)
-  ) ?? DEFAULT_GLOOP_MODEL;
+const { debug, providerName, resume, model } = parseGloopArgs(args);
 
 if (debug) enableDebug();
 
@@ -97,8 +82,8 @@ const rebootSession = await loadRebootSession();
 let sessionLogPath: string;
 if (rebootSession) {
   sessionLogPath = rebootSession.log;
-} else if (resumeIdx !== -1) {
-  const target = resumeValue ?? latestSessionLogPath();
+} else if (resume.requested) {
+  const target = resume.path ?? latestSessionLogPath();
   if (!target) {
     console.error("No session to resume: .gloop/sessions/ is empty.");
     process.exit(1);

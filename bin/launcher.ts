@@ -26,6 +26,7 @@ gloop — A recursive, self-modifying AI agent for the terminal.
 USAGE
   gloop [model] [options]
   gloop --task "<task>" [model] [options]
+  gloop graph [log.jsonl] [--json | --html [out.html]]
   gloop --help
   gloop --version
 
@@ -47,6 +48,13 @@ OPTIONS
                        (.gloop/sessions/<timestamp>.jsonl).  Without a
                        path, resumes the most recent session.  A turn that
                        was cut off mid-way is rolled back and re-run.
+
+SUBCOMMANDS
+  graph [log]          Show a session log as a graph: Mermaid by default,
+                       --json for the raw turn graph, --html for a
+                       self-contained interactive viewer (turn graph, event
+                       causality, state scrubber).  Linked subagent logs
+                       are followed.  See "gloop graph --help".
   --debug              Enable debug logs to .gloop/debug.log.
   --help, -h           Show this help and exit.
   --version, -v        Show the installed version and exit.
@@ -72,6 +80,9 @@ EXAMPLES
 
   # Pick up where the last session left off
   gloop --resume
+
+  # Open the last session as an interactive graph
+  gloop graph --html && open .gloop/sessions/*.html
 
   # Debug logging
   gloop --debug
@@ -113,6 +124,12 @@ if (args.includes("--help") || args.includes("-h")) {
 if (args.includes("--version") || args.includes("-v")) {
   printVersion();
   process.exit(0);
+}
+
+// `gloop graph …` — read-only log tooling, never needs the agent.
+if (args[0] === "graph") {
+  const { runGraphCommand } = await import("../src/core/graph-command.ts");
+  process.exit(await runGraphCommand(args.slice(1)));
 }
 
 // Prefer local .gloop/src fork if it exists (from --clone self-replication).

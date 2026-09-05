@@ -277,6 +277,7 @@ function App() {
           <a href="#core" className="hover:text-accent hover:underline decoration-2 underline-offset-4 transition-all">Core</a>
           <a href="#features" className="hover:text-accent hover:underline decoration-2 underline-offset-4 transition-all">Features</a>
           <a href="#install" className="hover:text-accent hover:underline decoration-2 underline-offset-4 transition-all">Install</a>
+          <a href="viewer/" className="hover:text-accent hover:underline decoration-2 underline-offset-4 transition-all">Log viewer</a>
         </div>
         <Button variant="outline" size="sm">v1.0.0 (STABLE)</Button>
       </header>

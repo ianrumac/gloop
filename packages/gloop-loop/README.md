@@ -291,6 +291,8 @@ Within a turn each event's `parent` is the previous event (a causal chain); pair
 
 **Spawned subprocesses (separate logs):** a spawn handler receives the `spawn_start` event as `call.cause`. Hand it to the child (the gloop CLI passes `--cause <agent>@<eventId>@<parentLog>` to `gloop --task`), have the child record it on its first message, and return the child's `agent` and `log` locator in the `SpawnResult` so `spawn_done.child` carries them. `linkedLogs(events)` lists the logs a log points at in either direction; concatenate their events and `projectGraph` / `ancestors` cross the process boundary as if it were one log.
 
+**Read-only consumers** (viewers, analysers, tests) can import just the pure half — events, `EventLog`, reducer, graph — from `@hypen-space/gloop-loop/replay`; it has no provider or Node dependencies and bundles for the browser as-is. The gloop CLI's `gloop graph --html` viewer is built on it.
+
 **Who talked to whom:**
 
 ```ts

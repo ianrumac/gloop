@@ -76,9 +76,11 @@ gloop --debug # Launch gloop with debug logs
 gloop [model] # Launch the agent (via bin/launcher.ts)
 gloop --task "task" # launch gloop in task mode
 gloop --resume # continue the most recent session from its event log
+gloop graph # print the last session's turn graph as Mermaid
+gloop graph --html # write a self-contained interactive log viewer next to the log
 ```
 
-Every session is an append-only event log in `.gloop/sessions/` — inputs, outputs, tool calls, memory ops, confirmations. `--resume` (or a `Reboot`) rebuilds the agent from it; a turn that was cut off is rolled back and re-run.
+Every session is an append-only event log in `.gloop/sessions/` — inputs, outputs, tool calls, memory ops, confirmations. `--resume` (or a `Reboot`) rebuilds the agent from it; a turn that was cut off is rolled back and re-run. `gloop graph` shows a log as a graph of turns across agents (including `--task` subagents, whose logs are linked and followed), and `gloop graph --html` writes an interactive viewer: turn graph, per-event causality, and a scrubber that replays the agent's state at any point. The same viewer is hosted next to the homepage at `/viewer/` — drop any session file on it.
 
 ## Forms — S-expressions as Data
 

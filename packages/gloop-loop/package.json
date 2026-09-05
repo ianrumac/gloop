@@ -10,6 +10,11 @@
       "bun": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./replay": {
+      "bun": "./src/replay.ts",
+      "types": "./dist/replay.d.ts",
+      "import": "./dist/replay.js"
     }
   },
   "files": [

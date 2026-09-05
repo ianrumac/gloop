@@ -414,3 +414,41 @@ describe("manageContextFork — nested actor isolation", () => {
     await agent.stop();
   });
 });
+
+describe("manageContextFork — event-sourcing options", () => {
+  test("the fork logs into a shared EventLog under the given id and reports the pruned history", async () => {
+    const { EventLog } = await import("../src/log.js");
+    const shared = new EventLog();
+    const provider = new ContextMockProvider([
+      { toolCalls: [tc("d1", "DeleteMessages", { indexes: "1" })] },
+      { toolCalls: [tc("s1", "Summarize", { summary: "old stuff" })] },
+      { toolCalls: [tc("c1", "CompleteTask", { summary: "done" })] },
+    ]);
+    const convo = new AIConversation(provider, "m", "sys");
+    convo.setHistory([
+      { role: "system", content: "sys" },
+      { role: "user", content: "delete me" },
+      { role: "assistant", content: "keep me" },
+    ]);
+    const replaced: Array<{ length: number; removed: number }> = [];
+    const result = await manageContextFork(convo, "prune", undefined, {
+      eventLog: shared,
+      id: "parent/context",
+      onReplaced: (history, removed) => { replaced.push({ length: history.length, removed }); },
+    });
+    expect(result).toContain("removed 1");
+    expect(replaced).toEqual([{ length: 3, removed: 1 }]);
+    const agents = new Set(shared.events().map((e) => e.agent));
+    expect(agents).toEqual(new Set(["parent/context"]));
+    expect(shared.events().some((e) => e.type === "tool_done" && e.name === "DeleteMessages")).toBe(true);
+  });
+
+  test("onReplaced is not called when nothing was pruned", async () => {
+    const provider = new ContextMockProvider([{ toolCalls: [tc("c1", "CompleteTask", { summary: "nothing" })] }]);
+    const convo = new AIConversation(provider, "m");
+    convo.setHistory([{ role: "user", content: "x" }]);
+    let called = false;
+    await manageContextFork(convo, "prune", undefined, { onReplaced: () => { called = true; } });
+    expect(called).toBe(false);
+  });
+});
