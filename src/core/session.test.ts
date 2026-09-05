@@ -1,30 +1,18 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { join } from "path";
 import { AgentLoop, MemoryEventStore, type LogEvent } from "@hypen-space/gloop-loop";
-import type { AIProvider, AIRequestConfig, AIResponse, StreamResult } from "../ai/types.ts";
+import { ScriptedProvider } from "@hypen-space/gloop-loop/testing";
 import {
   saveRebootSession,
   loadRebootSession,
   newSessionLogPath,
   latestSessionLogPath,
   openSessionStore,
+  resolveSessionLog,
+  isTaskSessionLog,
 } from "./session.ts";
 
-// Minimal scripted provider — one text reply per stream() call.
-function provider(replies: string[]): AIProvider {
-  let i = 0;
-  return {
-    name: "mock",
-    async complete(): Promise<AIResponse> {
-      return { id: "x", model: "m", content: null, finishReason: "stop" };
-    },
-    stream(_c: AIRequestConfig): StreamResult {
-      const text = replies[i++] ?? "";
-      const textStream: AsyncIterableIterator<string> = (async function* () { if (text) yield text; })();
-      return { textStream, toolCalls: Promise.resolve([]), finishReason: Promise.resolve("stop"), cancel: async () => {} };
-    },
-  };
-}
+const provider = (replies: string[]) => new ScriptedProvider(replies.map((text) => ({ text })));
 
 const TEST_DIR = join(import.meta.dirname, "__test_session_tmp__");
 let originalCwd: string;
@@ -49,13 +37,27 @@ describe("session persistence", () => {
     expect(a < b).toBe(true);
   });
 
-  test("latestSessionLogPath is null without sessions, else the newest file", async () => {
+  test("latestSessionLogPath is null without sessions, else the newest top-level file — never a task log", async () => {
     expect(latestSessionLogPath()).toBeNull();
     const older = newSessionLogPath(new Date("2026-01-01T00:00:00Z"));
     const newer = newSessionLogPath(new Date("2026-03-01T00:00:00Z"));
+    const child = newSessionLogPath(new Date("2026-03-01T00:00:05Z"), "task-e171c23e");
     await Bun.write(older, "");
     await Bun.write(newer, "");
+    await Bun.write(child, "");
+    expect(isTaskSessionLog(child)).toBe(true);
     expect(latestSessionLogPath()).toBe(newer);
+  });
+
+  test("resolveSessionLog: reboot > --session > --resume [path] > fresh", () => {
+    const latest = () => "/s/latest.jsonl";
+    const fresh = () => "/s/fresh.jsonl";
+    expect(resolveSessionLog({ reboot: { log: "/s/reboot.jsonl" }, resume: { requested: true }, latest, fresh })).toBe("/s/reboot.jsonl");
+    expect(resolveSessionLog({ session: "/s/child.jsonl", resume: { requested: true }, latest, fresh })).toBe("/s/child.jsonl");
+    expect(resolveSessionLog({ resume: { requested: true, path: "/s/x.jsonl" }, latest, fresh })).toBe("/s/x.jsonl");
+    expect(resolveSessionLog({ resume: { requested: true }, latest, fresh })).toBe("/s/latest.jsonl");
+    expect(resolveSessionLog({ resume: { requested: true }, latest: () => null, fresh })).toBeNull();
+    expect(resolveSessionLog({ latest, fresh })).toBe("/s/fresh.jsonl");
   });
 
   test("a session log round-trips through AgentLoop.resume", async () => {
@@ -80,10 +82,8 @@ describe("session persistence", () => {
     expect(await loadRebootSession()).toBeNull();
   });
 
-  test("saveRebootSession flushes first and round-trips the pointer", async () => {
-    let flushed = false;
-    await saveRebootSession("/tmp/some-log.jsonl", "code updated", async () => { flushed = true; });
-    expect(flushed).toBe(true);
+  test("saveRebootSession round-trips the pointer", async () => {
+    await saveRebootSession("/tmp/some-log.jsonl", "code updated");
     const session = await loadRebootSession();
     expect(session).toEqual(expect.objectContaining({ reason: "code updated", log: "/tmp/some-log.jsonl" }));
   });

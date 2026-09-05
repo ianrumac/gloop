@@ -235,7 +235,7 @@ Everything the actor does goes through `agent.log`, an append-only `EventLog`. E
 }
 ```
 
-Besides the UI events, the log records every state change: `message_queued`, `user_message`, `assistant_message`, `tool_message`, `history_replaced`, `history_cleared`, `system_set`, `tools_changed`, `memory`, `llm_request` / `llm_response` / `llm_error`, `confirm_response` / `ask_response`, `spawn_start` / `spawn_done`, `retry`, `hook_error`, `restored`, and `turn_end` now carries a `status`.
+Besides the UI events, the log records every state change: `message_queued`, `user_message`, `assistant_message`, `assistant_tool_calls`, `tool_message`, `history_replaced`, `history_cleared`, `system_set`, `tools_changed`, `memory`, `llm_request` / `llm_response` / `llm_error`, `confirm_response` / `ask_response`, `spawn_start` / `spawn_done`, `retry`, `hook_error`, `restored`, and `turn_end` now carries a `status`.
 
 **Rebuild state from the log:**
 
@@ -263,7 +263,7 @@ const agent = await AgentLoop.resume({ provider, model, system, tools, store });
 agent.start();
 ```
 
-`resume` loads the store, replays it into the conversation, and keeps appending to it. If the previous process died mid-turn, the half-finished turn's writes are rolled back to the last `turn_end` (a `committedHistory`), the turn is closed as `abandoned`, and its message — plus anything still in the inbox — is re-queued so it simply runs again. Pass `history: "latest"` to keep the partial writes instead, or `requeue: false` to only restore.
+`resume` loads the store, replays it into the conversation, and keeps appending to it. If the previous process died mid-turn, the half-finished turn's writes are rolled back to the last `turn_end` (a `committedHistory`), the turn is closed as `abandoned`, and its message — plus anything still in the inbox — is re-queued so it simply runs again. Pass `history: "latest"` to keep the partial writes instead, or `requeue: false` to only restore. The host owns configuration on resume: the `system` and `tools` you pass are what the agent runs with; history and queued work come from the log. `resume` refuses a log written by a different agent `id`.
 
 A `sendSync` promise settles only after that turn's events have been handed to the store, and `stop()` flushes before returning. Store failures never stop the agent (`onStoreError` on `EventLog` sees them).
 
@@ -333,7 +333,7 @@ bridgeAgents(coder, reviewer, {
 
 `hooks: [...]` in the constructor attaches at build time.
 
-To link a message to the event it reacts to, pass the event as its cause — that single edge is what the whole cross-agent graph is built from:
+To link a message to the event it reacts to, pass the event as its cause — that single, explicit edge is what the whole cross-agent graph is built from:
 
 ```ts
 coder.attach({
@@ -345,7 +345,7 @@ coder.attach({
 });
 ```
 
-As a convenience, while a hook handler runs the event it received is the *ambient cause*: a `send()` made synchronously inside the handler without an explicit `cause` is linked automatically. An `await` ends that window, so prefer the explicit form in async handlers.
+`onEvent`, `on(type)` and `attach(hook)` are the same mechanism: every subscriber is a hook on the log, and a subscriber that throws produces a `hook_error` event rather than breaking the loop.
 
 ### Retry — safe, opt-in, logged
 
@@ -536,7 +536,8 @@ Discriminated union on `.type`. Every delivered event also carries the envelope 
 | `tool_start` | `{ id, name, preview }` | Tool invocation started |
 | `tool_done` | `{ id, name, ok, output }` | Tool invocation finished |
 | `user_message` | `{ content }` | A user message was appended to history |
-| `assistant_message` | `{ content, toolCalls?, partial? }` | An assistant message was appended / completed |
+| `assistant_message` | `{ content, toolCalls?, partial? }` | An assistant message was appended |
+| `assistant_tool_calls` | `{ toolCalls }` | Tool calls attached to the last assistant message (after its tools ran) |
 | `tool_message` | `{ toolCallId, content }` | A native tool response was appended |
 | `history_replaced` | `{ history, reason }` | History replaced (context prune, `setHistory`) |
 | `history_cleared` | — | `clear()` |
@@ -584,7 +585,7 @@ Discriminated union on `.type`. Every delivered event also carries the envelope 
 | `eventLog` | fresh `EventLog` | Share a log with other agents |
 | `hooks` | — | `AgentHook[]` attached at construction |
 | `retry` | off | `{ llm?, tool? }` retry policies |
-| `contextPruneInterval` | 50 | Tool-call count between auto-prunes |
+| `contextPruneInterval` | 0 (off) | Tool-call count between auto-prunes |
 | `classifySpawn` | — | Classify tool calls as spawn tasks |
 | `log` | — | Debug logger |
 
@@ -593,10 +594,11 @@ Discriminated union on `.type`. Every delivered event also carries the envelope 
 - **Providers**: `OpenRouterProvider`, `AI`, `AIBuilder`, `AIConversation`
 - **Tools**: `ToolDefinition`, `ToolCall`, `ToolResult`, `ToolRegistry`, `primitiveTools`, `registerBuiltins`
 - **Memory**: `createFileMemory`, `FileMemory`, `FileMemoryOptions`, `appendMemory`, `removeMemory`, `readMemory`
-- **Event sourcing**: `EventLog`, `MemoryEventStore`, `createJsonlEventStore`, `EventStore`, `LogEvent`, `EventEnvelope`, `isEphemeralEvent`, `serializeEvent`, `toErrorInfo`
+- **Event sourcing**: `EventLog`, `MemoryEventStore`, `createJsonlEventStore`, `parseJsonlEvents`, `EventStore`, `LogEvent`, `EventEnvelope`, `isEphemeralEvent`, `serializeEvent`, `toErrorInfo`
 - **State**: `projectState`, `reduce`, `initialState`, `messagesToRequeue`, `AgentState`, `TurnRecord`
-- **Hooks**: `AgentHook`, `bridgeAgents`, `withCause`, `currentCause`, `HookTarget`
-- **Graph**: `projectGraph`, `graphToMermaid`, `linkedLogs`, `AgentGraph`, `TurnNode`, `MessageEdge`, `LinkedLog`
+- **Hooks**: `AgentHook`, `bridgeAgents`, `HookTarget`, `SendOptions`
+- **Graph**: `projectGraph`, `graphToMermaid`, `linkedLogs`, `mergeEvents`, `AgentGraph`, `TurnNode`, `MessageEdge`, `LinkedLog`
+- **Testing** (`@hypen-space/gloop-loop/testing`): `ScriptedProvider`, `tc`, `tcNoId`, `echoTool`, `completeTool`, `bashTool`, `spawnPrefixClassifier`
 - **Retry**: `withRetry`, `RetryPolicy`, `RetryConfig`, `backoffDelay`, `defaultRetryIf`
 - **Errors**: `AbortError`
 - **Skills**: `Skill`, `parseSkillMarkdown`, `mergeSkillsIntoSystem`, `formatSkillsListing`, `findSkill`, `applySkillSubstitutions`, `thinkInputFromSkillSubcommand`, `matchSkillSlash`, `skillInvocationToThinkInput`, `createInvokeSkillTool`, `ParsedSkillMarkdown`, `SkillSlashMatch`

@@ -106,6 +106,7 @@ export interface AIProvider {
 
 export interface AIProviderConfig {
   apiKey: string;
+  /** Override the API root, e.g. `http://localhost:8080/v1` for a local OpenAI-compatible server. */
   baseUrl?: string;
   defaultModel?: string;
   /** Required for browser usage — identifies your app to OpenRouter */

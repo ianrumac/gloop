@@ -29,6 +29,9 @@ export class OpenRouterProvider implements AIProvider {
   constructor(config: AIProviderConfig) {
     this.client = new OpenRouter({
       apiKey: config.apiKey,
+      // Any OpenAI-compatible chat-completions endpoint (a local model, a
+      // proxy, a test double) — requests go to `${baseUrl}/chat/completions`.
+      ...(config.baseUrl && { serverURL: config.baseUrl }),
       ...(config.httpReferer && { httpReferer: config.httpReferer }),
       ...(config.xTitle && { xTitle: config.xTitle }),
     });

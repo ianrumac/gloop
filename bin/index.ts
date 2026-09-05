@@ -21,10 +21,9 @@ import {
 } from "../src/core/debug.ts";
 import {
   loadRebootSession,
-  latestSessionLogPath,
-  newSessionLogPath,
   openSessionStore,
   rebootIsFatal,
+  resolveSessionLog,
   wireRebootHandler,
 } from "../src/core/session.ts";
 import { AgentLoop } from "../src/core/core.ts";
@@ -79,18 +78,10 @@ debugLog("SYSTEM", systemPrompt);
 // AgentLoop.resume replays it (rolling back any cut-off turn) and keeps
 // appending to it.
 const rebootSession = await loadRebootSession();
-let sessionLogPath: string;
-if (rebootSession) {
-  sessionLogPath = rebootSession.log;
-} else if (resume.requested) {
-  const target = resume.path ?? latestSessionLogPath();
-  if (!target) {
-    console.error("No session to resume: .gloop/sessions/ is empty.");
-    process.exit(1);
-  }
-  sessionLogPath = target;
-} else {
-  sessionLogPath = newSessionLogPath();
+const sessionLogPath = resolveSessionLog({ reboot: rebootSession, resume });
+if (!sessionLogPath) {
+  console.error("No session to resume: .gloop/sessions/ has no top-level session logs.");
+  process.exit(1);
 }
 debugLog("SESSION", sessionLogPath);
 
@@ -100,6 +91,8 @@ debugLog("SESSION", sessionLogPath);
 
 const provider = new OpenRouterProvider({
   apiKey: process.env.OPENROUTER_API_KEY!,
+  // OPENROUTER_BASE_URL points gloop at any OpenAI-compatible endpoint.
+  ...(process.env.OPENROUTER_BASE_URL && { baseUrl: process.env.OPENROUTER_BASE_URL }),
 });
 
 const debugInt = debugInterceptor();

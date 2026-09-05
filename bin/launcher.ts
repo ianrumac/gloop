@@ -61,6 +61,8 @@ SUBCOMMANDS
 
 ENVIRONMENT
   OPENROUTER_API_KEY   Required.  Your OpenRouter API key.
+  OPENROUTER_BASE_URL  Optional.  Any OpenAI-compatible API root (a local
+                       model, a proxy) — requests go to <url>/chat/completions.
 
 EXAMPLES
   # Interactive session with the default model

@@ -193,7 +193,7 @@ export { isEphemeralEvent, serializeEvent, toErrorInfo } from "./events.js";
 
 // --- Event log: append-only, subscribable, persistable ---
 export type { EventStore, EventLogOptions, AppendOptions, LogSubscriber } from "./log.js";
-export { EventLog, MemoryEventStore } from "./log.js";
+export { EventLog, MemoryEventStore, parseJsonlEvents } from "./log.js";
 export type { JsonlEventStore, JsonlEventStoreOptions } from "./defaults/jsonl-store.js";
 export { createJsonlEventStore } from "./defaults/jsonl-store.js";
 
@@ -207,11 +207,11 @@ export { withRetry, backoffDelay, defaultRetryIf } from "./retry.js";
 
 // --- Hooks: attach behaviour / other agents to the log ---
 export type { AgentHook, HookTarget, BridgeOptions, SendOptions } from "./hooks.js";
-export { bridgeAgents, withCause, currentCause, toEventRef } from "./hooks.js";
+export { bridgeAgents } from "./hooks.js";
 
 // --- Graph: who talked to whom, because of what ---
 export type { AgentGraph, TurnNode, MessageEdge, LinkedLog } from "./graph.js";
-export { projectGraph, graphToMermaid, linkedLogs } from "./graph.js";
+export { projectGraph, graphToMermaid, linkedLogs, mergeEvents } from "./graph.js";
 
 // --- AgentLoop: high-level actor-style entry point ---
 export { AgentLoop } from "./agent.js";

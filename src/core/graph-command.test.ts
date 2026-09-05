@@ -3,27 +3,12 @@ import { mkdtemp, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { AgentLoop, EventLog, createJsonlEventStore, type LogEvent } from "@hypen-space/gloop-loop";
-import type { AIProvider, AIRequestConfig, AIResponse, StreamResult, JsonToolCall } from "../ai/types.ts";
+import { ScriptedProvider, tc, completeTool as complete, bashTool as bash } from "@hypen-space/gloop-loop/testing";
+const scripted = (r: ConstructorParameters<typeof ScriptedProvider>[0]) => new ScriptedProvider(r);
 import { buildViewerHtml, loadLogWithLinks, parseGraphArgs } from "./graph-command.ts";
 
 // A parent that spawns one child "process" (a second AgentLoop with its own
 // JSONL log), exactly as gloop --task does — then we read both files back.
-function scripted(responses: Array<{ text?: string; toolCalls?: JsonToolCall[] }>): AIProvider {
-  let i = 0;
-  return {
-    name: "s",
-    async complete(): Promise<AIResponse> { return { id: "x", model: "m", content: null, finishReason: "stop" }; },
-    stream(_c: AIRequestConfig): StreamResult {
-      const r = responses[i++] ?? {};
-      const textStream: AsyncIterableIterator<string> = (async function* () { if (r.text) yield r.text; })();
-      return { textStream, toolCalls: Promise.resolve(r.toolCalls ?? []), finishReason: Promise.resolve(r.toolCalls?.length ? "tool_calls" : "stop"), cancel: async () => {} };
-    },
-  };
-}
-const tc = (id: string, name: string, args: Record<string, string>): JsonToolCall => ({ id, type: "function", function: { name, arguments: JSON.stringify(args) } });
-const complete = { name: "CompleteTask", description: "", arguments: [{ name: "summary", description: "" }], execute: async (a: Record<string, string>) => a.summary ?? "" };
-const bash = { name: "Bash", description: "", arguments: [{ name: "command", description: "" }], execute: async () => "" };
-
 async function writeLinkedLogs(dir: string): Promise<{ parent: string; child: string }> {
   const parent = join(dir, "parent.jsonl");
   const child = join(dir, "child.jsonl");

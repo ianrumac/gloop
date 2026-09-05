@@ -34,11 +34,11 @@ describe("reducer — history", () => {
     ]);
   });
 
-  test("assistant_message with toolCalls merges into the matching prior text message", () => {
+  test("assistant_tool_calls attaches calls to the last assistant message", () => {
     const calls = [call("c1")];
     const log = build([
       ["a", "m1", assistant("thinking")],
-      ["a", "m1", assistant("thinking", calls)],
+      ["a", "m1", { type: "assistant_tool_calls", toolCalls: calls }],
       ["a", "m1", tool("c1", "ok")],
     ]);
     expect(projectState(log.events()).history).toEqual([
@@ -47,14 +47,18 @@ describe("reducer — history", () => {
     ]);
   });
 
-  test("assistant_message with toolCalls does NOT merge when content differs or calls already set", () => {
+  test("assistant_tool_calls is ignored when the last message is not an assistant's; identical assistant texts never merge", () => {
     const calls = [call("c1")];
     const log = build([
-      ["a", "m1", assistant("one")],
-      ["a", "m1", assistant("two", calls)],
-      ["a", "m1", assistant("two", calls)],
+      ["a", "m1", user("u")],
+      ["a", "m1", { type: "assistant_tool_calls", toolCalls: calls }],
+      ["a", "m1", assistant("same")],
+      ["a", "m1", assistant("same", calls)],
     ]);
-    expect(projectState(log.events()).history).toHaveLength(3);
+    const h = projectState(log.events()).history;
+    expect(h).toHaveLength(3);
+    expect(h[0]).toEqual({ role: "user", content: "u" });
+    expect(h[2]).toEqual({ role: "assistant", content: "same", toolCalls: calls });
   });
 
   test("history_replaced / history_cleared", () => {

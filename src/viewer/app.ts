@@ -154,7 +154,8 @@ function wireRows(root: HTMLElement): void {
 function renderTurn(): void {
   const el = $("turnPanel");
   if (!selectedTurn) { el.innerHTML = `<h2>Turn</h2><div class="empty">Select a turn in the graph.</div>`; return; }
-  const list = turnEvents(events, selectedTurn);
+  const node = graph.nodes.find((n) => n.key === selectedTurn);
+  const list = turnEvents(events, selectedTurn, node);
   el.innerHTML = `<h2>Turn ${esc(selectedTurn)} · ${list.length} events</h2>` + list.map((e) => eventRow(e)).join("");
   wireRows(el);
 }
@@ -179,8 +180,15 @@ function jumpTo(eventId: string): void {
   const e = log.get(eventId);
   if (!e) return;
   selectedEvent = eventId;
+  // Pick the attempt whose seq range holds the event (re-runs after a restore share a turn id).
   const turn = e.turn ?? (e.type === "message_queued" ? e.message.id ?? null : null);
-  if (turn) selectedTurn = `${e.agent}:${turn}`;
+  if (turn) {
+    const candidates = graph.nodes.filter((n) => n.agent === e.agent && n.turn === turn);
+    const hit = candidates.find((n) => n.queuedEventId === e.eventId)
+      ?? candidates.find((n) => n.startSeq !== undefined && e.seq >= n.startSeq && (n.endSeq === undefined || e.seq <= n.endSeq))
+      ?? candidates[candidates.length - 1];
+    if (hit) selectedTurn = hit.key;
+  }
   renderGraph(); renderTurn(); renderInspector();
 }
 

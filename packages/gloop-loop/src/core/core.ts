@@ -239,7 +239,9 @@ export type CoreEvent = Extract<
     type:
       | "user_message"
       | "assistant_message"
+      | "assistant_tool_calls"
       | "tool_message"
+      | "history_replaced"
       | "llm_request"
       | "llm_response"
       | "llm_error"
@@ -382,16 +384,27 @@ function spawnToToolResult(r: SpawnResult): ToolResult {
   };
 }
 
-/** foldr over spawn tasks: chain Spawn forms right-to-left with a base continuation.
- *  Like (foldr (λ task acc → Spawn task (λ r → Emit r acc)) base tasks) */
-function chainSpawns(tasks: string[], base: Form): Form {
-  return tasks.reduceRight<Form>(
-    (acc, task) => Spawn(task, (r) => Emit(formatResults([spawnToToolResult(r)]), acc)),
-    base,
-  );
+/**
+ * Chain Spawn forms left-to-right, collecting each result, then hand all of
+ * them to `then`.  The results reach the model the same way tool results
+ * do — a spawn is a tool call whose "execute" is another agent.
+ */
+function chainSpawns(tasks: string[], then: Continuation): Form {
+  const go = (i: number, acc: ToolResult[]): Form =>
+    i >= tasks.length ? then(acc) : Spawn(tasks[i]!, (r) => go(i + 1, [...acc, spawnToToolResult(r)]));
+  return go(0, []);
 }
 
-/** Build a Form from a list of ToolCalls, using optional spawn classifier */
+/**
+ * Build a Form from a list of ToolCalls.
+ *
+ * `classifySpawn` is the LEGACY way to route subagent tasks: matching calls
+ * become `Spawn` forms whose results are fed back as a synthetic user
+ * message.  gloop-loop's own interpreter no longer passes it — `evalInvoke`
+ * handles spawn-classified calls inline (natively recorded, visible as
+ * tool_start / tool_done).  The parameter stays for hosts with their own
+ * interpreter over the Form ADT (gloop-effect).
+ */
 export function toolCallsToForm(toolCalls: ToolCall[], classifySpawn?: (call: ToolCall) => string | null): Form {
   if (toolCalls.length === 0) return Nil;
 
@@ -429,15 +442,42 @@ export function toolCallsToForm(toolCalls: ToolCall[], classifySpawn?: (call: To
       native ? Continue() : Think(formatResults(results)));
   }
 
-  // Mixed or all-spawn: invoke plain tools first (if any), then fold spawns, then think
+  // Mixed: invoke plain tools first, then the spawns; the model sees every
+  // result (plain ones natively when ids are present, spawn ones as text).
   if (plainCalls.length > 0) {
     return Invoke(plainCalls, (toolResults) =>
-      chainSpawns(spawnTasks, native ? Continue() : Think(formatResults(toolResults)))
+      chainSpawns(spawnTasks, (spawnResults) =>
+        Think(formatResults(native ? spawnResults : [...toolResults, ...spawnResults]))),
     );
   }
 
-  // All spawns: fold into a chain that collects results then thinks
-  return chainSpawns(spawnTasks, Think(""));
+  // All spawns: run them, then think with their results.
+  return chainSpawns(spawnTasks, (spawnResults) => Think(formatResults(spawnResults)));
+}
+
+/** Run the spawn boundary (interceptors + `fx.spawn`) with start/done events. */
+async function runSpawn(world: World, fx: Effects, task: string): Promise<SpawnResult> {
+  return withWorldSpan(world, "spawn", { taskLength: task.length }, async (span) => {
+    const started = fx.record?.({ type: "spawn_start", task });
+    const call: SpawnCall = started
+      ? { cause: { agent: started.agent, eventId: started.eventId } }
+      : {};
+    const r = await chainBoundary(
+      world.interceptors,
+      "spawn",
+      (ctx) => fx.spawn(ctx.task, call),
+    )({ task } as SpawnContext);
+    fx.record?.({
+      type: "spawn_done",
+      ok: r.success,
+      exitCode: r.exitCode,
+      summary: r.summary,
+      ...(r.agent && { child: { agent: r.agent, ...(r.log && { log: r.log }) } }),
+    });
+    span.setAttribute("ok", r.success);
+    span.setAttribute("exitCode", r.exitCode);
+    return r;
+  });
 }
 
 export function formatResults(results: ToolResult[]): string {
@@ -573,32 +613,7 @@ export async function eval_(
     }
 
     case "spawn": {
-      const result = await withWorldSpan(
-        world,
-        "spawn",
-        { taskLength: form.task.length },
-        async (span) => {
-          const started = fx.record?.({ type: "spawn_start", task: form.task });
-          const call: SpawnCall = started
-            ? { cause: { agent: started.agent, eventId: started.eventId } }
-            : {};
-          const r = await chainBoundary(
-            world.interceptors,
-            "spawn",
-            (ctx) => fx.spawn(ctx.task, call),
-          )({ task: form.task } as SpawnContext);
-          fx.record?.({
-            type: "spawn_done",
-            ok: r.success,
-            exitCode: r.exitCode,
-            summary: r.summary,
-            ...(r.agent && { child: { agent: r.agent, ...(r.log && { log: r.log }) } }),
-          });
-          span.setAttribute("ok", r.success);
-          span.setAttribute("exitCode", r.exitCode);
-          return r;
-        },
-      );
+      const result = await runSpawn(world, fx, form.task);
       return eval_(form.then(result), world, fx, config);
     }
   }
@@ -675,13 +690,15 @@ async function evalThink(
         "llmCall",
         async (innerCtx): Promise<LlmCallResult> => {
           // If an interceptor rewrote the input, the rewritten text is what
-          // the model must see — swap the user message we just appended.
+          // the model must see — swap the user message we just appended, and
+          // log the swap so replay stays exact.
           if (input !== null && innerCtx.input !== input) {
             const h = world.convo.getHistory();
             const last = h[h.length - 1];
             if (last && last.role === "user" && last.content === input) {
               h[h.length - 1] = { role: "user", content: innerCtx.input };
               world.convo.setHistory(h);
+              fx.record?.({ type: "history_replaced", history: h, reason: "interceptor_rewrite" });
             }
           }
 
@@ -780,7 +797,7 @@ async function evalThink(
     if (llmResult.toolCalls.every((c) => c.id)) {
       world.pendingToolCalls = { text: llmResult.text, calls: [...llmResult.toolCalls] };
     }
-    const nextForm = toolCallsToForm(toolCalls, config?.classifySpawn);
+    const nextForm = toolCallsToForm(toolCalls);
     return eval_(nextForm, world, fx, config);
   }
 
@@ -809,8 +826,7 @@ function recordNativeToolMessages(world: World, fx: Effects, results: ToolResult
   if (last && last.role === "assistant" && last.content === pending.text && !last.toolCalls) {
     h[h.length - 1] = { ...last, toolCalls: pending.calls };
     world.convo.setHistory(h);
-    // Same event shape as a fresh append — the reducer performs the same merge.
-    fx.record?.({ type: "assistant_message", content: pending.text, toolCalls: pending.calls });
+    fx.record?.({ type: "assistant_tool_calls", toolCalls: pending.calls });
   } else {
     appendHistory(world, fx, { role: "assistant", content: pending.text, toolCalls: pending.calls });
   }
@@ -844,6 +860,19 @@ async function evalInvoke(
   // Process each tool call
   for (const call of calls) {
     if (world.signal?.aborted) throw new AbortError();
+
+    // A spawn-classified call (e.g. `Bash("gloop --task …")`) is a tool call
+    // whose "execute" is another agent: run it through the spawn boundary
+    // and record the result exactly like a tool result.
+    const spawnTask = config?.classifySpawn?.(call) ?? null;
+    if (spawnTask !== null) {
+      fx.toolStart(call.name, `spawn: ${spawnTask.substring(0, 50)}`, call.args, call.id);
+      const r = await runSpawn(world, fx, spawnTask);
+      const result = spawnToToolResult(r);
+      results.push({ ...result, name: call.name, id: call.id });
+      fx.toolDone(call.name, r.success, r.success ? "ok" : result.output);
+      continue;
+    }
 
     // Handle AskUser specially
     if (call.name === "AskUser") {

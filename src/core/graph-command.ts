@@ -17,6 +17,7 @@ import {
   createJsonlEventStore,
   graphToMermaid,
   linkedLogs,
+  mergeEvents,
   projectGraph,
   type LogEvent,
 } from "@hypen-space/gloop-loop";
@@ -66,7 +67,7 @@ function resolveLinked(locator: string, fromLog: string): string | null {
 
 /** Load a log and (optionally) every log it links to, transitively. */
 export async function loadLogWithLinks(path: string, follow = true): Promise<LoadedLogs> {
-  const byId = new Map<string, LogEvent>();
+  const lists: LogEvent[][] = [];
   const sources: string[] = [];
   const missing: string[] = [];
   const queue = [resolve(path)];
@@ -79,7 +80,7 @@ export async function loadLogWithLinks(path: string, follow = true): Promise<Loa
     if (!existsSync(p)) { missing.push(p); continue; }
     const loaded = await createJsonlEventStore(p).load();
     sources.push(p);
-    for (const e of loaded) byId.set(e.eventId, e);
+    lists.push(loaded);
     if (!follow) break;
     for (const link of linkedLogs(loaded)) {
       const target = resolveLinked(link.log, p);
@@ -88,8 +89,7 @@ export async function loadLogWithLinks(path: string, follow = true): Promise<Loa
     }
   }
 
-  const events = [...byId.values()].sort((a, b) => (a.ts - b.ts) || (a.seq - b.seq));
-  return { events, sources, missing };
+  return { events: mergeEvents(...lists), sources, missing };
 }
 
 const VIEWER_DIR = join(import.meta.dirname, "..", "viewer");

@@ -16,20 +16,15 @@ import { discoverSkills } from "./skills.ts";
 import { enableDebug, debugLog, debugLogRaw } from "./debug.ts";
 import {
   loadRebootSession,
-  newSessionLogPath,
   openSessionStore,
   rebootIsFatal,
+  resolveSessionLog,
   wireRebootHandler,
 } from "./session.ts";
 import { AgentLoop, type AgentEvent } from "./core.ts";
 import { appendFileSync } from "fs";
-import {
-  appendTaskPromptSuffix,
-  decodeCause,
-  parseGloopTaskBashCommand,
-  runTaskSubagent,
-} from "./task-mode.ts";
-import type { EventRef } from "@hypen-space/gloop-loop";
+import { parseGloopTaskBashCommand, runTaskSubagent } from "./task-mode.ts";
+import { parseHeadlessArgs } from "./cli-args.ts";
 import { installTool } from "../../bin/install-tool.ts";
 import { DEFAULT_GLOOP_MODEL } from "./default-model.ts";
 
@@ -39,49 +34,14 @@ import { DEFAULT_GLOOP_MODEL } from "./default-model.ts";
 
 function usage(): never {
   console.error(
-    'Usage: bun headless.ts --model <provider/model> [--provider <name>] [--output <path>] [--debug] [--task "<task>"] "<instruction>"',
+    'Usage: bun headless.ts --model <provider/model> [--provider <name>] [--output <path>] [--debug] [--task "<task>"] [--session <log>] [--agent-id <id>] [--cause <json>] "<instruction>"',
   );
   process.exit(1);
 }
 
-const args = process.argv.slice(2);
-
-let model = DEFAULT_GLOOP_MODEL;
-let outputPath = "gloop-output.jsonl";
-let debug = false;
-let providerName: string | undefined;
-let clone = false;
-let instruction = "";
-let sessionArg: string | undefined;
-let agentId = "gloop";
-let cause: EventRef | undefined;
-
-for (let i = 0; i < args.length; i++) {
-  const arg = args[i]!;
-  if (arg === "--model" && i + 1 < args.length) {
-    model = args[++i]!;
-  } else if (arg === "--output" && i + 1 < args.length) {
-    outputPath = args[++i]!;
-  } else if (arg === "--provider" && i + 1 < args.length) {
-    providerName = args[++i]!;
-  } else if (arg === "--session" && i + 1 < args.length) {
-    sessionArg = args[++i]!;
-  } else if (arg === "--agent-id" && i + 1 < args.length) {
-    agentId = args[++i]!;
-  } else if (arg === "--cause" && i + 1 < args.length) {
-    cause = decodeCause(args[++i]!) ?? undefined;
-  } else if (arg === "--clone") {
-    clone = true;
-  } else if (arg === "--debug") {
-    debug = true;
-  } else if (arg === "--task" && i + 1 < args.length) {
-    instruction = appendTaskPromptSuffix(args[++i]!);
-  } else if (arg.startsWith("--task=")) {
-    instruction = appendTaskPromptSuffix(arg.slice("--task=".length));
-  } else if (!arg.startsWith("--")) {
-    instruction = arg;
-  }
-}
+const {
+  model, outputPath, debug, providerName, clone, instruction, session: sessionArg, agentId, cause,
+} = parseHeadlessArgs(process.argv.slice(2));
 
 if (!instruction) usage();
 
@@ -108,7 +68,7 @@ let systemPrompt = await buildSystemPrompt({ clone });
 debugLog("SYSTEM", systemPrompt);
 
 const rebootSession = await loadRebootSession();
-const sessionLogPath = rebootSession?.log ?? sessionArg ?? newSessionLogPath();
+const sessionLogPath = resolveSessionLog({ reboot: rebootSession, session: sessionArg })!;
 debugLog("SESSION", sessionLogPath);
 if (cause) debugLog("CAUSE", `${cause.agent} ${cause.eventId} ${cause.log ?? ""}`);
 
@@ -118,6 +78,8 @@ if (cause) debugLog("CAUSE", `${cause.agent} ${cause.eventId} ${cause.log ?? ""}
 
 const provider = new OpenRouterProvider({
   apiKey: process.env.OPENROUTER_API_KEY!,
+  // OPENROUTER_BASE_URL points gloop at any OpenAI-compatible endpoint.
+  ...(process.env.OPENROUTER_BASE_URL && { baseUrl: process.env.OPENROUTER_BASE_URL }),
 });
 
 const agent: AgentLoop = await AgentLoop.resume({

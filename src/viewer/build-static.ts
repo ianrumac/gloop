@@ -10,18 +10,8 @@
 
 import { mkdir } from "fs/promises";
 import { join } from "path";
-import {
-  AgentLoop,
-  EventLog,
-  MemoryEventStore,
-  bridgeAgents,
-  type AIProvider,
-  type AIRequestConfig,
-  type AIResponse,
-  type JsonToolCall,
-  type LogEvent,
-  type StreamResult,
-} from "@hypen-space/gloop-loop";
+import { AgentLoop, EventLog, MemoryEventStore, bridgeAgents, type LogEvent } from "@hypen-space/gloop-loop";
+import { ScriptedProvider, tc, type ScriptedResponse } from "@hypen-space/gloop-loop/testing";
 import { buildViewerHtml } from "../core/graph-command.ts";
 
 // ---------------------------------------------------------------------------
@@ -29,27 +19,8 @@ import { buildViewerHtml } from "../core/graph-command.ts";
 // test-runner "subprocess" with its own log; one tool call is denied.
 // ---------------------------------------------------------------------------
 
-function scripted(responses: Array<{ text?: string; toolCalls?: JsonToolCall[] }>): AIProvider {
-  let i = 0;
-  return {
-    name: "demo",
-    async complete(): Promise<AIResponse> { return { id: "d", model: "demo", content: null, finishReason: "stop" }; },
-    stream(_c: AIRequestConfig): StreamResult {
-      const r = responses[i++] ?? {};
-      const textStream: AsyncIterableIterator<string> = (async function* () {
-        for (const chunk of (r.text ?? "").match(/.{1,12}/g) ?? []) yield chunk;
-      })();
-      return {
-        textStream,
-        toolCalls: Promise.resolve(r.toolCalls ?? []),
-        finishReason: Promise.resolve(r.toolCalls?.length ? "tool_calls" : "stop"),
-        cancel: async () => {},
-      };
-    },
-  };
-}
-const tc = (id: string, name: string, args: Record<string, string>): JsonToolCall =>
-  ({ id, type: "function", function: { name, arguments: JSON.stringify(args) } });
+/** Scripted provider that streams in small chunks so the demo has stream events. */
+const scripted = (responses: ScriptedResponse[]) => new ScriptedProvider(responses);
 
 const tools = {
   complete: { name: "CompleteTask", description: "", arguments: [{ name: "summary", description: "" }], execute: async (a: Record<string, string>) => a.summary ?? "" },

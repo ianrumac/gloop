@@ -72,14 +72,7 @@ import {
 import { EventLog, type EventStore } from "./log.js";
 import { projectState, messagesToRequeue, type AgentState } from "./state.js";
 import type { RetryConfig } from "./retry.js";
-import {
-  currentCause,
-  withCause,
-  toEventRef,
-  type AgentHook,
-  type HookTarget,
-  type SendOptions,
-} from "./hooks.js";
+import type { AgentHook, HookTarget, SendOptions } from "./hooks.js";
 
 // Re-exported so existing `import { AgentEvent } from "./agent.js"` keeps working.
 export type {
@@ -313,27 +306,25 @@ export class AgentLoop implements HookTarget {
   private effects: Effects;
   private debugLog?: (label: string, content: string) => void;
 
-  // ---- Event bus ----
+  // ---- Event delivery ----
   //
-  // Two parallel listener stores:
-  //   - `listeners`       — full firehose, called on every event
-  //   - `typedListeners`  — map from event type → set of handlers, called
-  //                         only on matching events.  Populated by
-  //                         `on(type, handler)`.
-  // Both are Sets so the same function can register once per channel and be
-  // removed by identity.  They receive only THIS agent's events; use
-  // `attach({ scope: "all" })` or `log.subscribe` for a shared log.
-  private listeners = new Set<AgentEventListener>();
-  private typedListeners = new Map<AgentEventType, Set<(event: LogEvent) => void>>();
-  private detachLog: () => void;
+  // ONE path: every subscriber — `onEvent`, `on(type)`, `attach(hook)` — is a
+  // hook on the log.  Handlers that throw produce a `hook_error` event and
+  // never break the loop.  `listenerDetach` lets `off` / `offEvent` find the
+  // hook a handler was wrapped in.
+  private listenerDetach = new Map<(event: LogEvent) => void, () => void>();
 
   // ---- Inbox ----
   private inbox: AgentMessage[] = [];
   private inboxWakers: Array<() => void> = [];
   private running = false;
   private loopPromise: Promise<void> | null = null;
+  /** `sendSync` promises still waiting for their turn — rejected by `stop()`. */
+  private pendingSends = new Map<string, (err: Error) => void>();
 
   // ---- Per-turn state ----
+  /** True from the moment a message is dequeued until its turn_end — see `awaitIdle`. */
+  private turnPending = false;
   private currentAbort: AbortController | null = null;
   private currentTurn: string | null = null;
   private turnStatus: TurnStatus = "ok";
@@ -365,7 +356,8 @@ export class AgentLoop implements HookTarget {
 
     // 2. Build conversation
     const ai = new AI(opts.provider, opts.model);
-    const system = mergeSkillsIntoSystem(opts.system, opts.skills ?? []);
+    // An empty prompt is no prompt — keep the conversation and the log in agreement.
+    const system = mergeSkillsIntoSystem(opts.system, opts.skills ?? []) || undefined;
     this.convo = ai.conversation({ model: opts.model, system });
     this.convo.setMaxTokens(opts.maxTokens ?? 262_144);
 
@@ -393,15 +385,10 @@ export class AgentLoop implements HookTarget {
       retry: opts.retry,
     };
 
-    // 6. Dispatch this agent's events from the log to local listeners.
-    this.detachLog = this.log.subscribe((event) => {
-      if (event.agent === this.id) this.dispatch(event);
-    });
-
     for (const hook of opts.hooks ?? []) this.attach(hook);
 
     // Record the initial configuration so a log starts self-describing.
-    if (system !== undefined) this.emit({ type: "system_set", system });
+    if (system) this.emit({ type: "system_set", system });
     this.emit({ type: "tools_changed", names: this.registry.names() });
   }
 
@@ -409,15 +396,28 @@ export class AgentLoop implements HookTarget {
    * Build an actor from a persisted log: loads the store, replays it into
    * the conversation, re-queues any cut-off turn, and returns the (not yet
    * started) agent.  New events continue in the same store.
+   *
+   * The host owns configuration on resume: the `system` and `tools` passed
+   * here are what the agent runs with (and are logged after the replayed
+   * events), not whatever the previous run last set.  Conversation history
+   * and queued work come from the log.
+   *
+   * Throws if the log belongs to a different agent id — resuming someone
+   * else's log would silently produce an empty conversation.
    */
   static async resume(
     opts: AgentLoopOptions & HydrateOptions,
   ): Promise<AgentLoop> {
     const { requeue, history, ...rest } = opts;
     const log = rest.eventLog ?? new EventLog({ store: rest.store });
-    await log.load();
+    const loaded = await log.load();
+    const id = rest.id ?? "agent";
+    const owners = new Set(loaded.map((e) => e.agent));
+    if (owners.size > 0 && !owners.has(id)) {
+      throw new Error(`Cannot resume "${id}" from a log written by ${[...owners].map((o) => `"${o}"`).join(", ")}`);
+    }
     const agent = new AgentLoop({ ...rest, eventLog: log });
-    if (log.size > 0) agent.hydrate(undefined, { requeue, history });
+    if (loaded.length > 0) agent.hydrate(loaded, { requeue, history });
     return agent;
   }
 
@@ -433,8 +433,14 @@ export class AgentLoop implements HookTarget {
   /**
    * Rebuild the conversation from events (default: this agent's log) and
    * re-queue unfinished work.  Emits `restored`.  Returns the projected state.
+   *
+   * Call before `start()`; `resume` does this for you.  Hydrating a running
+   * agent would splice re-queued messages into live work.
    */
   hydrate(events?: Iterable<LogEvent>, options: HydrateOptions = {}): AgentState {
+    if (this.running || this.turnPending) {
+      throw new Error("hydrate() must be called before start()");
+    }
     const state = events ? projectState(events, this.id) : this.snapshot();
     const useLatest = options.history === "latest";
     const history = useLatest ? state.history : state.committedHistory;
@@ -490,12 +496,10 @@ export class AgentLoop implements HookTarget {
       if (types && !types.has(event.type)) return;
       const fail = (err: unknown) => {
         if (event.type === "hook_error") return; // never cascade
-        this.emit({ type: "hook_error", hook: name, eventType: event.type, error: toErrorInfo(err) });
+        this.emit({ type: "hook_error", hook: name, eventType: event.type, error: toErrorInfo(err) }, undefined, false);
       };
       try {
-        // Any send() made synchronously inside the handler — to this agent or
-        // another — is recorded as caused by `event`.
-        const r = withCause({ agent: event.agent, eventId: event.eventId }, () => hook.handle(event as LogEvent<T>, this));
+        const r = hook.handle(event as LogEvent<T>, this);
         if (r && typeof (r as Promise<void>).then === "function") {
           (r as Promise<void>).catch(fail);
         }
@@ -517,13 +521,16 @@ export class AgentLoop implements HookTarget {
    * narrowed handler parameter.
    */
   onEvent(listener: AgentEventListener): this {
-    this.listeners.add(listener);
+    if (!this.listenerDetach.has(listener)) {
+      this.listenerDetach.set(listener, this.attach({ name: "listener", handle: listener }));
+    }
     return this;
   }
 
   /** Remove a firehose listener registered with `onEvent`.  Chainable. */
   offEvent(listener: AgentEventListener): this {
-    this.listeners.delete(listener);
+    this.listenerDetach.get(listener)?.();
+    this.listenerDetach.delete(listener);
     return this;
   }
 
@@ -535,12 +542,10 @@ export class AgentLoop implements HookTarget {
     type: T,
     handler: (event: LogEvent<T>) => void,
   ): this {
-    let set = this.typedListeners.get(type);
-    if (!set) {
-      set = new Set();
-      this.typedListeners.set(type, set);
+    const key = handler as (event: LogEvent) => void;
+    if (!this.listenerDetach.has(key)) {
+      this.listenerDetach.set(key, this.attach({ name: `listener:${type}`, types: [type], handle: handler }));
     }
-    set.add(handler as (event: LogEvent) => void);
     return this;
   }
 
@@ -549,15 +554,10 @@ export class AgentLoop implements HookTarget {
    * Pass the SAME handler reference you subscribed with.  Chainable.
    */
   off<T extends AgentEventType>(
-    type: T,
+    _type: T,
     handler: (event: LogEvent<T>) => void,
   ): this {
-    const set = this.typedListeners.get(type);
-    if (set) {
-      set.delete(handler as (event: LogEvent) => void);
-      if (set.size === 0) this.typedListeners.delete(type);
-    }
-    return this;
+    return this.offEvent(handler as (event: LogEvent) => void);
   }
 
   // --------------------------------------------------------------------------
@@ -595,9 +595,13 @@ export class AgentLoop implements HookTarget {
     let ours = false;
     let caught: Error | undefined;
     return new Promise<void>((resolve, reject) => {
+      // If stop() drops the message before its turn starts, fail fast
+      // instead of hanging forever.
+      this.pendingSends.set(id, (err) => { this.offEvent(handler); reject(err); });
       const handler = (event: LogEvent): void => {
         if (event.type === "turn_start" && event.message.id === id) {
           ours = true;
+          this.pendingSends.delete(id);
           return;
         }
         if (!ours) return;
@@ -621,7 +625,7 @@ export class AgentLoop implements HookTarget {
    * If the actor is not running (or running with no work) resolves immediately.
    */
   async awaitIdle(): Promise<void> {
-    if (!this.running || (this.inbox.length === 0 && this.currentAbort === null)) {
+    if (!this.running || (this.inbox.length === 0 && !this.turnPending)) {
       return;
     }
     return new Promise<void>((resolve) => {
@@ -686,6 +690,8 @@ export class AgentLoop implements HookTarget {
     }
     this.running = false;
     this.inbox.length = 0;
+    for (const [, reject] of this.pendingSends) reject(new AbortError());
+    this.pendingSends.clear();
     this.interrupt();
     this.wakeInbox();
     if (this.loopPromise) {
@@ -797,14 +803,14 @@ export class AgentLoop implements HookTarget {
     const msg: AgentMessage = typeof message === "string"
       ? { id, role: "user", content: message }
       : { ...message, id };
-    // Causal link, most explicit first: `options.cause`, then `message.cause`,
-    // then the event a hook is currently handling (ambient), else none.
-    const cause = toEventRef(options?.cause) ?? msg.cause ?? currentCause();
-    if (cause) msg.cause = cause;
+    const c = options?.cause ?? msg.cause;
+    if (c) msg.cause = { agent: c.agent, eventId: c.eventId, ...(c.log && { log: c.log }) };
     this.inbox.push(msg);
-    const queued = this.emit({ type: "message_queued", message: msg });
+    // Inbox events are not produced by the running turn (a user can type
+    // while the agent works) — they stay outside its causal chain.
+    const queued = this.emit({ type: "message_queued", message: msg }, undefined, false);
     this.queuedEventIds.set(id, queued.eventId);
-    this.emit({ type: "queue_changed", pending: this.inbox.length });
+    this.emit({ type: "queue_changed", pending: this.inbox.length }, undefined, false);
     this.wakeInbox();
     return id;
   }
@@ -814,30 +820,15 @@ export class AgentLoop implements HookTarget {
    * of the current turn so a turn reads as a causal chain; pairs
    * (request/response, start/done) pass their explicit parent.
    */
-  private emit<E extends AgentEvent>(payload: E, parent?: string): LogEvent {
+  private emit<E extends AgentEvent>(payload: E, parent?: string, inTurn = true): LogEvent {
+    const turn = inTurn ? this.currentTurn : null;
     const event = this.log.append(payload, {
       agent: this.id,
-      turn: this.currentTurn,
-      parent: parent ?? (this.currentTurn ? this.cursor : undefined),
+      turn,
+      parent: parent ?? (turn ? this.cursor : undefined),
     });
-    if (this.currentTurn) this.cursor = event.eventId;
+    if (turn) this.cursor = event.eventId;
     return event as LogEvent;
-  }
-
-  /** Deliver one of this agent's events to local listeners. */
-  private dispatch(event: LogEvent): void {
-    // Snapshot both listener lists so a handler that unsubscribes (or
-    // subscribes) mid-emit is safe.  Swallow any handler error — a broken
-    // subscriber must not kill the loop.
-    for (const listener of [...this.listeners]) {
-      try { listener(event); } catch { /* ignore */ }
-    }
-    const typed = this.typedListeners.get(event.type);
-    if (typed) {
-      for (const handler of [...typed]) {
-        try { handler(event); } catch { /* ignore */ }
-      }
-    }
   }
 
   private wakeInbox(): void {
@@ -847,19 +838,20 @@ export class AgentLoop implements HookTarget {
   }
 
   private takeFromInbox(): Promise<AgentMessage | null> {
-    if (this.inbox.length > 0) {
-      const msg = this.inbox.shift()!;
-      this.emit({ type: "queue_changed", pending: this.inbox.length });
-      return Promise.resolve(msg);
-    }
+    const take = (): AgentMessage | null => {
+      const msg = this.inbox.shift() ?? null;
+      if (msg) {
+        // Mark the turn in flight the moment the message leaves the inbox so
+        // `awaitIdle()` cannot slip through between dequeue and turn_start.
+        this.turnPending = true;
+        this.emit({ type: "queue_changed", pending: this.inbox.length }, undefined, false);
+      }
+      return msg;
+    };
+    if (this.inbox.length > 0) return Promise.resolve(take());
     if (!this.running) return Promise.resolve(null);
     return new Promise((resolve) => {
-      this.inboxWakers.push(() => {
-        if (!this.running) return resolve(null);
-        const msg = this.inbox.shift() ?? null;
-        if (msg) this.emit({ type: "queue_changed", pending: this.inbox.length });
-        resolve(msg);
-      });
+      this.inboxWakers.push(() => resolve(this.running ? take() : null));
     });
   }
 
@@ -942,6 +934,7 @@ export class AgentLoop implements HookTarget {
         this.emit({ type: "turn_end", status: this.turnStatus });
         this.currentTurn = null;
         this.cursor = undefined;
+        this.turnPending = false;
       }
 
       // A turn is only "done" once it is durable.

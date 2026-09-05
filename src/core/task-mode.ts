@@ -41,16 +41,19 @@ export interface TaskRunOptions {
   agentId?: string;
 }
 
-/** Wire-format for `--cause`: `<agent>@<eventId>[@<log>]`. */
+/** Wire format for `--cause`: the `EventRef` as JSON — no delimiter edge cases. */
 export function encodeCause(ref: EventRef): string {
-  return [ref.agent, ref.eventId, ref.log ?? ""].join("@");
+  return JSON.stringify({ agent: ref.agent, eventId: ref.eventId, ...(ref.log && { log: ref.log }) });
 }
 
 export function decodeCause(raw: string): EventRef | null {
-  const parts = raw.split("@");
-  if (parts.length < 2 || !parts[0] || !parts[1]) return null;
-  const log = parts.slice(2).join("@");
-  return { agent: parts[0]!, eventId: parts[1]!, ...(log && { log }) };
+  try {
+    const v = JSON.parse(raw) as Partial<EventRef>;
+    if (typeof v?.agent !== "string" || typeof v.eventId !== "string") return null;
+    return { agent: v.agent, eventId: v.eventId, ...(typeof v.log === "string" && v.log && { log: v.log }) };
+  } catch {
+    return null;
+  }
 }
 
 /** Build the argv for a headless child.  Exposed for tests. */

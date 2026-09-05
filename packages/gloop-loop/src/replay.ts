@@ -20,10 +20,10 @@ export type {
 export { isEphemeralEvent, serializeEvent, toErrorInfo } from "./events.js";
 
 export type { EventStore, EventLogOptions, AppendOptions, LogSubscriber } from "./log.js";
-export { EventLog, MemoryEventStore } from "./log.js";
+export { EventLog, MemoryEventStore, parseJsonlEvents } from "./log.js";
 
 export type { AgentState, TurnRecord } from "./state.js";
 export { initialState, reduce, projectState, messagesToRequeue } from "./state.js";
 
 export type { AgentGraph, TurnNode, MessageEdge, LinkedLog } from "./graph.js";
-export { projectGraph, graphToMermaid, linkedLogs } from "./graph.js";
+export { projectGraph, graphToMermaid, linkedLogs, mergeEvents } from "./graph.js";

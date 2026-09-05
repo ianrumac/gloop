@@ -12,50 +12,23 @@
  *     `AgentLoop`.  A hook can never break the loop: a throw or rejection is
  *     captured as a `hook_error` event.  Use them to *attach*.
  *
- * `bridgeAgents` is the canonical hook: when agent A emits an event that
- * matches, send a message to agent B with `cause` pointing back at A's
- * event, so the cross-agent edge is part of the graph.
+ * Causality across agents is one explicit edge: `send(message, { cause })`.
+ * `bridgeAgents` is the canonical hook built on it: when agent A emits a
+ * matching event, send a message to agent B whose `cause` points back at
+ * A's event, so the cross-agent edge is part of the graph.
  */
 
 import type { AgentEventType, AgentMessage, EventRef, LogEvent } from "./events.js";
 
-// ============================================================================
-// Ambient cause — "which event am I reacting to right now?"
-// ============================================================================
-//
-// While a hook handler runs, the event it was given is the ambient cause.
-// Any `agent.send(...)` made during that handler (to ANY agent) records it as
-// `message.cause`, so fan-out to several agents from one event is captured
-// without every hook having to thread the reference by hand.  Only the
-// synchronous part of a handler is covered — an `await` inside the handler
-// ends the ambient window; pass `cause` explicitly after that.
-
-let ambientCause: EventRef | undefined;
-
-/** The event currently being handled by a hook, if any. */
-export function currentCause(): EventRef | undefined {
-  return ambientCause;
-}
-
-/** Run `fn` with `ref` as the ambient cause for every `send` it makes. */
-export function withCause<T>(ref: EventRef | undefined, fn: () => T): T {
-  const previous = ambientCause;
-  ambientCause = ref;
-  try {
-    return fn();
-  } finally {
-    ambientCause = previous;
-  }
-}
-
 /** Options for `send`. */
 export interface SendOptions {
   /**
-   * The event this message is a reaction to.  Accepts a `LogEvent` (its
-   * `agent` / `eventId` are used) or a bare `EventRef`.  Recorded as
-   * `message.cause`, which is what links turns across agents in the graph.
+   * The event this message is a reaction to.  Any `LogEvent` qualifies (it
+   * carries `agent` and `eventId`); pass a bare `EventRef` with `log` to
+   * point into another log.  Recorded as `message.cause` — the edge every
+   * cross-agent relation in the graph is built from.
    */
-  cause?: EventRef | LogEvent;
+  cause?: EventRef;
 }
 
 /** Something that can be hooked — the subset of `AgentLoop` hooks need. */
@@ -63,13 +36,6 @@ export interface HookTarget {
   readonly id: string;
   attach<T extends AgentEventType>(hook: AgentHook<T>): () => void;
   send(message: AgentMessage | string, options?: SendOptions): unknown;
-}
-
-/** Normalise a `cause` option to an `EventRef` (keeping a ref's `log` locator). */
-export function toEventRef(cause: EventRef | LogEvent | undefined): EventRef | undefined {
-  if (!cause) return undefined;
-  const log = "seq" in cause ? undefined : cause.log;
-  return { agent: cause.agent, eventId: cause.eventId, ...(log && { log }) };
 }
 
 /**
@@ -139,11 +105,7 @@ export function bridgeAgents<T extends AgentEventType>(
     handle: (event) => {
       const built = map(event as LogEvent<T>, from);
       if (built === null) return;
-      const message: AgentMessage = typeof built === "string"
-        ? { role: "user", content: built }
-        : { ...built };
-      // Explicit, so the edge survives even if the handler was awaited.
-      to.send(message, { cause: event });
+      to.send(typeof built === "string" ? { role: "user", content: built } : built, { cause: event });
     },
   });
 }

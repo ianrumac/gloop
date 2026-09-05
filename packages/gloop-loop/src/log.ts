@@ -42,12 +42,33 @@ export class MemoryEventStore implements EventStore {
     this.events.push(...seed);
   }
   append(event: LogEvent): void {
-    // Keep what a real store would keep: plain data.
-    this.events.push(serializeEvent(event));
+    this.events.push(event);
   }
   load(): LogEvent[] {
     return [...this.events];
   }
+}
+
+/**
+ * Parse JSON-lines text into events.  Blank lines, corrupt lines (a crash
+ * mid-write) and objects that are not events are skipped.  This is THE
+ * definition of "a valid persisted event": `type`, `eventId` and `seq`.
+ */
+export function parseJsonlEvents(text: string): LogEvent[] {
+  const out: LogEvent[] = [];
+  for (const line of text.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    try {
+      const e = JSON.parse(t) as LogEvent;
+      if (e && typeof e === "object" && typeof e.type === "string" && typeof e.eventId === "string" && typeof e.seq === "number") {
+        out.push(e);
+      }
+    } catch {
+      /* partial trailing line */
+    }
+  }
+  return out;
 }
 
 // ============================================================================
@@ -90,7 +111,7 @@ export class EventLog {
   private readonly store?: EventStore;
   private readonly onStoreError: (error: unknown, event: LogEvent) => void;
   private readonly _events: LogEvent[] = [];
-  private readonly ids = new Set<string>();
+  private readonly byId = new Map<string, LogEvent>();
   private readonly subscribers = new Set<LogSubscriber>();
   private seq = 0;
   private writeChain: Promise<void> = Promise.resolve();
@@ -113,12 +134,13 @@ export class EventLog {
       this.loaded = true;
       return this.events();
     }
-    this.loaded = true;
+    // A failing load leaves the log unloaded so the caller can retry.
     const persisted = await this.store.load();
+    this.loaded = true;
     for (const event of persisted) {
       if (!event || typeof event.seq !== "number" || typeof event.eventId !== "string") continue;
-      if (this.ids.has(event.eventId)) continue;
-      this.ids.add(event.eventId);
+      if (this.byId.has(event.eventId)) continue;
+      this.byId.set(event.eventId, event);
       this._events.push(event);
       if (event.seq > this.seq) this.seq = event.seq;
     }
@@ -139,7 +161,19 @@ export class EventLog {
     };
     const event = { ...payload, ...envelope } as E & EventEnvelope;
     this._events.push(event as LogEvent);
-    this.ids.add(event.eventId);
+    this.byId.set(event.eventId, event as LogEvent);
+
+    // Queue the persistent write BEFORE notifying, so a subscriber that
+    // calls `flush()` (e.g. sendSync settling on turn_end) waits for this
+    // very event too.
+    if (this.store) {
+      // Stores receive plain data — `Error` instances are already flattened.
+      const store = this.store;
+      const plain = serializeEvent(event as LogEvent);
+      this.writeChain = this.writeChain
+        .then(() => store.append(plain))
+        .catch((err) => this.onStoreError(err, plain));
+    }
 
     // Notify.  Snapshot the set so subscribing / unsubscribing mid-emit is
     // safe, and never let a broken subscriber kill the loop.
@@ -149,13 +183,6 @@ export class EventLog {
       } catch {
         /* isolated */
       }
-    }
-
-    if (this.store) {
-      const store = this.store;
-      this.writeChain = this.writeChain
-        .then(() => store.append(event as LogEvent))
-        .catch((err) => this.onStoreError(err, event as LogEvent));
     }
     return event;
   }
@@ -183,9 +210,9 @@ export class EventLog {
     return this._events.filter((e) => e.agent === agent);
   }
 
-  /** Look an event up by `eventId`. */
+  /** Look an event up by `eventId`.  O(1). */
   get(eventId: string): LogEvent | undefined {
-    return this._events.find((e) => e.eventId === eventId);
+    return this.byId.get(eventId);
   }
 
   /**

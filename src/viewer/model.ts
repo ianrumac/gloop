@@ -3,28 +3,11 @@
  * `app.ts` renders; this module decides.  Unit-tested with `bun test`.
  */
 
-import type { AgentGraph, LogEvent, TurnNode } from "@hypen-space/gloop-loop/replay";
+import { mergeEvents, parseJsonlEvents, type AgentGraph, type LogEvent, type TurnNode } from "@hypen-space/gloop-loop/replay";
 
-/** Parse JSONL text into events, skipping blank and corrupt lines. */
-export function parseJsonl(text: string): LogEvent[] {
-  const out: LogEvent[] = [];
-  for (const line of text.split("\n")) {
-    const t = line.trim();
-    if (!t) continue;
-    try {
-      const e = JSON.parse(t) as LogEvent;
-      if (e && typeof e.type === "string" && typeof e.eventId === "string") out.push(e);
-    } catch { /* partial line */ }
-  }
-  return out;
-}
-
-/** Merge event lists by `eventId` and order them for display: by time, then seq. */
-export function mergeEvents(...lists: LogEvent[][]): LogEvent[] {
-  const byId = new Map<string, LogEvent>();
-  for (const list of lists) for (const e of list) byId.set(e.eventId, e);
-  return [...byId.values()].sort((a, b) => (a.ts - b.ts) || (a.seq - b.seq));
-}
+// Parsing and merging are the library's — one definition of a valid line,
+// one ordering — re-exported here so the app has a single import.
+export { mergeEvents, parseJsonlEvents as parseJsonl };
 
 // ---------------------------------------------------------------------------
 // Layout — layered DAG, longest-path layering, one column per layer
@@ -87,10 +70,22 @@ export function splitKey(key: string): [string, string] {
   return [key.slice(0, i), key.slice(i + 1)];
 }
 
-/** Events that belong to a turn, including the `message_queued` that created it. */
-export function turnEvents(events: LogEvent[], key: string): LogEvent[] {
+/**
+ * Events that belong to one turn attempt: its `message_queued`, then every
+ * event stamped with the turn between its start and end.  With `node`
+ * omitted (or a node without a seq range) all attempts are included.
+ */
+export function turnEvents(events: LogEvent[], key: string, node?: Pick<TurnNode, "queuedEventId" | "startSeq" | "endSeq">): LogEvent[] {
   const [agent, turn] = splitKey(key);
-  return events.filter((e) => e.agent === agent && (e.turn === turn || (e.type === "message_queued" && e.message.id === turn)));
+  const inRange = (e: LogEvent) =>
+    !node || node.startSeq === undefined
+      ? true
+      : e.seq >= node.startSeq && (node.endSeq === undefined || e.seq <= node.endSeq);
+  return events.filter((e) => {
+    if (e.agent !== agent) return false;
+    if (e.type === "message_queued") return node ? e.eventId === node.queuedEventId : e.message.id === turn;
+    return e.turn === turn && inRange(e);
+  });
 }
 
 /** One-line human summary of an event, for lists. */
@@ -100,6 +95,7 @@ export function summarize(e: LogEvent): string {
     case "turn_end": return e.status;
     case "user_message": return e.content;
     case "assistant_message": return e.content || (e.toolCalls ? `${e.toolCalls.length} tool call(s)` : "");
+    case "assistant_tool_calls": return `${e.toolCalls.length} tool call(s): ${e.toolCalls.map((c) => c.function.name).join(", ")}`;
     case "tool_message": return `${e.toolCallId}: ${e.content}`;
     case "llm_request": return `${e.model} · ${e.historyLength} msgs · ${e.toolCount} tools`;
     case "llm_response": return `${e.finishReason ?? "?"} · ${e.text || ""}${e.toolCalls.length ? ` [+${e.toolCalls.length} calls]` : ""}`;

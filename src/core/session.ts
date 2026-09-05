@@ -46,17 +46,48 @@ export function newSessionLogPath(now: Date = new Date(), label?: string): strin
   return join(SESSIONS_DIR(), `${stamp}${suffix}.jsonl`);
 }
 
-/** The most recently created session log, or null if none exist. */
+/** Does this session file belong to a spawned `--task` subagent? */
+export function isTaskSessionLog(name: string): boolean {
+  return /-task-[A-Za-z0-9_-]+\.jsonl$/.test(name);
+}
+
+/**
+ * The most recently created top-level session log, or null if none exist.
+ * Subagent logs (`…-task-<id>.jsonl`) are children of a session, not
+ * sessions of their own, so they are never picked.
+ */
 export function latestSessionLogPath(): string | null {
   let names: string[];
   try {
-    names = readdirSync(SESSIONS_DIR()).filter((n) => n.endsWith(".jsonl"));
+    names = readdirSync(SESSIONS_DIR()).filter((n) => n.endsWith(".jsonl") && !isTaskSessionLog(n));
   } catch {
     return null;
   }
   if (names.length === 0) return null;
   names.sort();
   return join(SESSIONS_DIR(), names[names.length - 1]!);
+}
+
+/**
+ * Decide which log a run appends to.  Priority: a reboot pointer (the
+ * relaunched process must continue its session), then an explicit request
+ * (`--resume [path]` / `--session <path>`), then a fresh file.
+ *
+ * Returns `null` when a resume was requested but nothing exists to resume.
+ */
+export function resolveSessionLog(input: {
+  reboot?: { log: string } | null;
+  /** `--resume` with no path → latest; a string → that path. */
+  resume?: { requested: boolean; path?: string };
+  /** `--session <path>` (subagents): use exactly this file. */
+  session?: string;
+  latest?: () => string | null;
+  fresh?: () => string;
+}): string | null {
+  if (input.reboot) return input.reboot.log;
+  if (input.session) return input.session;
+  if (input.resume?.requested) return input.resume.path ?? (input.latest ?? latestSessionLogPath)();
+  return (input.fresh ?? (() => newSessionLogPath()))();
 }
 
 /**
@@ -68,16 +99,8 @@ export function openSessionStore(path: string): JsonlEventStore {
   return createJsonlEventStore(path, { filter: (e) => !isEphemeralEvent(e) });
 }
 
-/**
- * Write the reboot pointer.  Pass `flush` (normally `agent.flush`) so the
- * log is fully on disk before the pointer that references it exists.
- */
-export async function saveRebootSession(
-  logPath: string,
-  reason: string,
-  flush?: () => Promise<void>,
-): Promise<void> {
-  if (flush) await flush();
+/** Write the reboot pointer.  Flush the agent's log first so the file it names is complete. */
+export async function saveRebootSession(logPath: string, reason: string): Promise<void> {
   const session: RebootSession = { reason, log: logPath, timestamp: new Date().toISOString() };
   await Bun.write(REBOOT_SESSION_PATH(), JSON.stringify(session, null, 2));
   debugLog("REBOOT", `Session saved: ${reason} → ${logPath}`);
@@ -127,7 +150,8 @@ export function wireRebootHandler(
     if (!(event.error instanceof RebootError)) return;
     const reason = event.error.reason;
     void (async () => {
-      await saveRebootSession(logPath, reason, () => agent.flush());
+      await agent.flush();
+      await saveRebootSession(logPath, reason);
       debugLog("REBOOT", `Restarting: ${reason}`);
       await onRestart(reason);
     })();

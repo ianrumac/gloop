@@ -320,18 +320,78 @@ describe("event graph", () => {
 });
 
 describe("durability", () => {
-  test("sendSync resolves only after the turn's events are in the store", async () => {
-    let persisted = 0;
+  test("sendSync resolves only after the turn's turn_end is in the store", async () => {
+    const persisted: string[] = [];
     const store = {
-      append: async () => { await flush(); persisted += 1; },
+      append: async (e: LogEvent) => { await flush(); persisted.push(e.type); },
       load: () => [],
     };
     const agent = new AgentLoop({ provider: new ScriptedProvider([{ text: "r" }]), model: "m", tools: [], store });
     await agent.sendSync("q");
-    const inMemory = agent.log.size;
-    // Everything up to and including turn_end has been written.
-    expect(persisted).toBeGreaterThanOrEqual(inMemory - 1);
+    expect(persisted).toContain("turn_end");
     await agent.stop();
-    expect(persisted).toBe(agent.log.size);
+    expect(persisted.length).toBe(agent.log.size);
+  });
+
+  test("stop() rejects a sendSync whose message never got a turn", async () => {
+    const agent = new AgentLoop({ provider: new ScriptedProvider([{ text: "0123456789ABCDEFGHIJ", delayMs: 5 }]), model: "m", tools: [] });
+    const first = agent.sendSync("one");
+    await agent.nextEvent("stream_chunk");
+    const second = agent.sendSync("never runs");
+    await agent.stop();
+    await expect(first).rejects.toThrow("Interrupted");
+    await expect(second).rejects.toThrow("Interrupted");
+  });
+});
+
+describe("replay equivalence — interceptors", () => {
+  test("an llmCall interceptor that rewrites the input is logged (history_replaced)", async () => {
+    const provider = new ScriptedProvider([{ text: "ok" }]);
+    const agent = new AgentLoop({
+      provider, model: "m", tools: [],
+      interceptors: [{ name: "rewrite", llmCall: (ctx, next) => next({ ...ctx, input: `REWRITTEN(${ctx.input})` }) }],
+    });
+    await agent.sendSync("original");
+    expect(provider.calls[0]!.messages.at(-1)!.content).toBe("REWRITTEN(original)");
+    expect(agent.convo.getHistory()[0]!.content).toBe("REWRITTEN(original)");
+    expectReplayMatches(agent);
+    const replaced = agent.log.events().find((e) => e.type === "history_replaced") as LogEvent<"history_replaced">;
+    expect(replaced.reason).toBe("interceptor_rewrite");
+    await agent.stop();
+  });
+});
+
+describe("resume — edge cases", () => {
+  test("a single re-queued message runs to completion with start() + awaitIdle()", async () => {
+    const store = new MemoryEventStore();
+    const a = new AgentLoop({ provider: new ScriptedProvider([{ text: "first" }]), model: "m", tools: [], store });
+    await a.sendSync("q");
+    await a.stop();
+    const all = store.load();
+    const truncated = new MemoryEventStore(all.slice(0, all.findIndex((e) => e.type === "llm_request") + 1));
+    const b = await AgentLoop.resume({ provider: new ScriptedProvider([{ text: "second" }]), model: "m", tools: [], store: truncated });
+    expect(b.pending()).toBe(1);
+    b.start();
+    await b.awaitIdle();
+    expect(b.convo.getHistory().map((m) => m.content)).toEqual(["q", "second"]);
+    expect(b.snapshot().turns.map((t) => t.status)).toEqual(["abandoned", "ok"]);
+    await b.stop();
+  });
+
+  test("resume refuses a log written by a different agent id", async () => {
+    const store = new MemoryEventStore();
+    const child = new AgentLoop({ id: "gloop/task-1", provider: new ScriptedProvider([{ text: "x" }]), model: "m", tools: [], store });
+    await child.sendSync("q");
+    await child.stop();
+    await expect(AgentLoop.resume({ id: "gloop", provider: new ScriptedProvider([]), model: "m", tools: [], store }))
+      .rejects.toThrow(/Cannot resume "gloop" from a log written by "gloop\/task-1"/);
+  });
+
+  test("resume of an empty store emits no restored event; hydrate after start() throws", async () => {
+    const a = await AgentLoop.resume({ provider: new ScriptedProvider([{ text: "x" }]), model: "m", tools: [], store: new MemoryEventStore() });
+    expect(a.log.events().map((e) => e.type)).toEqual(["tools_changed"]);
+    a.start();
+    expect(() => a.hydrate()).toThrow(/before start/);
+    await a.stop();
   });
 });

@@ -188,6 +188,10 @@ describe("subagent log linking", () => {
     const noLog = { agent: "gloop", eventId: "run1-42" };
     expect(decodeCause(encodeCause(noLog))).toEqual(noLog);
     expect(decodeCause("garbage")).toBeNull();
+    expect(decodeCause(JSON.stringify({ agent: "a" }))).toBeNull();
+    // Paths with "@" or ":" are no problem for a JSON wire format.
+    const odd = { agent: "gloop", eventId: "r-1", log: "/tmp/we@ird:path.jsonl" };
+    expect(decodeCause(encodeCause(odd))).toEqual(odd);
   });
 
   test("buildTaskArgv passes session, agent id and cause to the child", () => {

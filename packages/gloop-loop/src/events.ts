@@ -102,14 +102,17 @@ export type AgentEvent =
   /** A user message was appended to the conversation history. */
   | { type: "user_message"; content: string }
   /**
-   * An assistant message was appended to (or completed in) the history.
-   * When `toolCalls` is present and the previous history entry is an
-   * assistant message with the same `content` and no tool calls, the reducer
-   * merges them (that is how the interpreter records a streamed response
-   * whose tool calls are attached after the tools ran).  `partial` marks
-   * text captured from an interrupted stream.
+   * An assistant message was appended to the history.  `partial` marks text
+   * captured from an interrupted stream.
    */
   | { type: "assistant_message"; content: string; toolCalls?: JsonToolCall[]; partial?: boolean }
+  /**
+   * Tool calls were attached to the most recent assistant message.  The
+   * interpreter records the streamed text first and attaches the calls once
+   * the tools have run, so an abort in between never leaves unanswered
+   * tool calls in history.
+   */
+  | { type: "assistant_tool_calls"; toolCalls: JsonToolCall[] }
   /** A native `role: "tool"` response was appended to history. */
   | { type: "tool_message"; toolCallId: string; content: string }
   /** The whole history was replaced (context pruning, host restore, ...). */

@@ -8,7 +8,7 @@ import { AgentLoop } from "../src/agent.js";
 import { EventLog } from "../src/log.js";
 import { bridgeAgents } from "../src/hooks.js";
 import type { LogEvent } from "../src/events.js";
-import { ScriptedProvider, tc, completeTool, flush } from "./mock-provider.js";
+import { ScriptedProvider, tc, completeTool } from "./mock-provider.js";
 
 describe("attach", () => {
   test("hooks receive events; detach stops them; `types` filters", async () => {
@@ -54,10 +54,13 @@ describe("attach", () => {
       types: ["llm_response"],
       handle: async () => { throw new Error("async boom"); },
     });
+    const asyncFailure = agent.nextEvent((e) => e.type === "hook_error" && e.hook === "flaky-async");
     await agent.sendSync("go");
-    await flush();
+    await asyncFailure;
     const errors = agent.log.events().filter((e) => e.type === "hook_error") as LogEvent<"hook_error">[];
     expect(errors.map((e) => e.hook).sort()).toEqual(["flaky", "flaky-async"]);
+    // hook_error is not part of the turn's causal chain.
+    expect(errors.every((e) => e.turn === null)).toBe(true);
     expect(errors[0]!.error.message).toMatch(/boom/);
     expect(agent.snapshot().turns[0]!.status).toBe("ok");
     await agent.stop();
@@ -67,7 +70,6 @@ describe("attach", () => {
     const agent = new AgentLoop({ provider: new ScriptedProvider([{ text: "ok" }]), model: "m", tools: [] });
     agent.attach({ name: "bad", handle: () => { throw new Error("always"); } });
     await agent.sendSync("go");
-    await flush();
     const errors = agent.log.events().filter((e) => e.type === "hook_error") as LogEvent<"hook_error">[];
     expect(errors.every((e) => e.eventType !== "hook_error")).toBe(true);
     expect(errors.length).toBeLessThan(agent.log.size);

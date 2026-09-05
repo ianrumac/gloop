@@ -15,6 +15,11 @@
       "bun": "./src/replay.ts",
       "types": "./dist/replay.d.ts",
       "import": "./dist/replay.js"
+    },
+    "./testing": {
+      "bun": "./src/testing.ts",
+      "types": "./dist/testing.d.ts",
+      "import": "./dist/testing.js"
     }
   },
   "files": [

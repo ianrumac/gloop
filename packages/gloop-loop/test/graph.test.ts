@@ -6,7 +6,7 @@
 import { test, expect, describe } from "bun:test";
 import { AgentLoop } from "../src/agent.js";
 import { EventLog, MemoryEventStore } from "../src/log.js";
-import { bridgeAgents, withCause } from "../src/hooks.js";
+import { bridgeAgents } from "../src/hooks.js";
 import { projectGraph, graphToMermaid, linkedLogs } from "../src/graph.js";
 import { projectState } from "../src/state.js";
 import type { LogEvent } from "../src/events.js";
@@ -26,13 +26,12 @@ async function fanOutScenario(useBridge: boolean) {
     bridgeAgents(planner, coder, { on: "task_complete", map: (e) => `Build: ${e.summary}` });
     bridgeAgents(planner, writer, { on: "task_complete", map: (e) => `Document: ${e.summary}` });
   } else {
-    // A plain hook: one send links explicitly, the other relies on the
-    // ambient cause.  Both must produce the same edge.
+    // A plain hook: both sends name the event they react to.
     planner.attach({
       types: ["task_complete"],
       handle: (e) => {
         coder.send(`Build: ${e.summary}`, { cause: e });
-        writer.send(`Document: ${e.summary}`);
+        writer.send(`Document: ${e.summary}`, { cause: e });
       },
     });
   }
@@ -47,7 +46,7 @@ async function fanOutScenario(useBridge: boolean) {
 
 describe("fan-out: one event → two agents", () => {
   for (const useBridge of [true, false]) {
-    const how = useBridge ? "via bridgeAgents" : "via a plain hook (explicit + ambient cause)";
+    const how = useBridge ? "via bridgeAgents" : "via a plain hook with explicit cause";
 
     test(`${how}: both messages carry the same cause`, async () => {
       const { shared } = await fanOutScenario(useBridge);
@@ -138,20 +137,67 @@ describe("fan-out: one event → two agents", () => {
     expect(new Set(into.map((e) => e.to)).size).toBe(2); // two distinct collector turns
   });
 
-  test("cause precedence: send option > message.cause > ambient > none", async () => {
+  test("cause: the send option wins over message.cause; a LogEvent or an EventRef with log both work", async () => {
     const shared = new EventLog();
     const x = new AgentLoop({ id: "x", eventLog: shared, model: "m", tools: [], provider: new ScriptedProvider([]) });
-    withCause({ agent: "ext", eventId: "ambient" }, () => {
-      x.send("ambient only");
-      x.send({ role: "user", content: "on message", cause: { agent: "ext", eventId: "on-message" } });
-      x.send({ role: "user", content: "option wins", cause: { agent: "ext", eventId: "on-message" } }, { cause: { agent: "ext", eventId: "option" } });
-    });
+    x.send({ role: "user", content: "on message", cause: { agent: "ext", eventId: "on-message" } });
+    x.send({ role: "user", content: "option wins", cause: { agent: "ext", eventId: "on-message" } }, { cause: { agent: "ext", eventId: "option", log: "other.jsonl" } });
     const some = shared.events()[0]!;
     x.send("log event as cause", { cause: some });
     x.send("none");
     const q = shared.events().filter((e) => e.type === "message_queued") as LogEvent<"message_queued">[];
-    expect(q.map((e) => e.message.cause?.eventId)).toEqual(["ambient", "on-message", "option", some.eventId, undefined]);
+    expect(q.map((e) => e.message.cause)).toEqual([
+      { agent: "ext", eventId: "on-message" },
+      { agent: "ext", eventId: "option", log: "other.jsonl" },
+      { agent: some.agent, eventId: some.eventId },
+      undefined,
+    ]);
+    // A message sent while no turn runs is not inside any turn.
+    expect(q.every((e) => e.turn === null && e.parent === undefined)).toBe(true);
     await x.stop();
+  });
+
+  test("a message sent mid-turn is not stamped into the running turn's causal chain", async () => {
+    const agent = new AgentLoop({ model: "m", tools: [], provider: new ScriptedProvider([{ text: "0123456789ABCDEFGHIJ", delayMs: 5 }, { text: "two" }]) });
+    const first = agent.sendSync("one");
+    await agent.nextEvent("stream_chunk");
+    agent.send("two");
+    await first;
+    await agent.awaitIdle();
+    const queued = agent.log.events().filter((e) => e.type === "message_queued") as LogEvent<"message_queued">[];
+    expect(queued[1]!.message.content).toBe("two");
+    expect(queued[1]!.turn).toBeNull();
+    expect(queued[1]!.parent).toBeUndefined();
+    // …and the interrupted-in-between turn 1 chain is intact: every turn-1 event's parent is a turn-1 event or the queued message.
+    const turn1 = agent.log.events().filter((e) => e.turn === "msg_1");
+    for (const e of turn1) {
+      if (e.type === "turn_start") continue;
+      const p = agent.log.get(e.parent!);
+      expect(p && (p.turn === "msg_1")).toBe(true);
+    }
+    await agent.stop();
+  });
+
+  test("projectGraph keeps every attempt of a re-queued message after a restore", async () => {
+    const store = new MemoryEventStore();
+    const a = new AgentLoop({ model: "m", tools: [], store, provider: new ScriptedProvider([{ text: "first" }]) });
+    await a.sendSync("q");
+    await a.stop();
+    const all = store.load();
+    const cut = all.findIndex((e) => e.type === "llm_request");
+    const truncated = new MemoryEventStore(all.slice(0, cut + 1));
+    const b = await AgentLoop.resume({ model: "m", tools: [], store: truncated, provider: new ScriptedProvider([{ text: "second" }]) });
+    b.start();
+    await b.awaitIdle();
+    await b.stop();
+
+    const g = projectGraph(b.log.events());
+    expect(g.nodes.map((n) => [n.key, n.attempt, n.status])).toEqual([
+      ["agent:msg_1", 1, "abandoned"],
+      ["agent:msg_1#2", 2, "ok"],
+    ]);
+    expect(g.nodes[0]!.queuedEventId).not.toBe(g.nodes[1]!.queuedEventId);
+    expect(graphToMermaid(g)).toContain("agent · msg_1 #2 (ok)");
   });
 
   test("history_replaced / history_cleared never remove events from the log", async () => {

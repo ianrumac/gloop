@@ -149,20 +149,16 @@ function step(s: AgentState, e: LogEvent): AgentState {
       return { ...s, history: [...s.history, { role: "user", content: e.content }] };
 
     case "assistant_message": {
-      const last = s.history[s.history.length - 1];
       const msg: Message = e.toolCalls?.length
         ? { role: "assistant", content: e.content, toolCalls: e.toolCalls }
         : { role: "assistant", content: e.content };
-      if (
-        e.toolCalls?.length &&
-        last &&
-        last.role === "assistant" &&
-        last.content === e.content &&
-        !last.toolCalls
-      ) {
-        return { ...s, history: [...s.history.slice(0, -1), msg] };
-      }
       return { ...s, history: [...s.history, msg] };
+    }
+
+    case "assistant_tool_calls": {
+      const last = s.history[s.history.length - 1];
+      if (!last || last.role !== "assistant") return s;
+      return { ...s, history: [...s.history.slice(0, -1), { ...last, toolCalls: e.toolCalls }] };
     }
 
     case "tool_message":

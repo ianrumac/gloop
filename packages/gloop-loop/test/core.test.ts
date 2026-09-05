@@ -1036,3 +1036,29 @@ describe("loop guards", () => {
     expect(cancelled).toBe(true);
   });
 });
+
+
+describe("evalInvoke — spawn-classified calls", () => {
+  test("a spawn-classified call is executed through fx.spawn and its result is a tool result the model sees", async () => {
+    const { fx, events } = createRecordingFx({
+      spawnResult: { success: true, summary: "child says hi", exitCode: 0, stdout: "", stderr: "" },
+    });
+    const provider = new MockProvider([
+      { toolCalls: [{ id: "c1", type: "function", function: { name: "Bash", arguments: JSON.stringify({ command: "spawn:child task" }) } }] },
+      { text: "thanks" },
+    ]);
+    const registry = new ToolRegistry();
+    registry.register({ name: "Bash", description: "", arguments: [{ name: "command", description: "" }], execute: async () => "ran for real" });
+    const world = mkWorld(new AIConversation(provider, "m"), registry);
+    await run("go", world, fx, { classifySpawn: testClassifySpawn });
+
+    expect(events.filter((e) => e.type === "spawn").map((e) => (e as { task: string }).task)).toEqual(["child task"]);
+    expect(events.some((e) => e.type === "tool_start" && (e as { name: string }).name === "Bash")).toBe(true);
+    const h = world.convo.getHistory();
+    const toolMsg = h.find((m) => m.role === "tool");
+    expect(toolMsg?.toolCallId).toBe("c1");
+    expect(toolMsg?.content).toContain("child says hi");
+    // The next LLM call saw the subagent's result in history — no empty user turn.
+    expect(h.some((m) => m.role === "user" && m.content === "")).toBe(false);
+  });
+});

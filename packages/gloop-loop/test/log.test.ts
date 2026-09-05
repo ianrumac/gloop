@@ -7,7 +7,7 @@ import { test, expect, describe } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EventLog, MemoryEventStore, type EventStore } from "../src/log.js";
+import { EventLog, MemoryEventStore, parseJsonlEvents, type EventStore } from "../src/log.js";
 import { createJsonlEventStore } from "../src/defaults/jsonl-store.js";
 import { isEphemeralEvent, serializeEvent, toErrorInfo, type LogEvent } from "../src/events.js";
 
@@ -189,10 +189,24 @@ describe("JSONL store", () => {
       expect(events.map((e) => e.type)).toEqual(["user_message"]);
     }));
 
-  test("load on a missing file yields []", () =>
+  test("load on a missing file yields []; any other read error surfaces", () =>
     withDir(async (dir) => {
       expect(await createJsonlEventStore(join(dir, "nope.jsonl")).load()).toEqual([]);
+      await expect(createJsonlEventStore(dir).load()).rejects.toThrow();
+      // …and a failed EventLog.load() can be retried once the store works.
+      let fail = true;
+      const store: EventStore = { append() {}, load: () => { if (fail) throw new Error("io"); return []; } };
+      const log = new EventLog({ store });
+      await expect(log.load()).rejects.toThrow("io");
+      fail = false;
+      await expect(log.load()).resolves.toEqual([]);
     }));
+
+  test("parseJsonlEvents is the one definition of a valid persisted line", () => {
+    const good = { type: "idle", eventId: "r-1", seq: 1, ts: 1, run: "r", agent: "a", turn: null } as LogEvent;
+    const text = [JSON.stringify(good), "", "{oops", JSON.stringify({ type: "idle" }), JSON.stringify({ foo: 1 })].join("\n");
+    expect(parseJsonlEvents(text)).toEqual([good]);
+  });
 });
 
 describe("event helpers", () => {

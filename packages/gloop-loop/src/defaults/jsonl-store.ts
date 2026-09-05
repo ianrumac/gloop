@@ -17,8 +17,8 @@
 
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { type LogEvent, serializeEvent } from "../events.js";
-import type { EventStore } from "../log.js";
+import type { LogEvent } from "../events.js";
+import { parseJsonlEvents, type EventStore } from "../log.js";
 
 export interface JsonlEventStoreOptions {
   /** Return `false` to skip persisting an event.  Default: persist all. */
@@ -34,13 +34,12 @@ export function createJsonlEventStore(
   options: JsonlEventStoreOptions = {},
 ): JsonlEventStore {
   const filter = options.filter ?? (() => true);
-  let dirReady: Promise<void> | null = null;
+  let dirReady = false;
 
-  const ensureDir = (): Promise<void> => {
-    if (!dirReady) {
-      dirReady = mkdir(dirname(path), { recursive: true }).then(() => undefined);
-    }
-    return dirReady;
+  const ensureDir = async (): Promise<void> => {
+    if (dirReady) return;
+    await mkdir(dirname(path), { recursive: true });
+    dirReady = true;
   };
 
   return {
@@ -48,27 +47,18 @@ export function createJsonlEventStore(
     async append(event) {
       if (!filter(event)) return;
       await ensureDir();
-      await appendFile(path, JSON.stringify(serializeEvent(event)) + "\n", "utf-8");
+      await appendFile(path, JSON.stringify(event) + "\n", "utf-8");
     },
     async load() {
-      let text: string;
       try {
-        text = await readFile(path, "utf-8");
-      } catch {
-        return [];
+        return parseJsonlEvents(await readFile(path, "utf-8"));
+      } catch (err) {
+        // A missing file is an empty log; anything else (permissions, a
+        // directory, I/O) must surface — silently starting fresh would
+        // shadow the real session.
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+        throw err;
       }
-      const out: LogEvent[] = [];
-      for (const line of text.split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          const parsed = JSON.parse(trimmed) as LogEvent;
-          if (parsed && typeof parsed === "object" && typeof parsed.type === "string") out.push(parsed);
-        } catch {
-          // Partial trailing line from an interrupted write — skip.
-        }
-      }
-      return out;
     },
   };
 }

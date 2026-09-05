@@ -12,7 +12,9 @@ All notable changes to `gloop` are documented here. Format follows [Keep a Chang
 
 ### Changed
 - Reboot (`Reboot` tool → exit 75 → relaunch) no longer snapshots the conversation into `reboot_session.json`; it flushes the session log and writes a pointer `{ reason, log }` to it. The relaunched process resumes from the same log, so nothing that happened before the reboot is lost — including tool calls, confirmations and memory ops. Pre-0.3.0 pointer files are ignored.
-- `wireRebootHandler(agent, logPath, onRestart)` and `saveRebootSession(logPath, reason, flush?)` take the log path instead of a conversation.
+- `wireRebootHandler(agent, logPath, onRestart)` and `saveRebootSession(logPath, reason)` take the log path instead of a conversation.
+- `OPENROUTER_BASE_URL` points gloop at any OpenAI-compatible endpoint (`OpenRouterProvider` now honours the documented `baseUrl` option). Used to run the CLI end to end against a local mock.
+- `gloop --resume` never picks a spawned subagent's log (`…-task-<id>.jsonl`) as "the latest session". Subagent `--cause` is passed as JSON. Headless argument parsing lives in `src/core/cli-args.ts` (tested).
 - `.gloop/sessions/` and `.gloop/reboot_session.json` are git-ignored.
 
 ## [0.2.0]
