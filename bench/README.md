@@ -21,7 +21,10 @@ bench/
       run-gloop.sh            run-time: start gloop headless, watchdog, stop recording
       usage-emitter.py        ClawBench's stock usage emitter
       harness/
-        lib/browser.ts        shared Playwright-over-CDP session (+ page snapshot)
+        daemon/server.ts      Node HTTP daemon owning the Playwright-over-CDP session
+        daemon/actions.ts     the browser actions (navigate, snapshot, click, ...)
+        lib/browser.ts        shared CDP session + page snapshot (used by the daemon)
+        lib/client.ts         Bun-side client used by the tools
         tools/Browser*.ts     twelve gloop tools, loaded from .gloop/tools by gloop's Reload
         memory.md             harness notes seeded into gloop's memory (system prompt)
   harnessbench/               HarnessBench `spec.py` + Dockerfile (docs/adding-a-harness.md layout)
@@ -31,10 +34,13 @@ bench/
 
 gloop has no browser support of its own, so the harness gives it some the
 gloop way: custom tools dropped into `.gloop/tools/`, which gloop's `Reload`
-picks up before the first turn. They attach to the container's Chrome over
-CDP with `playwright-core`, so the ClawBench recorder (actions, screenshots,
-request log, interception, MP4) sees every action exactly as it does for the
-other harnesses.
+picks up before the first turn. The tools are thin clients of a small Node
+browser daemon (`harness/daemon/`) that holds a `playwright-core` session
+attached to the container's Chrome over CDP (Playwright's WebSocket client
+does not connect from inside Bun, and the daemon also lets `gloop --task`
+sub-agents share one browser). The ClawBench recorder (actions, screenshots,
+request log, interception, MP4) therefore sees every action exactly as it
+does for the other harnesses.
 
 | Tool | What it does |
 |------|--------------|
@@ -119,7 +125,7 @@ bench/install.sh --python "$PY" --harnessbench ./HarnessBench
 ## Developing the harness
 
 * `harness/` is a small Bun package: `cd bench/clawbench/gloop/harness && bun install && bun run typecheck`.
-  Tools import the shared lib by its in-container path `/opt/gloop-harness/lib/browser.ts`;
+  Tools import the client by its in-container path `/opt/gloop-harness/lib/client.ts`;
   symlink the directory there to typecheck locally (`ln -s "$PWD" /opt/gloop-harness`).
 * To benchmark a local branch, push it and pass `--ref <branch-or-sha>` to `install.sh`
   (ClawBench builds without `--build-arg`, so the ref is baked into the Dockerfile default).

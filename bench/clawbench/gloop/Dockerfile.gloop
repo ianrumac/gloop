@@ -9,6 +9,7 @@
 # without --build-arg, so `bench/install.sh --ref <ref>` rewrites the
 # default below when you want to benchmark a specific revision.
 FROM oven/bun:1.3.11 AS bun-runtime
+FROM node:24-slim AS node-runtime
 
 FROM clawbench-base
 
@@ -25,8 +26,12 @@ RUN pip install --no-cache-dir 'litellm[proxy]==1.83.9'
 COPY harnesses/gloop/install-gloop.sh /install-gloop.sh
 RUN chmod +x /install-gloop.sh && GLOOP_REPO="$GLOOP_REPO" GLOOP_REF="$GLOOP_REF" /install-gloop.sh
 
-# Browser tools + shared CDP session module. Tools import the lib by this
-# absolute path, so the location is part of the contract.
+# Node runs the browser daemon that owns the Playwright-over-CDP session
+# (Playwright's bundled WebSocket client does not connect under Bun).
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+
+# Browser daemon + tools. Tools import the client by this absolute path,
+# so the location is part of the contract.
 COPY harnesses/gloop/harness /opt/gloop-harness
 RUN cd /opt/gloop-harness && bun install --production && rm -rf /root/.bun/install/cache
 

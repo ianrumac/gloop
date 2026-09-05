@@ -8,7 +8,7 @@
     "strict": true,
     "skipLibCheck": true,
     "lib": ["ESNext", "DOM", "DOM.Iterable"],
-    "types": ["bun-types"]
+    "types": ["bun-types", "node"]
   },
-  "include": ["lib/**/*.ts", "tools/**/*.ts"]
+  "include": ["lib/**/*.ts", "tools/**/*.ts", "daemon/**/*.ts"]
 }

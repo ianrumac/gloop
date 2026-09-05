@@ -1,5 +1,5 @@
 import type { ToolDefinition } from "@hypen-space/gloop-loop";
-import { getPage, snapshot } from "/opt/gloop-harness/lib/browser.ts";
+import { callDaemon } from "/opt/gloop-harness/lib/client.ts";
 
 const BrowserSnapshot: ToolDefinition = {
   name: "BrowserSnapshot",
@@ -8,11 +8,7 @@ const BrowserSnapshot: ToolDefinition = {
   arguments: [
     { name: "maxItems", description: "Optional cap on listed elements (default 250)" },
   ],
-  execute: async (args) => {
-    const page = await getPage();
-    const max = Number.parseInt(args.maxItems ?? "", 10);
-    return snapshot(page, Number.isFinite(max) && max > 0 ? max : 250);
-  },
+  execute: (args) => callDaemon("BrowserSnapshot", args),
 };
 
 export default BrowserSnapshot;

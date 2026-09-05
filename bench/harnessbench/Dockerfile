@@ -5,6 +5,7 @@
 # `bench/install.sh --harnessbench <HarnessBench checkout>` from
 # bench/clawbench/gloop/ (single source of truth).
 FROM oven/bun:1.3.11 AS bun-runtime
+FROM node:24-slim AS node-runtime
 
 FROM ghcr.io/reacher-z/clawbench-base:latest
 
@@ -18,6 +19,7 @@ RUN pip install --no-cache-dir 'litellm[proxy]==1.83.9'
 COPY setup.sh /opt/harness/setup.sh
 RUN chmod +x /opt/harness/setup.sh && GLOOP_REPO="$GLOOP_REPO" GLOOP_REF="$GLOOP_REF" /opt/harness/setup.sh
 
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
 COPY harness /opt/gloop-harness
 RUN cd /opt/gloop-harness && bun install --production && rm -rf /root/.bun/install/cache
 

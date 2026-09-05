@@ -59,6 +59,23 @@ for i in $(seq 1 30); do
   sleep 1
 done
 
+# Browser daemon: owns the Playwright-over-CDP session for the Browser* tools.
+echo "Starting browser daemon..."
+node "$HARNESS_HOME/daemon/server.ts" > /data/browser-daemon.log 2>&1 &
+DAEMON_PID=$!
+for i in $(seq 1 30); do
+  if curl -sf http://127.0.0.1:7979/health > /dev/null 2>&1; then
+    echo "Browser daemon ready"
+    break
+  fi
+  if [ "$i" -eq 30 ]; then
+    echo "Browser daemon not ready after 30s — check /data/browser-daemon.log"
+    echo "browser_daemon_failed" > /data/.stop-reason
+    exit 1
+  fi
+  sleep 1
+done
+
 # Restrict PATH to safe read-only commands — mirrors the other CLI harnesses
 # so gloop's Bash tool cannot bypass the browser with curl/python. bun stays
 # on PATH because gloop spawns `bun` for `gloop --task` sub-agents.
@@ -131,17 +148,20 @@ fi
 
 echo "$STOP_REASON" > /data/.stop-reason
 
-# Kill gloop (and any sub-agents), the usage watcher and the proxy.
+# Kill gloop (and any sub-agents), the usage watcher, the daemon and the proxy.
 kill $AGENT_PID 2>/dev/null || true
 kill $USAGE_PID 2>/dev/null || true
+kill $DAEMON_PID 2>/dev/null || true
+pkill -f "daemon/server.ts" 2>/dev/null || true
 [ -n "$PROXY_PID" ] && kill $PROXY_PID 2>/dev/null || true
 pkill -f "src/core/headless.ts" 2>/dev/null || true
 pkill -f "litellm" 2>/dev/null || true
 sleep 2
 python3 /usage-emitter.py --harness gloop --input /data/agent-messages.jsonl --output /data/usage.jsonl || true
 
-# Keep the agent transcript for debugging; it is small.
+# Keep the agent transcript and daemon log for debugging; they are small.
 [ -f /data/agent.log ] && cp /data/agent.log /data/gloop-stdout.txt
+[ -f /data/browser-daemon.log ] && cp /data/browser-daemon.log /data/gloop-browser-daemon.txt
 
 curl -sf -X POST http://localhost:7878/api/stop || true
 

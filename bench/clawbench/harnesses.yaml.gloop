@@ -9,6 +9,9 @@
       - gloop/harness/package.json
       - gloop/harness/memory.md
       - gloop/harness/lib/browser.ts
+      - gloop/harness/lib/client.ts
+      - gloop/harness/daemon/actions.ts
+      - gloop/harness/daemon/server.ts
       - gloop/harness/tools/BrowserClick.ts
       - gloop/harness/tools/BrowserExecuteJs.ts
       - gloop/harness/tools/BrowserGetText.ts

@@ -9,6 +9,7 @@
   "devDependencies": {
     "@hypen-space/gloop-loop": "^0.2.0",
     "@types/bun": "latest",
+    "@types/node": "^24",
     "typescript": "^5"
   },
   "scripts": {
