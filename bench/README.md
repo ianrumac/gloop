@@ -133,6 +133,18 @@ bench/install.sh --python "$PY" --harnessbench ./HarnessBench
   OpenAI-compatible server as `BASE_URL` (see `docker_run` in clawbench's
   `runner/run_support/docker.py` for the env it expects).
 
+## Validation status
+
+Verified on the branch that introduced this directory: `clawbench-base` and
+`clawbench-gloop` build; `bench/install.sh` registers the harness with
+`clawbench-eval` 0.10.0 (`clawbench-run --harness gloop`) and with a
+HarnessBench checkout (`harness-bench harnesses` / `matrix`, its test suite
+green); all twelve tools work through gloop's own `Reload` loader against the
+container's Chrome; and a full container run with a scripted
+OpenAI-compatible model (LiteLLM route) produced the complete recording bundle
+with the interceptor matching the target request. A real leaderboard run
+still needs an OpenRouter (or other) API key in `models/models.yaml`.
+
 ## Known gaps
 
 * Token usage: gloop-loop does not surface token counts from streamed
