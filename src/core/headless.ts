@@ -25,9 +25,11 @@ import { AgentLoop, type AgentEvent } from "./core.ts";
 import { appendFileSync } from "fs";
 import {
   appendTaskPromptSuffix,
+  decodeCause,
   parseGloopTaskBashCommand,
   runTaskSubagent,
 } from "./task-mode.ts";
+import type { EventRef } from "@hypen-space/gloop-loop";
 import { installTool } from "../../bin/install-tool.ts";
 import { DEFAULT_GLOOP_MODEL } from "./default-model.ts";
 
@@ -50,6 +52,9 @@ let debug = false;
 let providerName: string | undefined;
 let clone = false;
 let instruction = "";
+let sessionArg: string | undefined;
+let agentId = "gloop";
+let cause: EventRef | undefined;
 
 for (let i = 0; i < args.length; i++) {
   const arg = args[i]!;
@@ -59,6 +64,12 @@ for (let i = 0; i < args.length; i++) {
     outputPath = args[++i]!;
   } else if (arg === "--provider" && i + 1 < args.length) {
     providerName = args[++i]!;
+  } else if (arg === "--session" && i + 1 < args.length) {
+    sessionArg = args[++i]!;
+  } else if (arg === "--agent-id" && i + 1 < args.length) {
+    agentId = args[++i]!;
+  } else if (arg === "--cause" && i + 1 < args.length) {
+    cause = decodeCause(args[++i]!) ?? undefined;
   } else if (arg === "--clone") {
     clone = true;
   } else if (arg === "--debug") {
@@ -97,8 +108,9 @@ let systemPrompt = await buildSystemPrompt({ clone });
 debugLog("SYSTEM", systemPrompt);
 
 const rebootSession = await loadRebootSession();
-const sessionLogPath = rebootSession?.log ?? newSessionLogPath();
+const sessionLogPath = rebootSession?.log ?? sessionArg ?? newSessionLogPath();
 debugLog("SESSION", sessionLogPath);
+if (cause) debugLog("CAUSE", `${cause.agent} ${cause.eventId} ${cause.log ?? ""}`);
 
 // ============================================================================
 // BUILD THE ACTOR
@@ -113,7 +125,7 @@ const agent: AgentLoop = await AgentLoop.resume({
   model,
   system: systemPrompt,
   skills,
-  id: "gloop",
+  id: agentId,
   store: openSessionStore(sessionLogPath),
   // Start empty; we register builtins into the actor's registry below so
   // Reload/installTool see the same registry the loop uses.
@@ -151,7 +163,8 @@ const agent: AgentLoop = await AgentLoop.resume({
 
   installTool: (source) => installTool(source, agent.registry),
 
-  spawn: (task) => runTaskSubagent({ task, model }, { cwd: process.cwd() }),
+  spawn: (task, call) =>
+    runTaskSubagent({ task, model }, { cwd: process.cwd(), cause: call.cause, parentLog: sessionLogPath }),
 });
 
 // Register builtins into the actor's registry.
@@ -271,7 +284,8 @@ logEvent({ type: "start", model, instruction });
 // past that point in the reboot case).  Regular errors are logged by the
 // event sink, so we just swallow the sendSync rejection here.
 try {
-  await agent.sendSync(instruction);
+  // `cause` links this run's first turn to the parent's spawn_start event.
+  await agent.sendSync(instruction, cause ? { cause } : undefined);
 } catch {
   // Event sink already logged the error.
 }

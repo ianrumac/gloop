@@ -35,6 +35,12 @@ export interface EventRef {
   agent: string;
   /** The event's `eventId`. */
   eventId: string;
+  /**
+   * Locator of the log that holds the event when it is NOT the same log
+   * (a spawned subprocess pointing back at its parent's session file).
+   * Host-defined string — for the JSONL store it is the file path.
+   */
+  log?: string;
 }
 
 export interface AgentMessage {
@@ -154,8 +160,12 @@ export type AgentEvent =
   // ---- Sub-agents ----------------------------------------------------------
   /** A subagent was spawned for `task`. */
   | { type: "spawn_start"; task: string }
-  /** The subagent finished. */
-  | { type: "spawn_done"; ok: boolean; exitCode: number; summary: string }
+  /**
+   * The subagent finished.  `child` identifies the child's own agent id and
+   * event log when the spawn handler reports them, so the child's events
+   * can be loaded and joined to this log (`linkedLogs`, `projectGraph`).
+   */
+  | { type: "spawn_done"; ok: boolean; exitCode: number; summary: string; child?: { agent: string; log?: string } }
 
   // ---- Outcomes ------------------------------------------------------------
   /** The agent called CompleteTask / Done. */
@@ -212,6 +222,15 @@ export interface EventEnvelope {
 /** A logged event: payload + envelope. */
 export type LogEvent<T extends AgentEventType = AgentEventType> =
   Extract<AgentEvent, { type: T }> & EventEnvelope;
+
+// The envelope is spread over the payload on append, so a payload field
+// named like an envelope field would be silently overwritten.  Fail the
+// build instead: every key of every payload must be disjoint from the
+// envelope's keys.
+type DistributedKeys<T> = T extends unknown ? keyof T : never;
+type EnvelopeClash = DistributedKeys<AgentEvent> & keyof EventEnvelope;
+const _noEnvelopeClash: [EnvelopeClash] extends [never] ? true : never = true;
+void _noEnvelopeClash;
 
 export type AgentEventListener = (event: LogEvent) => void;
 

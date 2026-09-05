@@ -36,10 +36,14 @@ export interface RebootSession {
   timestamp?: string;
 }
 
-/** A fresh session log path: `.gloop/sessions/<ISO timestamp>.jsonl`. */
-export function newSessionLogPath(now: Date = new Date()): string {
+/**
+ * A fresh session log path: `.gloop/sessions/<ISO timestamp>[-label].jsonl`.
+ * Spawned task subagents use a label so their logs sit next to the parent's.
+ */
+export function newSessionLogPath(now: Date = new Date(), label?: string): string {
   const stamp = now.toISOString().replace(/[:.]/g, "-");
-  return join(SESSIONS_DIR(), `${stamp}.jsonl`);
+  const suffix = label ? `-${label.replace(/[^A-Za-z0-9_-]/g, "_")}` : "";
+  return join(SESSIONS_DIR(), `${stamp}${suffix}.jsonl`);
 }
 
 /** The most recently created session log, or null if none exist. */

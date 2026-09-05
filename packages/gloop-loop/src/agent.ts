@@ -52,6 +52,7 @@ import {
   type LoopConfig,
   type World,
   type SpawnResult,
+  type SpawnCall,
   type CoreEvent,
 } from "./core/core.js";
 import { manageContextFork } from "./defaults/context-manager.js";
@@ -65,6 +66,7 @@ import {
   type LogEvent,
   type AgentEventListener,
   type TurnStatus,
+  type EventEnvelope,
   toErrorInfo,
 } from "./events.js";
 import { EventLog, type EventStore } from "./log.js";
@@ -215,8 +217,13 @@ export interface AgentLoopOptions {
   installTool?: (source: string) => Promise<string>;
   /** Render a human-readable tool list.  Default: registry names. */
   listTools?: () => string;
-  /** Spawn a subagent to handle a sub-task.  Default: "not configured" stub. */
-  spawn?: (task: string) => Promise<SpawnResult>;
+  /**
+   * Spawn a subagent to handle a sub-task.  Default: "not configured" stub.
+   * `call.cause` references this agent's `spawn_start` event — hand it to the
+   * child so its log links back; return `agent` / `log` in the result so
+   * this log links forward.
+   */
+  spawn?: (task: string, call: SpawnCall) => Promise<SpawnResult>;
 
   /**
    * Classify a turn error as **fatal**.
@@ -953,19 +960,18 @@ export class AgentLoop implements HookTarget {
   private buildEffects(): Effects {
     const opts = this.options;
 
-    const record = (event: CoreEvent): void => {
+    const record = (event: CoreEvent): CoreEvent & EventEnvelope => {
       switch (event.type) {
         case "llm_request": {
           const e = this.emit(event);
           this.lastLlmRequestId = e.eventId;
-          return;
+          return e as CoreEvent & EventEnvelope;
         }
         case "llm_response":
         case "llm_error":
-          this.emit(event, this.lastLlmRequestId);
-          return;
+          return this.emit(event, this.lastLlmRequestId) as CoreEvent & EventEnvelope;
         default:
-          this.emit(event);
+          return this.emit(event) as CoreEvent & EventEnvelope;
       }
     };
 

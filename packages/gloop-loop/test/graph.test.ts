@@ -7,7 +7,7 @@ import { test, expect, describe } from "bun:test";
 import { AgentLoop } from "../src/agent.js";
 import { EventLog, MemoryEventStore } from "../src/log.js";
 import { bridgeAgents, withCause } from "../src/hooks.js";
-import { projectGraph, graphToMermaid } from "../src/graph.js";
+import { projectGraph, graphToMermaid, linkedLogs } from "../src/graph.js";
 import { projectState } from "../src/state.js";
 import type { LogEvent } from "../src/events.js";
 import { ScriptedProvider, tc, completeTool } from "./mock-provider.js";
@@ -169,5 +169,93 @@ describe("fan-out: one event → two agents", () => {
     expect(types).toContain("history_replaced");
     expect(agent.snapshot().history).toEqual([{ role: "user", content: "fresh" }]);
     await agent.stop();
+  });
+});
+
+
+describe("spawned subprocess agents (separate logs)", () => {
+  /**
+   * Simulates `gloop --task`: the parent's spawn handler receives the
+   * spawn_start event as `call.cause`, starts a child with ITS OWN log, the
+   * child records that cause on its first message, and the handler returns
+   * the child's agent id + log locator.
+   */
+  async function spawnScenario() {
+    const parentStore = new MemoryEventStore();
+    const childStore = new MemoryEventStore();
+    let childLog: EventLog | undefined;
+
+    const parent = new AgentLoop({
+      id: "gloop", model: "m", store: parentStore,
+      tools: [{ name: "Bash", description: "", arguments: [{ name: "command", description: "" }], execute: async () => "" }, completeTool],
+      provider: new ScriptedProvider([
+        { toolCalls: [tc("c1", "Bash", { command: "spawn:write the docs" })] },
+        { text: "child finished, wrapping up" },
+      ]),
+      classifySpawn: (call) => (call.name === "Bash" && call.args.command?.startsWith("spawn:") ? call.args.command.slice(6) : null),
+      spawn: async (task, call) => {
+        // "Separate process": a fresh log with its own store and run id.
+        childLog = new EventLog({ store: childStore });
+        const child = new AgentLoop({
+          id: "gloop/task-1", eventLog: childLog, model: "m", tools: [completeTool],
+          provider: new ScriptedProvider([{ toolCalls: [tc("k1", "CompleteTask", { summary: "docs written" })] }]),
+        });
+        await child.sendSync(task, { cause: { ...call.cause!, log: "parent.jsonl" } });
+        await child.stop();
+        return { success: true, summary: "docs written", exitCode: 0, stdout: "", stderr: "", agent: "gloop/task-1", log: "child.jsonl" };
+      },
+    });
+    await parent.sendSync("get the docs written");
+    await parent.stop();
+    return { parent, parentStore, childStore, childLog: childLog! };
+  }
+
+  test("spawn handler receives the spawn_start event as cause; spawn_done records the child's log", async () => {
+    const { parent } = await spawnScenario();
+    const start = parent.log.events().find((e) => e.type === "spawn_start")!;
+    const done = parent.log.events().find((e) => e.type === "spawn_done") as LogEvent<"spawn_done">;
+    expect(done.parent).toBeDefined();
+    expect(done.agent).toBe("gloop");                       // envelope: who logged it
+    expect(done.child).toEqual({ agent: "gloop/task-1", log: "child.jsonl" });
+    expect(done.summary).toBe("docs written");
+    expect(start.type).toBe("spawn_start");
+  });
+
+  test("the child's log points back at the parent's spawn_start, with the parent log locator", async () => {
+    const { parent, childLog } = await spawnScenario();
+    const start = parent.log.events().find((e) => e.type === "spawn_start")!;
+    const first = childLog.events().find((e) => e.type === "message_queued") as LogEvent<"message_queued">;
+    expect(first.message.cause).toEqual({ agent: "gloop", eventId: start.eventId, log: "parent.jsonl" });
+  });
+
+  test("linkedLogs finds the child from the parent and the parent from the child", async () => {
+    const { parent, childLog } = await spawnScenario();
+    expect(linkedLogs(parent.log.events())).toEqual([
+      expect.objectContaining({ direction: "child", agent: "gloop/task-1", log: "child.jsonl" }),
+    ]);
+    expect(linkedLogs(childLog.events())).toEqual([
+      expect.objectContaining({ direction: "parent", agent: "gloop", log: "parent.jsonl" }),
+    ]);
+  });
+
+  test("concatenating both logs yields one graph: parent turn → child turn", async () => {
+    const { parentStore, childStore } = await spawnScenario();
+    // Only what the stores hold — exactly what a later process could read back.
+    const combined = [...parentStore.load(), ...childStore.load()];
+    const g = projectGraph(combined);
+    expect(g.agents.sort()).toEqual(["gloop", "gloop/task-1"]);
+    expect(g.roots).toEqual(["gloop:msg_1"]);
+    expect(g.edges).toEqual([
+      expect.objectContaining({ from: "gloop:msg_1", to: "gloop/task-1:msg_1", causeType: "spawn_start" }),
+    ]);
+    expect(g.nodes.find((n) => n.agent === "gloop/task-1")!.summary).toBe("docs written");
+
+    // And ancestry walks across the process boundary once the logs are joined.
+    const joined = new EventLog({ store: new MemoryEventStore(combined) });
+    await joined.load();
+    const childComplete = joined.events().find((e) => e.agent === "gloop/task-1" && e.type === "task_complete")!;
+    const chain = joined.ancestors(childComplete.eventId);
+    expect(chain[chain.length - 1]!.type).toBe("message_queued");
+    expect((chain[chain.length - 1] as LogEvent<"message_queued">).message.content).toBe("get the docs written");
   });
 });

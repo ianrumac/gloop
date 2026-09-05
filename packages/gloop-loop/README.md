@@ -289,6 +289,8 @@ agent.log.descendants(eventId)   // everything that (transitively) followed from
 
 Within a turn each event's `parent` is the previous event (a causal chain); pairs point at each other explicitly (`tool_done → tool_start`, `llm_response → llm_request`, `confirm_response → confirm_request`), and `turn_start → message_queued`. Across agents, a message carries `cause: { agent, eventId }`: `ancestors` and `children` follow it, so the graph is not one chain per agent but one graph per log. Fan-out — one event sending messages to two agents — is simply two `message_queued` children of that event.
 
+**Spawned subprocesses (separate logs):** a spawn handler receives the `spawn_start` event as `call.cause`. Hand it to the child (the gloop CLI passes `--cause <agent>@<eventId>@<parentLog>` to `gloop --task`), have the child record it on its first message, and return the child's `agent` and `log` locator in the `SpawnResult` so `spawn_done.child` carries them. `linkedLogs(events)` lists the logs a log points at in either direction; concatenate their events and `projectGraph` / `ancestors` cross the process boundary as if it were one log.
+
 **Who talked to whom:**
 
 ```ts
@@ -546,7 +548,7 @@ Discriminated union on `.type`. Every delivered event also carries the envelope 
 | `system_refreshed` | — | System prompt was updated |
 | `confirm_response` | `{ id, ok }` | A confirmation was answered |
 | `ask_response` | `{ id, answer }` | A question was answered |
-| `spawn_start` / `spawn_done` | `{ task }` / `{ ok, exitCode, summary }` | Subagent lifecycle |
+| `spawn_start` / `spawn_done` | `{ task }` / `{ ok, exitCode, summary, child? }` | Subagent lifecycle; `child` = `{ agent, log }` of the child's own log |
 | `hook_error` | `{ hook, eventType, error }` | An attached hook threw |
 | `restored` | `{ fromSeq, turns, requeued, history, system? }` | State rebuilt from the log |
 | `task_complete` | `{ summary }` | `CompleteTask` was called |
@@ -573,7 +575,7 @@ Discriminated union on `.type`. Every delivered event also carries the envelope 
 | `refreshSystem` | no-op | Rebuild the system prompt on request |
 | `installTool` | not available stub | Runtime tool install |
 | `listTools` | registry names | Human-readable tool list |
-| `spawn` | not configured stub | Delegate to a subagent process |
+| `spawn` | not configured stub | `(task, { cause })` — delegate to a subagent; return `agent` / `log` to link its log |
 | `isFatal` | — | Classify an error as fatal (stops the loop) |
 | `id` | `"agent"` | Agent id stamped on every event |
 | `store` | — | `EventStore` to persist the log (see `createJsonlEventStore`) |
@@ -592,7 +594,7 @@ Discriminated union on `.type`. Every delivered event also carries the envelope 
 - **Event sourcing**: `EventLog`, `MemoryEventStore`, `createJsonlEventStore`, `EventStore`, `LogEvent`, `EventEnvelope`, `isEphemeralEvent`, `serializeEvent`, `toErrorInfo`
 - **State**: `projectState`, `reduce`, `initialState`, `messagesToRequeue`, `AgentState`, `TurnRecord`
 - **Hooks**: `AgentHook`, `bridgeAgents`, `withCause`, `currentCause`, `HookTarget`
-- **Graph**: `projectGraph`, `graphToMermaid`, `AgentGraph`, `TurnNode`, `MessageEdge`
+- **Graph**: `projectGraph`, `graphToMermaid`, `linkedLogs`, `AgentGraph`, `TurnNode`, `MessageEdge`, `LinkedLog`
 - **Retry**: `withRetry`, `RetryPolicy`, `RetryConfig`, `backoffDelay`, `defaultRetryIf`
 - **Errors**: `AbortError`
 - **Skills**: `Skill`, `parseSkillMarkdown`, `mergeSkillsIntoSystem`, `formatSkillsListing`, `findSkill`, `applySkillSubstitutions`, `thinkInputFromSkillSubcommand`, `matchSkillSlash`, `skillInvocationToThinkInput`, `createInvokeSkillTool`, `ParsedSkillMarkdown`, `SkillSlashMatch`

@@ -47,6 +47,7 @@ export type {
   World,
   Effects,
   CoreEvent,
+  SpawnCall,
   LoopConfig,
 } from "./core/core.js";
 
@@ -209,8 +210,8 @@ export type { AgentHook, HookTarget, BridgeOptions, SendOptions } from "./hooks.
 export { bridgeAgents, withCause, currentCause, toEventRef } from "./hooks.js";
 
 // --- Graph: who talked to whom, because of what ---
-export type { AgentGraph, TurnNode, MessageEdge } from "./graph.js";
-export { projectGraph, graphToMermaid } from "./graph.js";
+export type { AgentGraph, TurnNode, MessageEdge, LinkedLog } from "./graph.js";
+export { projectGraph, graphToMermaid, linkedLogs } from "./graph.js";
 
 // --- AgentLoop: high-level actor-style entry point ---
 export { AgentLoop } from "./agent.js";

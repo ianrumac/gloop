@@ -65,10 +65,11 @@ export interface HookTarget {
   send(message: AgentMessage | string, options?: SendOptions): unknown;
 }
 
-/** Normalise a `cause` option to an `EventRef`. */
+/** Normalise a `cause` option to an `EventRef` (keeping a ref's `log` locator). */
 export function toEventRef(cause: EventRef | LogEvent | undefined): EventRef | undefined {
   if (!cause) return undefined;
-  return { agent: cause.agent, eventId: cause.eventId };
+  const log = "seq" in cause ? undefined : cause.log;
+  return { agent: cause.agent, eventId: cause.eventId, ...(log && { log }) };
 }
 
 /**

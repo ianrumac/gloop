@@ -1,5 +1,8 @@
 import { test, expect, describe } from "bun:test";
 import {
+  buildTaskArgv,
+  decodeCause,
+  encodeCause,
   splitShellCommand,
   parseGloopTaskBashCommand,
   appendTaskPromptSuffix,
@@ -174,5 +177,30 @@ describe("parseTaskCliArgs", () => {
     const result = parseTaskCliArgs(["--task", "work", "--model", "claude", "gpt-4"]);
     expect(result).not.toBeNull();
     expect(result!.model).toBe("claude");
+  });
+});
+
+
+describe("subagent log linking", () => {
+  test("encodeCause / decodeCause round-trip, with and without a log locator", () => {
+    const withLog = { agent: "gloop", eventId: "run1-42", log: "/x/.gloop/sessions/a@b.jsonl" };
+    expect(decodeCause(encodeCause(withLog))).toEqual(withLog);
+    const noLog = { agent: "gloop", eventId: "run1-42" };
+    expect(decodeCause(encodeCause(noLog))).toEqual(noLog);
+    expect(decodeCause("garbage")).toBeNull();
+  });
+
+  test("buildTaskArgv passes session, agent id and cause to the child", () => {
+    const argv = buildTaskArgv(
+      { task: "do it", model: "m" },
+      "/tmp/out.jsonl",
+      { sessionLog: "/s/child.jsonl", agentId: "gloop/task-abc", cause: { agent: "gloop", eventId: "r-7", log: "/s/parent.jsonl" } },
+    );
+    const at = (flag: string) => argv[argv.indexOf(flag) + 1];
+    expect(at("--session")).toBe("/s/child.jsonl");
+    expect(at("--agent-id")).toBe("gloop/task-abc");
+    expect(decodeCause(at("--cause")!)).toEqual({ agent: "gloop", eventId: "r-7", log: "/s/parent.jsonl" });
+    expect(at("--model")).toBe("m");
+    expect(argv[argv.length - 1]).toContain("do it");
   });
 });

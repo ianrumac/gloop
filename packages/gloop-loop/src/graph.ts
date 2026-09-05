@@ -137,6 +137,37 @@ export function projectGraph(events: Iterable<LogEvent>): AgentGraph {
   };
 }
 
+/** A log referenced from inside another log. */
+export interface LinkedLog {
+  agent?: string;
+  log: string;
+  /** The event that references it (`spawn_done` or the `message_queued` carrying the cause). */
+  viaEventId: string;
+  direction: "child" | "parent";
+}
+
+/**
+ * Logs this log points at: children reported by `spawn_done` (`log`), and
+ * parents referenced by a `message.cause.log`.  Load them, concatenate their
+ * events with these, and `projectGraph` joins everything by `eventId`.
+ */
+export function linkedLogs(events: Iterable<LogEvent>): LinkedLog[] {
+  const out: LinkedLog[] = [];
+  const seen = new Set<string>();
+  for (const e of events) {
+    if (e.type === "spawn_done" && e.child?.log && !seen.has(`child:${e.child.log}`)) {
+      seen.add(`child:${e.child.log}`);
+      out.push({ agent: e.child.agent, log: e.child.log, viaEventId: e.eventId, direction: "child" });
+    }
+    const cause = e.type === "message_queued" ? e.message.cause : undefined;
+    if (cause?.log && !seen.has(`parent:${cause.log}`)) {
+      seen.add(`parent:${cause.log}`);
+      out.push({ agent: cause.agent, log: cause.log, viaEventId: e.eventId, direction: "parent" });
+    }
+  }
+  return out;
+}
+
 /** Render the graph as a small Mermaid flowchart (handy for debugging). */
 export function graphToMermaid(graph: AgentGraph): string {
   const id = (k: string) => k.replace(/[^A-Za-z0-9_]/g, "_");

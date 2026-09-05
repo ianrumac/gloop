@@ -23,7 +23,7 @@ import {
 } from "../skills.js";
 import type { Span, Tracer } from "../trace.js";
 import { NoopTracer, withSpan } from "../trace.js";
-import type { AgentEvent } from "../events.js";
+import type { AgentEvent, EventEnvelope, EventRef } from "../events.js";
 import { toErrorInfo } from "../events.js";
 import type { RetryConfig } from "../retry.js";
 import { withRetry, defaultRetryIf } from "../retry.js";
@@ -69,6 +69,16 @@ export interface SpawnResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+  /** Agent id the child used for its own events, if it has a log. */
+  agent?: string;
+  /** Locator of the child's event log (e.g. its JSONL path). */
+  log?: string;
+}
+
+/** What the interpreter tells a spawn handler about the spawning event. */
+export interface SpawnCall {
+  /** The `spawn_start` event — pass it to the child so it can record `cause`. */
+  cause?: EventRef;
 }
 
 /** Continuation: what to do with tool results */
@@ -247,9 +257,10 @@ export interface Effects {
   /**
    * Record an interpreter event (history writes, LLM request/response,
    * retries, spawns).  Optional — when omitted the interpreter still keeps
-   * the conversation correct, it just isn't observable.
+   * the conversation correct, it just isn't observable.  May return the
+   * logged event (with envelope) so the interpreter can reference it.
    */
-  record?: (event: CoreEvent) => void;
+  record?: (event: CoreEvent) => (CoreEvent & EventEnvelope) | void;
   confirm: (command: string) => Promise<boolean>;
   ask: (question: string) => Promise<string>;
   remember: (content: string) => Promise<void>;
@@ -259,7 +270,7 @@ export interface Effects {
   complete: (summary: string) => void;
   installTool: (source: string) => Promise<string>;
   listTools: () => string;
-  spawn: (task: string) => Promise<SpawnResult>;
+  spawn: (task: string, call: SpawnCall) => Promise<SpawnResult>;
   /** Optional debug logger — receives (label, content) pairs */
   log?: (label: string, content: string) => void;
 }
@@ -567,13 +578,22 @@ export async function eval_(
         "spawn",
         { taskLength: form.task.length },
         async (span) => {
-          fx.record?.({ type: "spawn_start", task: form.task });
+          const started = fx.record?.({ type: "spawn_start", task: form.task });
+          const call: SpawnCall = started
+            ? { cause: { agent: started.agent, eventId: started.eventId } }
+            : {};
           const r = await chainBoundary(
             world.interceptors,
             "spawn",
-            (ctx) => fx.spawn(ctx.task),
+            (ctx) => fx.spawn(ctx.task, call),
           )({ task: form.task } as SpawnContext);
-          fx.record?.({ type: "spawn_done", ok: r.success, exitCode: r.exitCode, summary: r.summary });
+          fx.record?.({
+            type: "spawn_done",
+            ok: r.success,
+            exitCode: r.exitCode,
+            summary: r.summary,
+            ...(r.agent && { child: { agent: r.agent, ...(r.log && { log: r.log }) } }),
+          });
           span.setAttribute("ok", r.success);
           span.setAttribute("exitCode", r.exitCode);
           return r;

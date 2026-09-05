@@ -166,7 +166,8 @@ const agent: AgentLoop = await AgentLoop.resume({
 
   installTool: (source) => installTool(source, agent.registry),
 
-  spawn: (task) => runTaskSubagent({ task, model }, { cwd: process.cwd() }),
+  spawn: (task, call) =>
+    runTaskSubagent({ task, model }, { cwd: process.cwd(), cause: call.cause, parentLog: sessionLogPath }),
 });
 
 // Register builtins into the actor's registry so Reload/install see the same
