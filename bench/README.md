@@ -154,8 +154,9 @@ a few thousand tokens, so the first real run (gemini-3.7-flash, 30 minutes,
 ~450 tool calls) cost about $3.75 in input tokens alone. `run-gloop.sh`
 therefore starts gloop headless with `--keep-tool-outputs 8` (all but the
 last 8 tool outputs collapse to a short stub after each tool batch, no LLM
-call) and `--prune-interval 60` (gloop's own LLM context manager runs every
-60 tool calls and replaces stale history with a summary). Override with
+call) and `--prune-interval 300` (gloop's own LLM context manager runs every
+300 tool calls and replaces stale history with a summary; it is aggressive,
+typically leaving under ten messages, so it is kept rare). Override with
 `GLOOP_KEEP_TOOL_OUTPUTS` / `GLOOP_PRUNE_INTERVAL` in the container env
 (edit `run-gloop.sh` or the installed copy); `0` disables either.
 

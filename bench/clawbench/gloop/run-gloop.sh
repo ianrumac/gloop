@@ -96,9 +96,10 @@ echo "Starting gloop headless (model=${GLOOP_MODEL})..."
 # page snapshot is a few thousand tokens, so without this a 30-minute run
 # costs several million input tokens. Keep the last N tool outputs verbatim
 # (older ones collapse to a stub) and run gloop's LLM context manager every
-# M tool calls. Override per run with GLOOP_KEEP_TOOL_OUTPUTS / GLOOP_PRUNE_INTERVAL.
+# M tool calls (300 — the manager is aggressive, keeping only a handful of
+# messages plus a summary, so it should fire rarely). Override per run with GLOOP_KEEP_TOOL_OUTPUTS / GLOOP_PRUNE_INTERVAL.
 KEEP_TOOL_OUTPUTS="${GLOOP_KEEP_TOOL_OUTPUTS:-8}"
-PRUNE_INTERVAL="${GLOOP_PRUNE_INTERVAL:-60}"
+PRUNE_INTERVAL="${GLOOP_PRUNE_INTERVAL:-300}"
 PATH="$SAFE_BIN" HOME=/root NO_COLOR=1 "$BUN_BIN" "$GLOOP_HOME/src/core/headless.ts" \
   --model "$GLOOP_MODEL" \
   --output /data/agent-messages.jsonl \
