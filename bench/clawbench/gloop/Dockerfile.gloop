@@ -21,7 +21,7 @@ RUN ln -sf /usr/local/bin/bun /usr/local/bin/bunx
 
 # LiteLLM proxy: only used when models.yaml points at a non-OpenRouter API
 # (gloop speaks the OpenRouter/OpenAI chat-completions dialect natively).
-RUN pip install --no-cache-dir 'litellm[proxy]==1.83.9'
+RUN pip install --no-cache-dir --retries 5 --timeout 120 'litellm[proxy]==1.83.9'
 
 COPY harnesses/gloop/install-gloop.sh /install-gloop.sh
 RUN chmod +x /install-gloop.sh && GLOOP_REPO="$GLOOP_REPO" GLOOP_REF="$GLOOP_REF" /install-gloop.sh

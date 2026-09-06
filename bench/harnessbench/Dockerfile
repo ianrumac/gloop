@@ -14,7 +14,7 @@ ARG GLOOP_REF=main
 
 COPY --from=bun-runtime /usr/local/bin/bun /usr/local/bin/bun
 RUN ln -sf /usr/local/bin/bun /usr/local/bin/bunx
-RUN pip install --no-cache-dir 'litellm[proxy]==1.83.9'
+RUN pip install --no-cache-dir --retries 5 --timeout 120 'litellm[proxy]==1.83.9'
 
 COPY setup.sh /opt/harness/setup.sh
 RUN chmod +x /opt/harness/setup.sh && GLOOP_REPO="$GLOOP_REPO" GLOOP_REF="$GLOOP_REF" /opt/harness/setup.sh
