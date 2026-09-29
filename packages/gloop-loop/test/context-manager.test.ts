@@ -115,7 +115,7 @@ describe("manageContextFork", () => {
     const result = await manageContextFork(convo, "Remove old weather chat");
 
     expect(result).toContain("removed 2 messages");
-    expect(result).toContain("injected summary");
+    expect(result).toContain("added 1");
 
     const history = convo.getHistory();
     // Should have: system (#0), summary (injected), "thanks" (#3), "you're welcome" (#4)

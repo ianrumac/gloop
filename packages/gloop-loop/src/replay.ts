@@ -27,3 +27,6 @@ export { initialState, reduce, projectState, messagesToRequeue } from "./state.j
 
 export type { AgentGraph, TurnNode, MessageEdge, LinkedLog } from "./graph.js";
 export { projectGraph, graphToMermaid, linkedLogs, mergeEvents } from "./graph.js";
+
+export type { ContextGraph, ContextNode, ContextEdge } from "./context.js";
+export { projectContext, contextFromHistory, contextGraph } from "./context.js";

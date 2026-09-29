@@ -25,6 +25,7 @@ import type { Span, Tracer } from "../trace.js";
 import { NoopTracer, withSpan } from "../trace.js";
 import type { AgentEvent, EventEnvelope, EventRef } from "../events.js";
 import { toErrorInfo } from "../events.js";
+import type { ContextTrigger } from "../context.js";
 import type { RetryConfig } from "../retry.js";
 import { withRetry, defaultRetryIf } from "../retry.js";
 import { AbortError, raceAbort } from "./abort.js";
@@ -268,7 +269,8 @@ export interface Effects {
   remember: (content: string) => Promise<void>;
   forget: (content: string) => Promise<void>;
   refreshSystem: () => Promise<void>;
-  manageContext: (instructions: string) => Promise<string>;
+  /** `trigger` says who asked: the model's ManageContext call (`"tool"`) or `contextPruneInterval` (`"auto"`). */
+  manageContext: (instructions: string, trigger?: ContextTrigger) => Promise<string>;
   complete: (summary: string) => void;
   installTool: (source: string) => Promise<string>;
   listTools: () => string;
@@ -888,7 +890,7 @@ async function evalInvoke(
     if (call.name === "ManageContext") {
       const instructions = call.args.instructions ?? "Prune stale messages";
       fx.toolStart("ManageContext", instructions.substring(0, 60));
-      const result = await fx.manageContext(instructions);
+      const result = await fx.manageContext(instructions, "tool");
       results.push({ name: "ManageContext", output: result, success: true, id: call.id });
       fx.toolDone("ManageContext", true, result);
       continue;
@@ -1031,7 +1033,7 @@ async function evalInvoke(
   if (interval > 0 && world.toolCalls >= interval) {
     world.toolCalls = 0;
     fx.toolStart("ManageContext", `auto-pruning after ${interval} tool calls`);
-    const pruneResult = await fx.manageContext("Prune old tool results and intermediate outputs. Keep the current task goal, recent results, and any information the agent is actively using.");
+    const pruneResult = await fx.manageContext("Prune old tool results and intermediate outputs. Keep the current task goal, recent results, and any information the agent is actively using.", "auto");
     fx.toolDone("ManageContext", true, pruneResult);
   }
 

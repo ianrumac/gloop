@@ -1,6 +1,7 @@
 /**
- * Context manager — forks a mini `AgentLoop` actor to prune conversation
- * history and replace pruned messages with a condensed summary.
+ * Context manager — the default `ContextStrategy`: forks a mini `AgentLoop`
+ * actor to prune conversation history and replace pruned messages with a
+ * condensed summary.
  */
 
 import type { AIConversation } from "../ai/builder.js";
@@ -8,6 +9,16 @@ import type { Message } from "../ai/types.js";
 import { AgentLoop } from "../agent.js";
 import type { ToolDefinition } from "../tools/types.js";
 import type { EventLog } from "../log.js";
+import {
+  contextFromHistory,
+  contextGraph,
+  contextNode,
+  describeTrim,
+  trimContext,
+  type ContextGraph,
+  type ContextStrategy,
+  type ContextStrategyContext,
+} from "../context.js";
 
 export interface ManageContextOptions {
   /** Share the parent's log so the fork's events land in the same graph. */
@@ -36,14 +47,27 @@ Guidelines:
 
 Tools are available as function calls. Use them to manage context.`;
 
-export async function manageContextFork(
-  convo: AIConversation,
-  instructions: string,
-  log?: (label: string, content: string) => void,
-  options: ManageContextOptions = {},
-): Promise<string> {
-  const history = convo.getHistory();
-  log?.("MANAGE_CONTEXT", `Starting context management, ${history.length} messages: ${instructions}`);
+export interface LlmContextStrategyOptions {
+  /** Agent id for the fork's events.  Default: `${agent}/context`. */
+  id?: string;
+}
+
+/**
+ * The default strategy: a forked agent reviews a numbered index of the
+ * context, marks stale messages for deletion and writes a summary of what
+ * it removed.  The summary comes back as a new node right after the first.
+ */
+export function llmContextStrategy(options: LlmContextStrategyOptions = {}): ContextStrategy {
+  return (graph, ctx) => pruneWithFork(graph, ctx, options);
+}
+
+async function pruneWithFork(
+  graph: ContextGraph,
+  ctx: ContextStrategyContext,
+  options: LlmContextStrategyOptions,
+): Promise<ContextGraph> {
+  const history = graph.nodes.map((n) => n.message);
+  const { instructions, log } = ctx;
 
   // Build summary index for the fork agent
   const index = history
@@ -111,15 +135,15 @@ export async function manageContextFork(
   // conversation), its own registry (only the context-management tools), and
   // no UI subscribers — it runs silently.
   const forkAgent = new AgentLoop({
-    provider: convo.provider,
-    model: convo.model,
+    provider: ctx.provider,
+    model: ctx.model,
     system: CONTEXT_MANAGER_SYSTEM_PROMPT,
     tools,
     confirm: async () => true,
     ask: async () => "",
     log,
-    ...(options.eventLog && { eventLog: options.eventLog }),
-    id: options.id ?? "context-manager",
+    ...(ctx.eventLog && { eventLog: ctx.eventLog }),
+    id: options.id ?? `${ctx.agent}/context`,
   });
 
   // Drive a single turn and wait for completion.
@@ -128,46 +152,53 @@ export async function manageContextFork(
   );
   await forkAgent.stop();
 
-  // Apply deletions.
+  // Tool-call groups are closed by the caller (`closeToolGroups`), so a
+  // partly deleted group goes as a unit.
   const deleteSet = new Set(toDelete);
+  if (deleteSet.size === 0) return graph;
 
-  // Providers reject an assistant `toolCalls` message without its `role:
-  // "tool"` responses (and vice versa) — expand deletions so each tool-call
-  // group (assistant message + its consecutive tool responses) lives or dies
-  // as a unit.
-  for (let i = 0; i < history.length; i++) {
-    const msg = history[i]!;
-    if (msg.role !== "assistant" || !msg.toolCalls?.length) continue;
-    const group = [i];
-    for (let j = i + 1; j < history.length && history[j]!.role === "tool"; j++) {
-      group.push(j);
-    }
-    if (group.some((idx) => deleteSet.has(idx))) {
-      for (const idx of group) deleteSet.add(idx);
-    }
-  }
-
-  if (deleteSet.size === 0) {
-    const result = `Context reviewed: no messages pruned, ${history.length} remaining`;
-    log?.("MANAGE_CONTEXT", result);
-    return result;
-  }
-
-  const kept = history.filter((_, i) => !deleteSet.has(i));
+  const kept = graph.nodes.filter((_, i) => !deleteSet.has(i));
 
   // Inject condensed summary as a user message right after the system prompt.
   if (condensedSummary) {
-    const summaryMsg = {
-      role: "user" as const,
+    kept.splice(1, 0, contextNode({
+      role: "user",
       content: `[This is a summary of conversation history up to this point]\n\n${condensedSummary}`,
-    };
-    kept.splice(1, 0, summaryMsg);
+    }));
   }
+  return contextGraph(graph.agent, kept);
+}
 
-  convo.setHistory(kept);
-  options.onReplaced?.(kept, deleteSet.size);
+/**
+ * Run the default strategy straight against a conversation (no actor, no
+ * provenance).  `AgentLoop` does not use this — it runs its
+ * `contextStrategy` over `projectContext` of its own log.
+ */
+export async function manageContextFork(
+  convo: AIConversation,
+  instructions: string,
+  log?: (label: string, content: string) => void,
+  options: ManageContextOptions = {},
+): Promise<string> {
+  const graph = contextFromHistory(convo.getHistory());
+  log?.("MANAGE_CONTEXT", `Starting context management, ${graph.nodes.length} messages: ${instructions}`);
 
-  const result = `Context pruned: removed ${deleteSet.size} messages, injected summary, ${kept.length} remaining`;
+  const trim = await trimContext(llmContextStrategy({ id: options.id ?? "context-manager" }), graph, {
+    agent: graph.agent,
+    instructions,
+    trigger: "tool",
+    events: options.eventLog?.events() ?? [],
+    ...(options.eventLog && { eventLog: options.eventLog }),
+    provider: convo.provider,
+    model: convo.model,
+    ...(log && { log }),
+  });
+
+  if (trim.changed) {
+    convo.setHistory(trim.history);
+    options.onReplaced?.(trim.history, trim.removed);
+  }
+  const result = describeTrim(trim, graph.nodes.length);
   log?.("MANAGE_CONTEXT", result);
   return result;
 }
