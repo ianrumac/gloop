@@ -255,15 +255,35 @@ export class AIConversation {
     return this.streamFromHistory();
   }
 
-  private streamFromHistory(): StreamResult {
+  /**
+   * Stream from the current history WITHOUT touching it — no user message
+   * is appended and the assistant's reply is not recorded.  The caller owns
+   * every history write (the event-sourced interpreter uses this together
+   * with `append` so each mutation is paired with a logged event).
+   */
+  request(): StreamResult {
     const builder = new AIBuilder(this._provider, this._modelId);
     if (this.systemPrompt) builder.system(this.systemPrompt);
     if (this.routing) builder.providerRouting(this.routing);
     if (this.jsonTools) builder.tools(this.jsonTools);
     if (this._maxTokens !== undefined) builder.maxTokens(this._maxTokens);
     builder.messages(this.history);
+    return builder.stream();
+  }
 
-    const result = builder.stream();
+  /** Append one message to the history in place (no copy of the whole array). */
+  append(message: Message): this {
+    this.history.push(message);
+    return this;
+  }
+
+  /** The current system prompt, if any. */
+  getSystem(): string | undefined {
+    return this.systemPrompt;
+  }
+
+  private streamFromHistory(): StreamResult {
+    const result = this.request();
 
     // Wrap the text stream to capture content for conversation history
     const self = this;

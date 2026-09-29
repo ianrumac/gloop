@@ -21,7 +21,9 @@ import {
 } from "../src/core/debug.ts";
 import {
   loadRebootSession,
+  openSessionStore,
   rebootIsFatal,
+  resolveSessionLog,
   wireRebootHandler,
 } from "../src/core/session.ts";
 import { AgentLoop } from "../src/core/core.ts";
@@ -29,7 +31,7 @@ import { parseGloopTaskBashCommand, parseTaskCliArgs, runTaskSubagent } from "..
 import { ensureSelfCopy } from "./self-copy.ts";
 import App from "../components/App.tsx";
 import { installTool } from "./install-tool.ts";
-import { DEFAULT_GLOOP_MODEL } from "../src/core/default-model.ts";
+import { parseGloopArgs } from "../src/core/cli-args.ts";
 
 // Special exit code that signals "please restart me"
 const REBOOT_EXIT_CODE = 75;
@@ -59,15 +61,7 @@ if (taskRequest) {
   process.exit(result.exitCode === 0 ? 1 : result.exitCode);
 }
 
-const debug = args.includes("--debug");
-const providerIdx = args.indexOf("--provider");
-const providerName = providerIdx !== -1 ? args[providerIdx + 1] : undefined;
-const model =
-  args.find(
-    (a, i) =>
-      !a.startsWith("--") &&
-      (providerIdx === -1 || i !== providerIdx + 1)
-  ) ?? DEFAULT_GLOOP_MODEL;
+const { debug, providerName, resume, model } = parseGloopArgs(args);
 
 if (debug) enableDebug();
 
@@ -79,8 +73,17 @@ const skills = await discoverSkills(process.cwd());
 let systemPrompt = await buildSystemPrompt({ clone });
 debugLog("SYSTEM", systemPrompt);
 
-// Check for reboot session (so we can restore history after the actor is built)
+// Which event log is this session?  A reboot pointer wins, then --resume,
+// otherwise a fresh file under .gloop/sessions/.  The log is the session:
+// AgentLoop.resume replays it (rolling back any cut-off turn) and keeps
+// appending to it.
 const rebootSession = await loadRebootSession();
+const sessionLogPath = resolveSessionLog({ reboot: rebootSession, resume });
+if (!sessionLogPath) {
+  console.error("No session to resume: .gloop/sessions/ has no top-level session logs.");
+  process.exit(1);
+}
+debugLog("SESSION", sessionLogPath);
 
 // ============================================================================
 // BUILD THE ACTOR
@@ -88,15 +91,19 @@ const rebootSession = await loadRebootSession();
 
 const provider = new OpenRouterProvider({
   apiKey: process.env.OPENROUTER_API_KEY!,
+  // OPENROUTER_BASE_URL points gloop at any OpenAI-compatible endpoint.
+  ...(process.env.OPENROUTER_BASE_URL && { baseUrl: process.env.OPENROUTER_BASE_URL }),
 });
 
 const debugInt = debugInterceptor();
 
-const agent: AgentLoop = new AgentLoop({
+const agent: AgentLoop = await AgentLoop.resume({
   provider,
   model,
   system: systemPrompt,
   skills,
+  id: "gloop",
+  store: openSessionStore(sessionLogPath),
   // Start with no tools; we register builtins into the actor's own registry
   // below so Reload/installTool see the same registry the loop uses.
   tools: [],
@@ -137,7 +144,8 @@ const agent: AgentLoop = new AgentLoop({
 
   installTool: (source) => installTool(source, agent.registry),
 
-  spawn: (task) => runTaskSubagent({ task, model }, { cwd: process.cwd() }),
+  spawn: (task, call) =>
+    runTaskSubagent({ task, model }, { cwd: process.cwd(), cause: call.cause, parentLog: sessionLogPath }),
 });
 
 // Register builtins into the actor's registry so Reload/install see the same
@@ -154,9 +162,7 @@ if (providerName) {
   debugLog("PROVIDER", `Routing to: ${providerName}`);
 }
 
-// Restore reboot session if present.
 if (rebootSession) {
-  agent.convo.setHistory(rebootSession.history);
   debugLog("REBOOT", `Restored session: ${rebootSession.reason}`);
 }
 
@@ -180,7 +186,7 @@ const { unmount } = render(
 // the actor stops the loop and emits a `fatal` event.  wireRebootHandler
 // saves the session + invokes our restart callback, which tears down Ink
 // and exits with a special code that the launcher recognises as "restart".
-wireRebootHandler(agent, async () => {
+wireRebootHandler(agent, sessionLogPath, async () => {
   unmount();
   if (process.stdin.isTTY) process.stdin.setRawMode(false);
   await agent.stop();

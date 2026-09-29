@@ -2,6 +2,21 @@
 
 All notable changes to `gloop` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.0]
+
+### Added
+- **Sessions are event logs.** Every run appends its events to `.gloop/sessions/<timestamp>.jsonl` (progress-only events filtered out) through `@hypen-space/gloop-loop` 0.3.0's event sourcing. `gloop --resume [path]` rebuilds the agent from a log (default: the newest session); a turn that was cut off mid-way is rolled back to the last turn boundary and re-run.
+- `--resume` documented in `gloop --help`.
+- **`gloop graph [log] [--json | --html [out]] [--no-follow]`** — show a session log as a graph. Mermaid by default, the raw turn graph as JSON, or a self-contained interactive viewer (turn graph, event causality with cross-agent hops, state scrubber). Linked subagent/parent logs are followed. The viewer is also built statically (`src/viewer/build-static.ts`, with a demo log) and deployed with the homepage to GitHub Pages at `/viewer/` by the new `Pages` workflow.
+- **Task subagents are part of the graph.** `gloop --task` children spawned from a Bash call get their own session log next to the parent's (`<timestamp>-task-<id>.jsonl`), an agent id `gloop/task-<id>`, and a `--cause` pointing at the parent's `spawn_start` event (with the parent's log path). The parent's `spawn_done` records the child's agent id and log path, so both logs can be loaded and joined into one graph. Headless accepts `--session`, `--agent-id`, `--cause`.
+
+### Changed
+- Reboot (`Reboot` tool → exit 75 → relaunch) no longer snapshots the conversation into `reboot_session.json`; it flushes the session log and writes a pointer `{ reason, log }` to it. The relaunched process resumes from the same log, so nothing that happened before the reboot is lost — including tool calls, confirmations and memory ops. Pre-0.3.0 pointer files are ignored.
+- `wireRebootHandler(agent, logPath, onRestart)` and `saveRebootSession(logPath, reason)` take the log path instead of a conversation.
+- `OPENROUTER_BASE_URL` points gloop at any OpenAI-compatible endpoint (`OpenRouterProvider` now honours the documented `baseUrl` option). Used to run the CLI end to end against a local mock.
+- `gloop --resume` never picks a spawned subagent's log (`…-task-<id>.jsonl`) as "the latest session". Subagent `--cause` is passed as JSON. Headless argument parsing lives in `src/core/cli-args.ts` (tested).
+- `.gloop/sessions/` and `.gloop/reboot_session.json` are git-ignored.
+
 ## [0.2.0]
 
 ### Changed

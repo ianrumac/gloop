@@ -1,6 +1,6 @@
 {
   "name": "@hypen-space/gloop-loop",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "description": "A recursive Lisp-style agent loop for LLM tool-calling agents",
   "type": "module",
   "module": "dist/index.js",
@@ -10,6 +10,16 @@
       "bun": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./replay": {
+      "bun": "./src/replay.ts",
+      "types": "./dist/replay.d.ts",
+      "import": "./dist/replay.js"
+    },
+    "./testing": {
+      "bun": "./src/testing.ts",
+      "types": "./dist/testing.d.ts",
+      "import": "./dist/testing.js"
     }
   },
   "files": [

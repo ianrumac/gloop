@@ -16,16 +16,15 @@ import { discoverSkills } from "./skills.ts";
 import { enableDebug, debugLog, debugLogRaw } from "./debug.ts";
 import {
   loadRebootSession,
+  openSessionStore,
   rebootIsFatal,
+  resolveSessionLog,
   wireRebootHandler,
 } from "./session.ts";
 import { AgentLoop, type AgentEvent } from "./core.ts";
 import { appendFileSync } from "fs";
-import {
-  appendTaskPromptSuffix,
-  parseGloopTaskBashCommand,
-  runTaskSubagent,
-} from "./task-mode.ts";
+import { parseGloopTaskBashCommand, runTaskSubagent } from "./task-mode.ts";
+import { parseHeadlessArgs } from "./cli-args.ts";
 import { installTool } from "../../bin/install-tool.ts";
 import { DEFAULT_GLOOP_MODEL } from "./default-model.ts";
 
@@ -35,40 +34,14 @@ import { DEFAULT_GLOOP_MODEL } from "./default-model.ts";
 
 function usage(): never {
   console.error(
-    'Usage: bun headless.ts --model <provider/model> [--provider <name>] [--output <path>] [--debug] [--task "<task>"] "<instruction>"',
+    'Usage: bun headless.ts --model <provider/model> [--provider <name>] [--output <path>] [--debug] [--task "<task>"] [--session <log>] [--agent-id <id>] [--cause <json>] "<instruction>"',
   );
   process.exit(1);
 }
 
-const args = process.argv.slice(2);
-
-let model = DEFAULT_GLOOP_MODEL;
-let outputPath = "gloop-output.jsonl";
-let debug = false;
-let providerName: string | undefined;
-let clone = false;
-let instruction = "";
-
-for (let i = 0; i < args.length; i++) {
-  const arg = args[i]!;
-  if (arg === "--model" && i + 1 < args.length) {
-    model = args[++i]!;
-  } else if (arg === "--output" && i + 1 < args.length) {
-    outputPath = args[++i]!;
-  } else if (arg === "--provider" && i + 1 < args.length) {
-    providerName = args[++i]!;
-  } else if (arg === "--clone") {
-    clone = true;
-  } else if (arg === "--debug") {
-    debug = true;
-  } else if (arg === "--task" && i + 1 < args.length) {
-    instruction = appendTaskPromptSuffix(args[++i]!);
-  } else if (arg.startsWith("--task=")) {
-    instruction = appendTaskPromptSuffix(arg.slice("--task=".length));
-  } else if (!arg.startsWith("--")) {
-    instruction = arg;
-  }
-}
+const {
+  model, outputPath, debug, providerName, clone, instruction, session: sessionArg, agentId, cause,
+} = parseHeadlessArgs(process.argv.slice(2));
 
 if (!instruction) usage();
 
@@ -95,6 +68,9 @@ let systemPrompt = await buildSystemPrompt({ clone });
 debugLog("SYSTEM", systemPrompt);
 
 const rebootSession = await loadRebootSession();
+const sessionLogPath = resolveSessionLog({ reboot: rebootSession, session: sessionArg })!;
+debugLog("SESSION", sessionLogPath);
+if (cause) debugLog("CAUSE", `${cause.agent} ${cause.eventId} ${cause.log ?? ""}`);
 
 // ============================================================================
 // BUILD THE ACTOR
@@ -102,13 +78,17 @@ const rebootSession = await loadRebootSession();
 
 const provider = new OpenRouterProvider({
   apiKey: process.env.OPENROUTER_API_KEY!,
+  // OPENROUTER_BASE_URL points gloop at any OpenAI-compatible endpoint.
+  ...(process.env.OPENROUTER_BASE_URL && { baseUrl: process.env.OPENROUTER_BASE_URL }),
 });
 
-const agent: AgentLoop = new AgentLoop({
+const agent: AgentLoop = await AgentLoop.resume({
   provider,
   model,
   system: systemPrompt,
   skills,
+  id: agentId,
+  store: openSessionStore(sessionLogPath),
   // Start empty; we register builtins into the actor's registry below so
   // Reload/installTool see the same registry the loop uses.
   tools: [],
@@ -145,7 +125,8 @@ const agent: AgentLoop = new AgentLoop({
 
   installTool: (source) => installTool(source, agent.registry),
 
-  spawn: (task) => runTaskSubagent({ task, model }, { cwd: process.cwd() }),
+  spawn: (task, call) =>
+    runTaskSubagent({ task, model }, { cwd: process.cwd(), cause: call.cause, parentLog: sessionLogPath }),
 });
 
 // Register builtins into the actor's registry.
@@ -161,9 +142,7 @@ if (providerName) {
   debugLog("PROVIDER", `Routing to: ${providerName}`);
 }
 
-// Restore reboot session if present.
 if (rebootSession) {
-  agent.convo.setHistory(rebootSession.history);
   debugLog("REBOOT", `Restored session: ${rebootSession.reason}`);
 }
 
@@ -240,7 +219,7 @@ agent.onEvent((event: AgentEvent) => {
 });
 
 // Reboot handler: save session + respawn this very process, exit 0.
-wireRebootHandler(agent, async (reason) => {
+wireRebootHandler(agent, sessionLogPath, async (reason) => {
   logEvent({ type: "reboot", reason });
   await agent.stop();
   const argv = process.argv;
@@ -267,7 +246,8 @@ logEvent({ type: "start", model, instruction });
 // past that point in the reboot case).  Regular errors are logged by the
 // event sink, so we just swallow the sendSync rejection here.
 try {
-  await agent.sendSync(instruction);
+  // `cause` links this run's first turn to the parent's spawn_start event.
+  await agent.sendSync(instruction, cause ? { cause } : undefined);
 } catch {
   // Event sink already logged the error.
 }

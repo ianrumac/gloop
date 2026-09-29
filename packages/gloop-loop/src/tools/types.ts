@@ -10,6 +10,11 @@ export interface ToolDefinition {
   execute: (args: Record<string, string>) => Promise<string>;
   /** If provided, called before execution. Return a string to require confirmation (shown to user), or null to allow. */
   askPermission?: (args: Record<string, string>) => string | null;
+  /**
+   * Mark the tool as safe to run again after a failure (idempotent / read-only).
+   * Only retryable tools are retried under `LoopConfig.retry.tool`.
+   */
+  retryable?: boolean;
 }
 
 export interface ToolCall {

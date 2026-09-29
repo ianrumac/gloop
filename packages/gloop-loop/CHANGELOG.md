@@ -2,6 +2,45 @@
 
 All notable changes to `@hypen-space/gloop-loop` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.4.0]
+
+### Breaking
+- The `ManageContext` result string now reads `removed N messages, added M, K remaining` (was `…, injected summary, …`). `Effects.manageContext` takes an optional second argument, `trigger: "tool" | "auto"`.
+
+### Added
+- **Swappable context trimming.** `contextStrategy: (graph, ctx) => graph` replaces the built-in pruner. `projectContext(events, agent, history?)` projects the live history into a `ContextGraph` — one node per message with the `eventId` / `turn` that wrote it (provenance survives `history_replaced` / `restored`), `tool_result` edges from an assistant's tool calls to their responses. The returned graph becomes the new history (`history_replaced`, reason `context_pruned:<removed>`); partly kept tool-call groups are dropped as a unit (`closeToolGroups`). `ctx` carries `instructions`, `trigger`, the full log (`events`, `eventLog`), `provider` / `model` and the turn's abort `signal`. The previous behaviour is the default, `llmContextStrategy()`; `keepLastTurns(n)` is a model-free alternative. `trimContext` / `describeTrim` / `contextGraph` / `contextNode` / `contextFromHistory` are exported for hosts with their own interpreter; the projection is also in `/replay`.
+- `keepLastTurns(n)` — a model-free strategy that keeps only what the last `n` turns wrote.
+
+## [0.3.0]
+
+### Breaking
+- **Event-sourced actor.** Every input, output, tool call, memory write, prompt change and lifecycle transition is appended to an `EventLog` (`agent.log`). Subscribers (`on`, `onEvent`, `nextEvent`, `attach`) now receive `LogEvent`s: the same payloads as before plus an envelope — `seq`, `eventId`, `ts`, `run`, `agent`, `turn`, `parent`. `turn_end` now carries `status: "ok" | "error" | "interrupted" | "fatal"`. Existing handlers keep working with two exceptions: `error.error` / `fatal.error` are typed `Error | ErrorInfo` (an `ErrorInfo` after a round-trip through a store), so code that relied on the `Error` type must narrow; and all subscribers (`onEvent`, `on`, `attach`) are now one mechanism — a handler that throws produces a `hook_error` event instead of being silently swallowed.
+- An `AbortError` thrown inside a tool's `execute` now propagates and interrupts the turn instead of being reported as a failed tool result.
+- **Spawned subagent results reach the model.** A spawn-classified call (`classifySpawn`) is now executed inside `evalInvoke` like any tool: visible as `tool_start` / `tool_done`, its result recorded as a native `tool_message`. Previously an all-spawn response echoed the result to the UI and sent the model an empty user turn. `toolCallsToForm` keeps its optional `classifySpawn` parameter for hosts with their own interpreter; its spawn chain now feeds results back as a synthetic user message instead of dropping them.
+- `Effects` gains an optional `record(event)` callback and `toolStart` takes optional `args` / `callId`; the interpreter now owns every history write (via `AIConversation.append` + `request()`) instead of relying on the conversation's streaming wrapper. Hosts that implement `Effects` by hand are unaffected unless they relied on `convo.stream()` pushing history for them.
+- `manageContextFork` takes an optional 4th `options` argument (`eventLog`, `id`, `onReplaced`).
+- `AbortError` / `raceAbort` moved to `core/abort.ts` (still re-exported from the package root and `core/core.ts`).
+
+### Added
+- `EventLog` — append-only, ordered, subscribable log with pluggable `EventStore` persistence, `flush()`, load-time dedupe, and graph helpers (`get`, `ancestors`, `children`). `MemoryEventStore` and `createJsonlEventStore(path, { filter })` (one JSON line per event, corrupt lines skipped) are included; `isEphemeralEvent` identifies the progress-only events a store may drop.
+- New events: `message_queued`, `user_message`, `assistant_message`, `assistant_tool_calls`, `tool_message`, `history_replaced`, `history_cleared`, `system_set`, `tools_changed`, `llm_request`, `llm_response`, `llm_error`, `retry`, `confirm_response`, `ask_response`, `spawn_start`, `spawn_done`, `hook_error`, `restored`. `tool_start` now includes `args` and the provider `callId`.
+- `projectState(events, agent?)` / `reduce` — a pure reducer that rebuilds `history`, `system`, `memory`, `tools`, `inbox`, `turns`, pending confirm/ask requests, and a `committedHistory` at the last turn boundary. `agent.snapshot()` is the convenience form.
+- `AgentLoop.resume({ store, ... })` and `agent.hydrate(events?, { requeue, history })` — rebuild an actor from a log. The host owns the system prompt and tools on resume; history and queued work come from the log. A turn cut off by a crash is rolled back to the last turn boundary, closed as `abandoned`, and re-queued together with anything still in the inbox. `sendSync` settles only after the turn's events are handed to the store; `stop()` flushes.
+- `agent.attach(hook)` / `hooks` option — observe the log without ever breaking the loop (failures become `hook_error` events); `scope: "all"` sees every agent on a shared log. `bridgeAgents(from, to, { on, map })` routes one agent's events into another's inbox with `cause: { agent, eventId }` recorded for cross-agent causality.
+- `eventLog` option to share one log between agents; the context-manager fork now logs into the parent's log as `${id}/context`.
+- `retry` option (`{ llm?, tool? }`) with `withRetry` / `RetryPolicy` — exponential backoff, `retryIf`, abort-aware, every attempt logged as a `retry` event. An LLM call is never retried after it has streamed output; tools are retried only when they declare `retryable: true`.
+- `agent.setHistory(messages, reason)` (logged), `agent.id`, `agent.log`, `agent.flush()`, `AIConversation.request()` / `append()` / `getSystem()`.
+- **Cross-agent graph.** `send(message, { cause })` links a message to the event it reacts to (any `LogEvent`, or an `EventRef` with a `log` locator). `EventLog.ancestors` / `children` follow `message.cause` as well as `parent`, `descendants(eventId)` collects everything an event led to, and `causeOf(event)` exposes the single step. Fan-out from one event to several agents is several `message_queued` children. `projectGraph(events)` turns a (possibly multi-log) event list into `{ agents, nodes (turn attempts), edges (messages with their causing turn/event), roots }` — nodes come from `projectState` per agent, so re-runs after a restore appear as separate attempts (`agent:msg_1`, `agent:msg_1#2`); `graphToMermaid` renders it; `mergeEvents` joins several logs. Inbox events (`message_queued`, `queue_changed`) and `hook_error` are logged outside the running turn so a message typed mid-turn is never claimed as caused by it.
+- `parseJsonlEvents` is the single definition of a valid persisted line (used by the JSONL store and the viewer). `createJsonlEventStore().load()` treats only a missing file as empty; other read errors surface. A failed `EventLog.load()` can be retried.
+- `@hypen-space/gloop-loop/testing` — `ScriptedProvider` and small tool doubles for driving an agent without a model.
+- `AgentLoop.resume` throws when the log belongs to a different agent id, and only emits `restored` when there was something to restore. `hydrate()` throws once the agent has started. `stop()` rejects `sendSync` promises whose message never got a turn. `awaitIdle()` no longer resolves early between dequeue and `turn_start`.
+- Interceptor rewrites of the LLM input are logged (`history_replaced`, reason `interceptor_rewrite`) so replay stays exact.
+- `@hypen-space/gloop-loop/replay` — a second package entry exporting only the pure, dependency-free parts (events, `EventLog` / `MemoryEventStore`, `projectState` / `reduce`, `projectGraph` / `linkedLogs` / `graphToMermaid`) for viewers and analysers; bundles for the browser as-is.
+- **Spawned subagents link their logs.** The `spawn` option/effect now receives `(task, { cause })` where `cause` references the `spawn_start` event; `SpawnResult` may return `agent` / `log`, which `spawn_done` records as `child`. `EventRef.log` names the other log's locator. `linkedLogs(events)` lists referenced child/parent logs; concatenating their events lets `projectGraph` and `ancestors` cross the process boundary.
+
+### Fixed
+- `confirm_request` / `ask_request` are now emitted after the resolver is registered, so a handler that answers synchronously from inside the event no longer hangs the turn.
+
 ## [0.2.0]
 
 ### Breaking

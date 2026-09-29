@@ -1,43 +1,123 @@
 /**
- * session.ts — Reboot session persistence (save / load) + the
- * `wireRebootHandler` helper that both the interactive (`bin/index.ts`)
- * and headless entry points use.
+ * session.ts — Session persistence on top of gloop-loop's event log.
+ *
+ * Every gloop run appends its events to `.gloop/sessions/<timestamp>.jsonl`.
+ * That file IS the session: history, system prompt, tool calls, memory ops,
+ * confirmations — all of it — and `AgentLoop.resume` rebuilds the agent
+ * from it (rolling back to the last turn boundary and re-queueing whatever
+ * was cut off).
+ *
+ * Reboot (the agent modified its own code and asked to restart) writes a
+ * tiny pointer file, `.gloop/reboot_session.json`, naming the log to resume
+ * plus the reason.  The relaunched process picks it up, deletes it, and
+ * resumes from that log.  `gloop --resume [path]` does the same by hand.
  */
 
 import { join } from "path";
-import type { AIConversation } from "../ai/index.ts";
-import type { Message } from "../ai/types.ts";
+import { readdirSync } from "fs";
+import {
+  createJsonlEventStore,
+  isEphemeralEvent,
+  type JsonlEventStore,
+} from "@hypen-space/gloop-loop";
 import type { AgentLoop } from "./core.ts";
 import { debugLog } from "./debug.ts";
 import { RebootError } from "../tools/builtins.ts";
 
-const REBOOT_SESSION_PATH = join(process.cwd(), ".gloop", "reboot_session.json");
+const GLOOP_DIR = () => join(process.cwd(), ".gloop");
+const SESSIONS_DIR = () => join(GLOOP_DIR(), "sessions");
+const REBOOT_SESSION_PATH = () => join(GLOOP_DIR(), "reboot_session.json");
 
 export interface RebootSession {
-  history: Message[];
+  /** Why the agent asked to restart. */
   reason: string;
+  /** Path of the JSONL event log to resume from. */
+  log: string;
+  timestamp?: string;
 }
 
-export async function saveRebootSession(convo: AIConversation, reason: string): Promise<void> {
-  const session = {
-    history: convo.getHistory(),
-    reason,
-    timestamp: new Date().toISOString(),
-  };
-  await Bun.write(REBOOT_SESSION_PATH, JSON.stringify(session, null, 2));
-  debugLog("REBOOT", `Session saved: ${reason}`);
+/**
+ * A fresh session log path: `.gloop/sessions/<ISO timestamp>[-label].jsonl`.
+ * Spawned task subagents use a label so their logs sit next to the parent's.
+ */
+export function newSessionLogPath(now: Date = new Date(), label?: string): string {
+  const stamp = now.toISOString().replace(/[:.]/g, "-");
+  const suffix = label ? `-${label.replace(/[^A-Za-z0-9_-]/g, "_")}` : "";
+  return join(SESSIONS_DIR(), `${stamp}${suffix}.jsonl`);
 }
 
+/** Does this session file belong to a spawned `--task` subagent? */
+export function isTaskSessionLog(name: string): boolean {
+  return /-task-[A-Za-z0-9_-]+\.jsonl$/.test(name);
+}
+
+/**
+ * The most recently created top-level session log, or null if none exist.
+ * Subagent logs (`…-task-<id>.jsonl`) are children of a session, not
+ * sessions of their own, so they are never picked.
+ */
+export function latestSessionLogPath(): string | null {
+  let names: string[];
+  try {
+    names = readdirSync(SESSIONS_DIR()).filter((n) => n.endsWith(".jsonl") && !isTaskSessionLog(n));
+  } catch {
+    return null;
+  }
+  if (names.length === 0) return null;
+  names.sort();
+  return join(SESSIONS_DIR(), names[names.length - 1]!);
+}
+
+/**
+ * Decide which log a run appends to.  Priority: a reboot pointer (the
+ * relaunched process must continue its session), then an explicit request
+ * (`--resume [path]` / `--session <path>`), then a fresh file.
+ *
+ * Returns `null` when a resume was requested but nothing exists to resume.
+ */
+export function resolveSessionLog(input: {
+  reboot?: { log: string } | null;
+  /** `--resume` with no path → latest; a string → that path. */
+  resume?: { requested: boolean; path?: string };
+  /** `--session <path>` (subagents): use exactly this file. */
+  session?: string;
+  latest?: () => string | null;
+  fresh?: () => string;
+}): string | null {
+  if (input.reboot) return input.reboot.log;
+  if (input.session) return input.session;
+  if (input.resume?.requested) return input.resume.path ?? (input.latest ?? latestSessionLogPath)();
+  return (input.fresh ?? (() => newSessionLogPath()))();
+}
+
+/**
+ * Open (or create) the JSONL store for a session log.  Progress-only events
+ * (`stream_chunk`, `busy`, `idle`, `queue_changed`) are not persisted —
+ * they carry no state and would dwarf the file.
+ */
+export function openSessionStore(path: string): JsonlEventStore {
+  return createJsonlEventStore(path, { filter: (e) => !isEphemeralEvent(e) });
+}
+
+/** Write the reboot pointer.  Flush the agent's log first so the file it names is complete. */
+export async function saveRebootSession(logPath: string, reason: string): Promise<void> {
+  const session: RebootSession = { reason, log: logPath, timestamp: new Date().toISOString() };
+  await Bun.write(REBOOT_SESSION_PATH(), JSON.stringify(session, null, 2));
+  debugLog("REBOOT", `Session saved: ${reason} → ${logPath}`);
+}
+
+/** Read and delete the reboot pointer.  Null when absent or corrupt. */
 export async function loadRebootSession(): Promise<RebootSession | null> {
-  const file = Bun.file(REBOOT_SESSION_PATH);
+  const file = Bun.file(REBOOT_SESSION_PATH());
   if (!(await file.exists())) return null;
   try {
-    const session = await file.json();
+    const session = (await file.json()) as Partial<RebootSession>;
     const { unlinkSync } = await import("fs");
-    unlinkSync(REBOOT_SESSION_PATH);
-    return session as RebootSession;
+    unlinkSync(REBOOT_SESSION_PATH());
+    if (typeof session.log !== "string" || typeof session.reason !== "string") return null;
+    return { reason: session.reason, log: session.log, timestamp: session.timestamp };
   } catch (_: unknown) {
-    // Corrupt/unreadable session file — start fresh
+    // Corrupt/unreadable pointer — start fresh
     return null;
   }
 }
@@ -51,27 +131,27 @@ export function rebootIsFatal(error: Error): boolean {
 }
 
 /**
- * Wire up the shared "agent hit a RebootError, save state and restart"
- * handler.  Saves the current conversation session to
- * `.gloop/reboot_session.json` and then invokes the caller-supplied
- * `onRestart` callback, which is responsible for the host-specific
- * cleanup + process termination strategy (Ink unmount + exit 75 for the
- * interactive CLI, Bun.spawn replacement + exit 0 for headless, etc.).
+ * Wire up the shared "agent hit a RebootError, persist and restart" handler.
+ * Flushes the event log, writes the reboot pointer at `logPath`, then invokes
+ * `onRestart`, which owns the host-specific cleanup + process termination
+ * (Ink unmount + exit 75 for the interactive CLI, Bun.spawn replacement +
+ * exit 0 for headless, etc.).
  *
- * The handler only fires on `fatal` events whose error is a `RebootError`;
- * other fatal errors are ignored so callers can layer additional
- * classifiers if they need to.  The loop has already stopped processing
- * by the time `onRestart` runs — do not enqueue more messages.
+ * Only fires on `fatal` events whose error is a `RebootError`; other fatal
+ * errors are ignored so callers can layer additional classifiers.  The loop
+ * has already stopped processing by the time `onRestart` runs.
  */
 export function wireRebootHandler(
   agent: AgentLoop,
+  logPath: string,
   onRestart: (reason: string) => void | Promise<void>,
 ): void {
   agent.on("fatal", (event) => {
     if (!(event.error instanceof RebootError)) return;
     const reason = event.error.reason;
     void (async () => {
-      await saveRebootSession(agent.convo, reason);
+      await agent.flush();
+      await saveRebootSession(logPath, reason);
       debugLog("REBOOT", `Restarting: ${reason}`);
       await onRestart(reason);
     })();

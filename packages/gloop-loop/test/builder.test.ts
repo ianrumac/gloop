@@ -445,3 +445,27 @@ describe("AIConversation", () => {
     expect(result.toolCalls).toBeInstanceOf(Promise);
   });
 });
+
+describe("AIConversation — event-sourcing primitives", () => {
+  test("request() streams from history without recording anything", async () => {
+    const provider = new MockProvider(["reply"]);
+    const convo = new AIConversation(provider, "m", "sys");
+    convo.append({ role: "user", content: "hi" });
+    const result = convo.request();
+    let text = "";
+    for await (const chunk of result.textStream) text += chunk;
+    expect(text).toBe("reply");
+    expect(convo.getHistory()).toEqual([{ role: "user", content: "hi" }]);
+    expect(provider.lastConfig!.messages.map((m) => m.content)).toEqual(["sys", "hi"]);
+  });
+
+  test("append() pushes one message; getSystem() reads the prompt", () => {
+    const convo = new AIConversation(new MockProvider(), "m", "first");
+    expect(convo.getSystem()).toBe("first");
+    convo.setSystem("second");
+    expect(convo.getSystem()).toBe("second");
+    convo.append({ role: "user", content: "a" }).append({ role: "assistant", content: "b" });
+    expect(convo.getHistory()).toEqual([{ role: "user", content: "a" }, { role: "assistant", content: "b" }]);
+    expect(new AIConversation(new MockProvider(), "m").getSystem()).toBeUndefined();
+  });
+});

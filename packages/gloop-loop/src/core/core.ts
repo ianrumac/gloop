@@ -23,6 +23,13 @@ import {
 } from "../skills.js";
 import type { Span, Tracer } from "../trace.js";
 import { NoopTracer, withSpan } from "../trace.js";
+import type { AgentEvent, EventEnvelope, EventRef } from "../events.js";
+import { toErrorInfo } from "../events.js";
+import type { ContextTrigger } from "../context.js";
+import type { RetryConfig } from "../retry.js";
+import { withRetry, defaultRetryIf } from "../retry.js";
+import { AbortError, raceAbort } from "./abort.js";
+import type { Message } from "../ai/types.js";
 import type {
   Interceptor,
   LlmCallContext,
@@ -63,6 +70,16 @@ export interface SpawnResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+  /** Agent id the child used for its own events, if it has a log. */
+  agent?: string;
+  /** Locator of the child's event log (e.g. its JSONL path). */
+  log?: string;
+}
+
+/** What the interpreter tells a spawn handler about the spawning event. */
+export interface SpawnCall {
+  /** The `spawn_start` event — pass it to the child so it can record `cause`. */
+  cause?: EventRef;
 }
 
 /** Continuation: what to do with tool results */
@@ -154,21 +171,7 @@ export interface World {
   interceptors?: ReadonlyArray<Interceptor>;
 }
 
-export class AbortError extends Error {
-  constructor() { super("Interrupted by user"); this.name = "AbortError"; }
-}
-
-/** Race a promise against an AbortSignal. Rejects with AbortError if signal fires. */
-export function raceAbort<T>(signal: AbortSignal | undefined, promise: Promise<T>): Promise<T> {
-  if (!signal) return promise;
-  if (signal.aborted) return Promise.reject(new AbortError());
-  return Promise.race([
-    promise,
-    new Promise<never>((_, reject) =>
-      signal.addEventListener("abort", () => reject(new AbortError()), { once: true })
-    ),
-  ]);
-}
+export { AbortError, raceAbort };
 
 export const mkWorld = (
   convo: AIConversation,
@@ -227,21 +230,51 @@ async function withWorldSpan<T>(
 // EFFECTS — Side effects the interpreter can perform
 // ============================================================================
 
+/**
+ * Events the interpreter itself produces for the log — every history
+ * mutation and every boundary crossing.  Delivered through `Effects.record`.
+ */
+export type CoreEvent = Extract<
+  AgentEvent,
+  {
+    type:
+      | "user_message"
+      | "assistant_message"
+      | "assistant_tool_calls"
+      | "tool_message"
+      | "history_replaced"
+      | "llm_request"
+      | "llm_response"
+      | "llm_error"
+      | "retry"
+      | "spawn_start"
+      | "spawn_done";
+  }
+>;
+
 export interface Effects {
   streamChunk: (text: string) => void;
   streamDone: () => void;
-  toolStart: (name: string, preview: string) => void;
+  toolStart: (name: string, preview: string, args?: Record<string, string>, callId?: string) => void;
   toolDone: (name: string, ok: boolean, output: string) => void;
+  /**
+   * Record an interpreter event (history writes, LLM request/response,
+   * retries, spawns).  Optional — when omitted the interpreter still keeps
+   * the conversation correct, it just isn't observable.  May return the
+   * logged event (with envelope) so the interpreter can reference it.
+   */
+  record?: (event: CoreEvent) => (CoreEvent & EventEnvelope) | void;
   confirm: (command: string) => Promise<boolean>;
   ask: (question: string) => Promise<string>;
   remember: (content: string) => Promise<void>;
   forget: (content: string) => Promise<void>;
   refreshSystem: () => Promise<void>;
-  manageContext: (instructions: string) => Promise<string>;
+  /** `trigger` says who asked: the model's ManageContext call (`"tool"`) or `contextPruneInterval` (`"auto"`). */
+  manageContext: (instructions: string, trigger?: ContextTrigger) => Promise<string>;
   complete: (summary: string) => void;
   installTool: (source: string) => Promise<string>;
   listTools: () => string;
-  spawn: (task: string) => Promise<SpawnResult>;
+  spawn: (task: string, call: SpawnCall) => Promise<SpawnResult>;
   /** Optional debug logger — receives (label, content) pairs */
   log?: (label: string, content: string) => void;
 }
@@ -282,6 +315,13 @@ export interface LoopConfig {
    * substitutions). Should match the listing merged into the system prompt.
    */
   skills?: Skill[];
+
+  /**
+   * Retry policies.  `retry.llm` retries a failed model call (never one that
+   * already streamed output — that would duplicate text; never an abort).
+   * `retry.tool` retries tools that declare `retryable: true`.  Off by default.
+   */
+  retry?: RetryConfig;
 }
 
 /** Thrown when a turn exceeds `LoopConfig.maxIterations` LLM calls. */
@@ -310,6 +350,27 @@ function raceIdleTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer)) as Promise<T>;
 }
 
+/**
+ * Append one message to the conversation AND record the matching event.
+ * Every history write in the interpreter goes through here so the log can
+ * always rebuild `convo.getHistory()` exactly.
+ */
+function appendHistory(world: World, fx: Effects, message: Message, partial = false): void {
+  world.convo.append(message);
+  if (message.role === "user") {
+    fx.record?.({ type: "user_message", content: message.content });
+  } else if (message.role === "assistant") {
+    fx.record?.({
+      type: "assistant_message",
+      content: message.content,
+      ...(message.toolCalls?.length && { toolCalls: message.toolCalls }),
+      ...(partial && { partial: true }),
+    });
+  } else if (message.role === "tool") {
+    fx.record?.({ type: "tool_message", toolCallId: message.toolCallId ?? "", content: message.content });
+  }
+}
+
 // ============================================================================
 // TOOL CALL CONVERSION
 // ============================================================================
@@ -325,16 +386,27 @@ function spawnToToolResult(r: SpawnResult): ToolResult {
   };
 }
 
-/** foldr over spawn tasks: chain Spawn forms right-to-left with a base continuation.
- *  Like (foldr (λ task acc → Spawn task (λ r → Emit r acc)) base tasks) */
-function chainSpawns(tasks: string[], base: Form): Form {
-  return tasks.reduceRight<Form>(
-    (acc, task) => Spawn(task, (r) => Emit(formatResults([spawnToToolResult(r)]), acc)),
-    base,
-  );
+/**
+ * Chain Spawn forms left-to-right, collecting each result, then hand all of
+ * them to `then`.  The results reach the model the same way tool results
+ * do — a spawn is a tool call whose "execute" is another agent.
+ */
+function chainSpawns(tasks: string[], then: Continuation): Form {
+  const go = (i: number, acc: ToolResult[]): Form =>
+    i >= tasks.length ? then(acc) : Spawn(tasks[i]!, (r) => go(i + 1, [...acc, spawnToToolResult(r)]));
+  return go(0, []);
 }
 
-/** Build a Form from a list of ToolCalls, using optional spawn classifier */
+/**
+ * Build a Form from a list of ToolCalls.
+ *
+ * `classifySpawn` is the LEGACY way to route subagent tasks: matching calls
+ * become `Spawn` forms whose results are fed back as a synthetic user
+ * message.  gloop-loop's own interpreter no longer passes it — `evalInvoke`
+ * handles spawn-classified calls inline (natively recorded, visible as
+ * tool_start / tool_done).  The parameter stays for hosts with their own
+ * interpreter over the Form ADT (gloop-effect).
+ */
 export function toolCallsToForm(toolCalls: ToolCall[], classifySpawn?: (call: ToolCall) => string | null): Form {
   if (toolCalls.length === 0) return Nil;
 
@@ -372,15 +444,42 @@ export function toolCallsToForm(toolCalls: ToolCall[], classifySpawn?: (call: To
       native ? Continue() : Think(formatResults(results)));
   }
 
-  // Mixed or all-spawn: invoke plain tools first (if any), then fold spawns, then think
+  // Mixed: invoke plain tools first, then the spawns; the model sees every
+  // result (plain ones natively when ids are present, spawn ones as text).
   if (plainCalls.length > 0) {
     return Invoke(plainCalls, (toolResults) =>
-      chainSpawns(spawnTasks, native ? Continue() : Think(formatResults(toolResults)))
+      chainSpawns(spawnTasks, (spawnResults) =>
+        Think(formatResults(native ? spawnResults : [...toolResults, ...spawnResults]))),
     );
   }
 
-  // All spawns: fold into a chain that collects results then thinks
-  return chainSpawns(spawnTasks, Think(""));
+  // All spawns: run them, then think with their results.
+  return chainSpawns(spawnTasks, (spawnResults) => Think(formatResults(spawnResults)));
+}
+
+/** Run the spawn boundary (interceptors + `fx.spawn`) with start/done events. */
+async function runSpawn(world: World, fx: Effects, task: string): Promise<SpawnResult> {
+  return withWorldSpan(world, "spawn", { taskLength: task.length }, async (span) => {
+    const started = fx.record?.({ type: "spawn_start", task });
+    const call: SpawnCall = started
+      ? { cause: { agent: started.agent, eventId: started.eventId } }
+      : {};
+    const r = await chainBoundary(
+      world.interceptors,
+      "spawn",
+      (ctx) => fx.spawn(ctx.task, call),
+    )({ task } as SpawnContext);
+    fx.record?.({
+      type: "spawn_done",
+      ok: r.success,
+      exitCode: r.exitCode,
+      summary: r.summary,
+      ...(r.agent && { child: { agent: r.agent, ...(r.log && { log: r.log }) } }),
+    });
+    span.setAttribute("ok", r.success);
+    span.setAttribute("exitCode", r.exitCode);
+    return r;
+  });
 }
 
 export function formatResults(results: ToolResult[]): string {
@@ -516,21 +615,7 @@ export async function eval_(
     }
 
     case "spawn": {
-      const result = await withWorldSpan(
-        world,
-        "spawn",
-        { taskLength: form.task.length },
-        async (span) => {
-          const r = await chainBoundary(
-            world.interceptors,
-            "spawn",
-            (ctx) => fx.spawn(ctx.task),
-          )({ task: form.task } as SpawnContext);
-          span.setAttribute("ok", r.success);
-          span.setAttribute("exitCode", r.exitCode);
-          return r;
-        },
-      );
+      const result = await runSpawn(world, fx, form.task);
       return eval_(form.then(result), world, fx, config);
     }
   }
@@ -568,6 +653,12 @@ async function evalThink(
   const jsonTools = world.registry.toJsonTools();
   world.convo.setJsonTools(jsonTools);
 
+  // The user turn is written to history HERE (paired with a `user_message`
+  // event) — never implicitly by the conversation object.
+  if (input !== null) {
+    appendHistory(world, fx, { role: "user", content: input });
+  }
+
   const llmResult = await withWorldSpan(
     world,
     "ai.stream",
@@ -585,6 +676,14 @@ async function evalThink(
         tools: jsonTools,
       };
 
+      fx.record?.({
+        type: "llm_request",
+        model: world.convo.model,
+        input,
+        historyLength: ctx.messages.length,
+        toolCount: jsonTools.length,
+      });
+
       // The final handler runs the actual streaming call. Interceptors can
       // observe `ctx`, mutate `ctx.input`, short-circuit (return a synthetic
       // result), or wrap with retry / timing / caching logic.
@@ -592,50 +691,101 @@ async function evalThink(
         world.interceptors,
         "llmCall",
         async (innerCtx): Promise<LlmCallResult> => {
-          let fullText = "";
-          const stream = input === null
-            ? world.convo.streamContinue()
-            : world.convo.stream(innerCtx.input);
-
-          try {
-            const iter = stream.textStream[Symbol.asyncIterator]();
-            while (true) {
-              const { done, value } = await raceIdleTimeout(
-                raceAbort(world.signal, iter.next()),
-                idleMs,
-              );
-              if (done) break;
-              fx.streamChunk(value);
-              fullText += value;
+          // If an interceptor rewrote the input, the rewritten text is what
+          // the model must see — swap the user message we just appended, and
+          // log the swap so replay stays exact.
+          if (input !== null && innerCtx.input !== input) {
+            const h = world.convo.getHistory();
+            const last = h[h.length - 1];
+            if (last && last.role === "user" && last.content === input) {
+              h[h.length - 1] = { role: "user", content: innerCtx.input };
+              world.convo.setHistory(h);
+              fx.record?.({ type: "history_replaced", history: h, reason: "interceptor_rewrite" });
             }
-          } catch (err) {
-            if (err instanceof AbortError) {
-              await stream.cancel().catch(() => {});
-              if (fullText) {
-                const h = world.convo.getHistory();
-                h.push({ role: "assistant", content: fullText });
-                world.convo.setHistory(h);
-              }
-            } else if (err instanceof LlmIdleTimeoutError) {
-              await stream.cancel().catch(() => {});
-            }
-            throw err;
           }
 
-          fx.streamDone();
-          const calls = await raceIdleTimeout(stream.toolCalls, idleMs);
-          const finishReason = await raceIdleTimeout(stream.finishReason, idleMs);
-          return { text: fullText, toolCalls: calls, finishReason };
+          // Retrying is only safe while nothing has reached the user yet —
+          // a second attempt after streamed text would duplicate output.
+          let streamedAny = false;
+          const configured = config?.retry?.llm;
+          const policy = configured
+            ? {
+                ...configured,
+                retryIf: (err: unknown, attempt: number) =>
+                  !streamedAny && (configured.retryIf ?? defaultRetryIf)(err, attempt),
+              }
+            : undefined;
+          return withRetry(
+            policy,
+            async (attempt): Promise<LlmCallResult> => {
+              let fullText = "";
+              const stream = world.convo.request();
+              try {
+                const iter = stream.textStream[Symbol.asyncIterator]();
+                while (true) {
+                  const { done, value } = await raceIdleTimeout(
+                    raceAbort(world.signal, iter.next()),
+                    idleMs,
+                  );
+                  if (done) break;
+                  streamedAny = true;
+                  fx.streamChunk(value);
+                  fullText += value;
+                }
+                fx.streamDone();
+                const calls = await raceIdleTimeout(stream.toolCalls, idleMs);
+                const finishReason = await raceIdleTimeout(stream.finishReason, idleMs);
+                return { text: fullText, toolCalls: calls, finishReason };
+              } catch (err) {
+                if (err instanceof AbortError) {
+                  await stream.cancel().catch(() => {});
+                  if (fullText) {
+                    appendHistory(world, fx, { role: "assistant", content: fullText }, true);
+                  }
+                } else {
+                  if (err instanceof LlmIdleTimeoutError) {
+                    await stream.cancel().catch(() => {});
+                  }
+                  fx.record?.({ type: "llm_error", error: toErrorInfo(err), attempt });
+                }
+                throw err;
+              }
+            },
+            {
+              signal: world.signal,
+              onRetry: (info) =>
+                fx.record?.({
+                  type: "retry",
+                  boundary: "llm",
+                  attempt: info.attempt,
+                  maxAttempts: info.maxAttempts,
+                  delayMs: info.delayMs,
+                  error: toErrorInfo(info.error),
+                }),
+            },
+          );
         },
       )(ctx);
 
       fx.log?.("LLM_OUTPUT", result.text);
+      fx.record?.({
+        type: "llm_response",
+        text: result.text,
+        toolCalls: [...result.toolCalls],
+        finishReason: result.finishReason,
+      });
       span.setAttribute("outputLength", result.text.length);
       span.setAttribute("toolCallsRequested", result.toolCalls.length);
       span.setAttribute("finishReason", result.finishReason ?? "unknown");
       return result;
     },
   );
+
+  // Record the assistant's text.  When tool calls follow, evalInvoke merges
+  // them into this same message once the tools have run.
+  if (llmResult.text) {
+    appendHistory(world, fx, { role: "assistant", content: llmResult.text });
+  }
 
   if (llmResult.toolCalls.length > 0) {
     const toolCalls = jsonToolCallsToToolCalls(
@@ -649,7 +799,7 @@ async function evalThink(
     if (llmResult.toolCalls.every((c) => c.id)) {
       world.pendingToolCalls = { text: llmResult.text, calls: [...llmResult.toolCalls] };
     }
-    const nextForm = toolCallsToForm(toolCalls, config?.classifySpawn);
+    const nextForm = toolCallsToForm(toolCalls);
     return eval_(nextForm, world, fx, config);
   }
 
@@ -668,7 +818,7 @@ async function evalThink(
  * tasks) get a synthetic response so the provider never sees an unanswered
  * tool call id.
  */
-function recordNativeToolMessages(world: World, results: ToolResult[]): void {
+function recordNativeToolMessages(world: World, fx: Effects, results: ToolResult[]): void {
   const pending = world.pendingToolCalls;
   if (!pending) return;
   world.pendingToolCalls = null;
@@ -677,14 +827,16 @@ function recordNativeToolMessages(world: World, results: ToolResult[]): void {
   const last = h[h.length - 1];
   if (last && last.role === "assistant" && last.content === pending.text && !last.toolCalls) {
     h[h.length - 1] = { ...last, toolCalls: pending.calls };
+    world.convo.setHistory(h);
+    fx.record?.({ type: "assistant_tool_calls", toolCalls: pending.calls });
   } else {
-    h.push({ role: "assistant", content: pending.text, toolCalls: pending.calls });
+    appendHistory(world, fx, { role: "assistant", content: pending.text, toolCalls: pending.calls });
   }
 
   const byId = new Map(results.filter((r) => r.id).map((r) => [r.id!, r]));
   for (const call of pending.calls) {
     const r = byId.get(call.id);
-    h.push({
+    appendHistory(world, fx, {
       role: "tool",
       toolCallId: call.id,
       content: r
@@ -692,7 +844,6 @@ function recordNativeToolMessages(world: World, results: ToolResult[]): void {
         : "(handled by the host — no tool output)",
     });
   }
-  world.convo.setHistory(h);
 }
 
 /** Invoke: execute tools (with confirmation), then continue */
@@ -712,6 +863,19 @@ async function evalInvoke(
   for (const call of calls) {
     if (world.signal?.aborted) throw new AbortError();
 
+    // A spawn-classified call (e.g. `Bash("gloop --task …")`) is a tool call
+    // whose "execute" is another agent: run it through the spawn boundary
+    // and record the result exactly like a tool result.
+    const spawnTask = config?.classifySpawn?.(call) ?? null;
+    if (spawnTask !== null) {
+      fx.toolStart(call.name, `spawn: ${spawnTask.substring(0, 50)}`, call.args, call.id);
+      const r = await runSpawn(world, fx, spawnTask);
+      const result = spawnToToolResult(r);
+      results.push({ ...result, name: call.name, id: call.id });
+      fx.toolDone(call.name, r.success, r.success ? "ok" : result.output);
+      continue;
+    }
+
     // Handle AskUser specially
     if (call.name === "AskUser") {
       const question = call.args.question ?? "What would you like to do?";
@@ -726,7 +890,7 @@ async function evalInvoke(
     if (call.name === "ManageContext") {
       const instructions = call.args.instructions ?? "Prune stale messages";
       fx.toolStart("ManageContext", instructions.substring(0, 60));
-      const result = await fx.manageContext(instructions);
+      const result = await fx.manageContext(instructions, "tool");
       results.push({ name: "ManageContext", output: result, success: true, id: call.id });
       fx.toolDone("ManageContext", true, result);
       continue;
@@ -786,7 +950,7 @@ async function evalInvoke(
     const preview = Object.values(call.args)
       .map((v) => `"${v.substring(0, 40)}${v.length > 40 ? "..." : ""}"`)
       .join(", ");
-    fx.toolStart(call.name, preview);
+    fx.toolStart(call.name, preview, call.args, call.id);
 
     await withWorldSpan(
       world,
@@ -807,10 +971,28 @@ async function evalInvoke(
                 output: `Unknown tool: ${innerCtx.name}`,
               };
             }
+            const policy = resolved.retryable ? config?.retry?.tool : undefined;
             try {
-              const output = await resolved.execute(innerCtx.args);
+              const output = await withRetry(
+                policy,
+                () => resolved.execute(innerCtx.args),
+                {
+                  signal: world.signal,
+                  onRetry: (info) =>
+                    fx.record?.({
+                      type: "retry",
+                      boundary: "tool",
+                      name: innerCtx.name,
+                      attempt: info.attempt,
+                      maxAttempts: info.maxAttempts,
+                      delayMs: info.delayMs,
+                      error: toErrorInfo(info.error),
+                    }),
+                },
+              );
               return { success: true, output };
             } catch (err) {
+              if (err instanceof AbortError) throw err;
               const msg = err instanceof Error
                 ? `${err.message}${err.stack ? "\n" + err.stack.split("\n").slice(1, 4).join("\n") : ""}`
                 : String(err);
@@ -838,7 +1020,7 @@ async function evalInvoke(
   // Record the assistant's tool calls and their results natively in history
   // BEFORE any reload/prune so the model's next request sees a consistent
   // assistant-toolCalls → tool-responses pair.
-  recordNativeToolMessages(world, results);
+  recordNativeToolMessages(world, fx, results);
 
   // Refresh system prompt if Reload was called
   if (hasReload) {
@@ -851,7 +1033,7 @@ async function evalInvoke(
   if (interval > 0 && world.toolCalls >= interval) {
     world.toolCalls = 0;
     fx.toolStart("ManageContext", `auto-pruning after ${interval} tool calls`);
-    const pruneResult = await fx.manageContext("Prune old tool results and intermediate outputs. Keep the current task goal, recent results, and any information the agent is actively using.");
+    const pruneResult = await fx.manageContext("Prune old tool results and intermediate outputs. Keep the current task goal, recent results, and any information the agent is actively using.", "auto");
     fx.toolDone("ManageContext", true, pruneResult);
   }
 
