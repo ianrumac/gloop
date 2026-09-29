@@ -2,6 +2,15 @@
 
 All notable changes to `@hypen-space/gloop-loop` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.4.0]
+
+### Breaking
+- The `ManageContext` result string now reads `removed N messages, added M, K remaining` (was `…, injected summary, …`). `Effects.manageContext` takes an optional second argument, `trigger: "tool" | "auto"`.
+
+### Added
+- **Swappable context trimming.** `contextStrategy: (graph, ctx) => graph` replaces the built-in pruner. `projectContext(events, agent, history?)` projects the live history into a `ContextGraph` — one node per message with the `eventId` / `turn` that wrote it (provenance survives `history_replaced` / `restored`), `tool_result` edges from an assistant's tool calls to their responses. The returned graph becomes the new history (`history_replaced`, reason `context_pruned:<removed>`); partly kept tool-call groups are dropped as a unit (`closeToolGroups`). `ctx` carries `instructions`, `trigger`, the full log (`events`, `eventLog`), `provider` / `model` and the turn's abort `signal`. The previous behaviour is the default, `llmContextStrategy()`; `keepLastTurns(n)` is a model-free alternative. `trimContext` / `describeTrim` / `contextGraph` / `contextNode` / `contextFromHistory` are exported for hosts with their own interpreter; the projection is also in `/replay`.
+- `keepLastTurns(n)` — a model-free strategy that keeps only what the last `n` turns wrote.
+
 ## [0.3.0]
 
 ### Breaking
@@ -10,7 +19,6 @@ All notable changes to `@hypen-space/gloop-loop` are documented here. Format fol
 - **Spawned subagent results reach the model.** A spawn-classified call (`classifySpawn`) is now executed inside `evalInvoke` like any tool: visible as `tool_start` / `tool_done`, its result recorded as a native `tool_message`. Previously an all-spawn response echoed the result to the UI and sent the model an empty user turn. `toolCallsToForm` keeps its optional `classifySpawn` parameter for hosts with their own interpreter; its spawn chain now feeds results back as a synthetic user message instead of dropping them.
 - `Effects` gains an optional `record(event)` callback and `toolStart` takes optional `args` / `callId`; the interpreter now owns every history write (via `AIConversation.append` + `request()`) instead of relying on the conversation's streaming wrapper. Hosts that implement `Effects` by hand are unaffected unless they relied on `convo.stream()` pushing history for them.
 - `manageContextFork` takes an optional 4th `options` argument (`eventLog`, `id`, `onReplaced`).
-- The `ManageContext` result string now reads `removed N messages, added M, K remaining` (was `…, injected summary, …`). `Effects.manageContext` takes an optional second argument, `trigger: "tool" | "auto"`.
 - `AbortError` / `raceAbort` moved to `core/abort.ts` (still re-exported from the package root and `core/core.ts`).
 
 ### Added
@@ -23,7 +31,6 @@ All notable changes to `@hypen-space/gloop-loop` are documented here. Format fol
 - `retry` option (`{ llm?, tool? }`) with `withRetry` / `RetryPolicy` — exponential backoff, `retryIf`, abort-aware, every attempt logged as a `retry` event. An LLM call is never retried after it has streamed output; tools are retried only when they declare `retryable: true`.
 - `agent.setHistory(messages, reason)` (logged), `agent.id`, `agent.log`, `agent.flush()`, `AIConversation.request()` / `append()` / `getSystem()`.
 - **Cross-agent graph.** `send(message, { cause })` links a message to the event it reacts to (any `LogEvent`, or an `EventRef` with a `log` locator). `EventLog.ancestors` / `children` follow `message.cause` as well as `parent`, `descendants(eventId)` collects everything an event led to, and `causeOf(event)` exposes the single step. Fan-out from one event to several agents is several `message_queued` children. `projectGraph(events)` turns a (possibly multi-log) event list into `{ agents, nodes (turn attempts), edges (messages with their causing turn/event), roots }` — nodes come from `projectState` per agent, so re-runs after a restore appear as separate attempts (`agent:msg_1`, `agent:msg_1#2`); `graphToMermaid` renders it; `mergeEvents` joins several logs. Inbox events (`message_queued`, `queue_changed`) and `hook_error` are logged outside the running turn so a message typed mid-turn is never claimed as caused by it.
-- **Swappable context trimming.** `contextStrategy: (graph, ctx) => graph` replaces the built-in pruner. `projectContext(events, agent, history?)` projects the live history into a `ContextGraph` — one node per message with the `eventId` / `turn` that wrote it (provenance survives `history_replaced` / `restored`), `tool_result` edges from an assistant's tool calls to their responses. The returned graph becomes the new history (`history_replaced`, reason `context_pruned:<removed>`); partly kept tool-call groups are dropped as a unit (`closeToolGroups`). `ctx` carries `instructions`, `trigger`, the full log (`events`, `eventLog`), `provider` / `model` and the turn's abort `signal`. The previous behaviour is the default, `llmContextStrategy()`; `keepLastTurns(n)` is a model-free alternative. `trimContext` / `describeTrim` / `contextGraph` / `contextNode` / `contextFromHistory` are exported for hosts with their own interpreter; the projection is also in `/replay`.
 - `parseJsonlEvents` is the single definition of a valid persisted line (used by the JSONL store and the viewer). `createJsonlEventStore().load()` treats only a missing file as empty; other read errors surface. A failed `EventLog.load()` can be retried.
 - `@hypen-space/gloop-loop/testing` — `ScriptedProvider` and small tool doubles for driving an agent without a model.
 - `AgentLoop.resume` throws when the log belongs to a different agent id, and only emits `restored` when there was something to restore. `hydrate()` throws once the agent has started. `stop()` rejects `sendSync` promises whose message never got a turn. `awaitIdle()` no longer resolves early between dequeue and `turn_start`.
