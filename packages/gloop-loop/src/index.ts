@@ -91,8 +91,8 @@ export {
   readMemory,
 } from "./defaults/memory.js";
 export type { FileMemory, FileMemoryOptions } from "./defaults/memory.js";
-export { manageContextFork } from "./defaults/context-manager.js";
-export type { ManageContextOptions } from "./defaults/context-manager.js";
+export { manageContextFork, llmContextStrategy } from "./defaults/context-manager.js";
+export type { ManageContextOptions, LlmContextStrategyOptions } from "./defaults/context-manager.js";
 
 // --- Skills (SKILL.md discovery is host-specific; helpers are portable) ---
 export type { Skill, ParsedSkillMarkdown, SkillSlashMatch } from "./skills.js";
@@ -212,6 +212,27 @@ export { bridgeAgents } from "./hooks.js";
 // --- Graph: who talked to whom, because of what ---
 export type { AgentGraph, TurnNode, MessageEdge, LinkedLog } from "./graph.js";
 export { projectGraph, graphToMermaid, linkedLogs, mergeEvents } from "./graph.js";
+
+// --- Context: the history as a graph, and the strategy that trims it ---
+export type {
+  ContextGraph,
+  ContextNode,
+  ContextEdge,
+  ContextStrategy,
+  ContextStrategyContext,
+  ContextTrigger,
+  ContextTrim,
+} from "./context.js";
+export {
+  projectContext,
+  contextFromHistory,
+  contextGraph,
+  contextNode,
+  closeToolGroups,
+  trimContext,
+  describeTrim,
+  keepLastTurns,
+} from "./context.js";
 
 // --- AgentLoop: high-level actor-style entry point ---
 export { AgentLoop } from "./agent.js";

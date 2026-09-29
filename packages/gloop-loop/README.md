@@ -305,6 +305,28 @@ g.roots   // turns nobody caused (user input)
 console.log(graphToMermaid(g));
 ```
 
+### Context trimming — graph in, trimmed graph out
+
+When the model calls `ManageContext` (or `contextPruneInterval` fires), the agent projects its context into a graph and hands it to a `ContextStrategy`. Nodes are the messages of the live history, each tied to the log event and turn that wrote it; edges pair an assistant's tool calls with their `role: "tool"` responses. The strategy returns the trimmed graph — drop nodes, rewrite `node.message`, or add nodes with `contextNode` — and the result becomes the new history, logged as one `history_replaced` event. The log itself is never trimmed.
+
+```ts
+import { AgentLoop, contextGraph, contextNode, keepLastTurns, type ContextStrategy } from "@hypen-space/gloop-loop";
+
+// Built-in, model-free: keep only what the last 5 turns wrote.
+new AgentLoop({ provider, model, contextStrategy: keepLastTurns(5) });
+
+// Your own: elide big tool outputs from every turn but the current one.
+const elideOldToolOutput: ContextStrategy = (graph) => {
+  const current = graph.nodes.at(-1)?.turn;
+  return contextGraph(graph.agent, graph.nodes.map((n) =>
+    n.turn !== current && n.message.role === "tool" && n.message.content.length > 2000
+      ? { ...n, message: { ...n.message, content: "[output elided]" } }
+      : n));
+};
+```
+
+`ctx` carries `instructions`, `trigger` (`"tool"` | `"auto"`), the whole log as `events` (feed it to `projectGraph` — `node.turn` joins to `TurnNode.turn` — or `projectState`), `eventLog`, the agent's `provider` / `model`, and the turn's abort `signal`. A tool-call group the result only partly keeps is dropped as a unit, so a strategy can never leave an unanswered tool call behind. The default is `llmContextStrategy()`: a forked agent (`${id}/context` on the same log) marks stale messages and writes a summary. `projectContext(events, agent)` gives you the same graph outside a prune.
+
 ### Hooks — attach behaviour (and other agents)
 
 Interceptors sit *in* the call path and can rewrite, short-circuit or retry a boundary. Hooks sit *on the log*: they see every event after it happened, may be async, and can never break the loop — a throw or rejection becomes a `hook_error` event.
@@ -586,6 +608,7 @@ Discriminated union on `.type`. Every delivered event also carries the envelope 
 | `hooks` | — | `AgentHook[]` attached at construction |
 | `retry` | off | `{ llm?, tool? }` retry policies |
 | `contextPruneInterval` | 0 (off) | Tool-call count between auto-prunes |
+| `contextStrategy` | `llmContextStrategy()` | `(graph, ctx) => graph` — decides what stays in context on a prune |
 | `classifySpawn` | — | Classify tool calls as spawn tasks |
 | `log` | — | Debug logger |
 
@@ -597,6 +620,7 @@ Discriminated union on `.type`. Every delivered event also carries the envelope 
 - **Event sourcing**: `EventLog`, `MemoryEventStore`, `createJsonlEventStore`, `parseJsonlEvents`, `EventStore`, `LogEvent`, `EventEnvelope`, `isEphemeralEvent`, `serializeEvent`, `toErrorInfo`
 - **State**: `projectState`, `reduce`, `initialState`, `messagesToRequeue`, `AgentState`, `TurnRecord`
 - **Hooks**: `AgentHook`, `bridgeAgents`, `HookTarget`, `SendOptions`
+- **Context**: `projectContext`, `contextFromHistory`, `contextGraph`, `contextNode`, `closeToolGroups`, `trimContext`, `describeTrim`, `keepLastTurns`, `llmContextStrategy`, `ContextStrategy`, `ContextStrategyContext`, `ContextGraph`, `ContextNode`, `ContextEdge`, `ContextTrim`, `ContextTrigger`
 - **Graph**: `projectGraph`, `graphToMermaid`, `linkedLogs`, `mergeEvents`, `AgentGraph`, `TurnNode`, `MessageEdge`, `LinkedLog`
 - **Testing** (`@hypen-space/gloop-loop/testing`): `ScriptedProvider`, `tc`, `tcNoId`, `echoTool`, `completeTool`, `bashTool`, `spawnPrefixClassifier`
 - **Retry**: `withRetry`, `RetryPolicy`, `RetryConfig`, `backoffDelay`, `defaultRetryIf`

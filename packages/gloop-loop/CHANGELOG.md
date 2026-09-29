@@ -2,6 +2,15 @@
 
 All notable changes to `@hypen-space/gloop-loop` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.4.0]
+
+### Breaking
+- The `ManageContext` result string now reads `removed N messages, added M, K remaining` (was `…, injected summary, …`). `Effects.manageContext` takes an optional second argument, `trigger: "tool" | "auto"`.
+
+### Added
+- **Swappable context trimming.** `contextStrategy: (graph, ctx) => graph` replaces the built-in pruner. `projectContext(events, agent, history?)` projects the live history into a `ContextGraph` — one node per message with the `eventId` / `turn` that wrote it (provenance survives `history_replaced` / `restored`), `tool_result` edges from an assistant's tool calls to their responses. The returned graph becomes the new history (`history_replaced`, reason `context_pruned:<removed>`); partly kept tool-call groups are dropped as a unit (`closeToolGroups`). `ctx` carries `instructions`, `trigger`, the full log (`events`, `eventLog`), `provider` / `model` and the turn's abort `signal`. The previous behaviour is the default, `llmContextStrategy()`; `keepLastTurns(n)` is a model-free alternative. `trimContext` / `describeTrim` / `contextGraph` / `contextNode` / `contextFromHistory` are exported for hosts with their own interpreter; the projection is also in `/replay`.
+- `keepLastTurns(n)` — a model-free strategy that keeps only what the last `n` turns wrote.
+
 ## [0.3.0]
 
 ### Breaking

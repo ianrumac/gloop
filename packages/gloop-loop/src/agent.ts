@@ -55,7 +55,8 @@ import {
   type SpawnCall,
   type CoreEvent,
 } from "./core/core.js";
-import { manageContextFork } from "./defaults/context-manager.js";
+import { llmContextStrategy } from "./defaults/context-manager.js";
+import { describeTrim, projectContext, trimContext, type ContextStrategy } from "./context.js";
 import { mergeSkillsIntoSystem } from "./skills.js";
 import type { Skill } from "./skills.js";
 import { withSpan } from "./trace.js";
@@ -249,6 +250,21 @@ export interface AgentLoopOptions {
    * short-circuit, or retry.  `interceptors[0]` is outermost.
    */
   interceptors?: ReadonlyArray<import("./interceptors.js").Interceptor>;
+
+  /**
+   * How context is trimmed when the model calls `ManageContext` or
+   * `contextPruneInterval` fires: receives the agent's context graph
+   * (`projectContext` — every message with the event and turn that wrote
+   * it), returns the trimmed graph.  The result becomes the new history and
+   * is logged as `history_replaced`; the log itself is never trimmed.
+   * Default: `llmContextStrategy()` — a forked agent prunes and summarises.
+   *
+   * @example
+   * ```ts
+   * contextStrategy: keepLastTurns(5)
+   * ```
+   */
+  contextStrategy?: ContextStrategy;
 
   // ---- Loop config ----
   /** Number of tool calls between automatic context prune. 0 disables. Default: 0 */
@@ -1051,13 +1067,28 @@ export class AgentLoop implements HookTarget {
         this.emit({ type: "system_refreshed" });
       },
 
-      manageContext: async (instructions) =>
-        manageContextFork(this.convo, instructions, this.debugLog, {
+      manageContext: async (instructions, trigger = "tool") => {
+        const graph = projectContext(this.log.eventsFor(this.id), this.id, this.convo.getHistory());
+        this.debugLog?.("MANAGE_CONTEXT", `Starting context management, ${graph.nodes.length} messages: ${instructions}`);
+        const trim = await trimContext(opts.contextStrategy ?? llmContextStrategy(), graph, {
+          agent: this.id,
+          instructions,
+          trigger,
+          events: this.log.events(),
           eventLog: this.log,
-          id: `${this.id}/context`,
-          onReplaced: (history, removed) =>
-            this.emit({ type: "history_replaced", history, reason: `context_pruned:${removed}` }),
-        }),
+          provider: this.convo.provider,
+          model: this.convo.model,
+          ...(this.currentAbort && { signal: this.currentAbort.signal }),
+          ...(this.debugLog && { log: this.debugLog }),
+        });
+        if (trim.changed) {
+          this.convo.setHistory(trim.history);
+          this.emit({ type: "history_replaced", history: trim.history, reason: `context_pruned:${trim.removed}` });
+        }
+        const result = describeTrim(trim, graph.nodes.length);
+        this.debugLog?.("MANAGE_CONTEXT", result);
+        return result;
+      },
 
       complete: (summary) => { this.emit({ type: "task_complete", summary }); },
 
