@@ -101,6 +101,10 @@ export async function buildViewerHtml(events: LogEvent[], sources: string[]): Pr
     target: "browser",
     format: "esm",
     minify: true,
+    // The workspace package's `exports` point at `dist/` for `import` and at
+    // `src/` for `bun`.  A browser-target build only tries the former, which
+    // is gitignored and not built in CI — ask for the source entry instead.
+    conditions: ["bun"],
   });
   if (!bundle.success) {
     throw new Error("viewer bundle failed:\n" + bundle.logs.map((l) => String(l)).join("\n"));
