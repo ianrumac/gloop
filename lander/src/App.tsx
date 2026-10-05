@@ -68,6 +68,99 @@ await agent.stop();
 `;
 }
 
+function buildAllOptionsExample(model: string) {
+  return `import {
+  AgentLoop, OpenRouterProvider, createFileMemory,
+  createJsonlEventStore, keepLastTurns,
+} from "@hypen-space/gloop-loop";
+
+const memory = createFileMemory({ dir: ".gloop" });
+
+const agent = new AgentLoop({
+  // ---- model (required) ----
+  provider: new OpenRouterProvider({ apiKey: process.env.OPENROUTER_API_KEY! }),
+  model: "${model}",
+
+  // ---- prompt & tools ----
+  system: "You are a deploy bot.",     // default: none
+  skills: [],                          // merged into the prompt; "/name" invokes
+  tools: [{                            // default: primitiveTools(io)
+    name: "Deploy",
+    description: "Deploy a service",
+    arguments: [{ name: "service", description: "service name" }],
+    execute: async (args) => "deployed " + args.service,
+    askPermission: (args) => args.service === "prod" ? "Deploy to PROD?" : null,
+    retryable: false,                  // only retryable tools are retried
+  }],
+  io: undefined,                       // file/shell IO for the built-in tools
+
+  // ---- event sourcing ----
+  id: "deployer",                      // default "agent"; on every event
+  store: createJsonlEventStore(".gloop/sessions/run.jsonl"),
+  eventLog: undefined,                 // or share a parent's log
+  hooks: [{                            // observe the log, never break it
+    name: "audit",
+    types: ["tool_done", "history_replaced"],
+    scope: "self",                     // "all" = every agent on the log
+    handle: (e) => console.log(e.type, e.seq),
+  }],
+  retry: {                             // default: off
+    llm:  { attempts: 3, backoffMs: 500, maxBackoffMs: 10000 },
+    tool: { attempts: 2 },
+  },
+
+  // ---- human in the loop ----
+  confirm: async (command) => true,    // default: confirm_request event
+  ask: async (question) => "yes",      // default: ask_request event
+
+  // ---- side effects ----
+  remember: memory.remember,           // default: no-op
+  forget: memory.forget,               // default: no-op
+  refreshSystem: async () => "new prompt",
+  installTool: async (source) => "installed",
+  listTools: () => "Deploy",
+  spawn: async (task, call) => ({      // call.cause links the child log
+    success: true, summary: "done", exitCode: 0, stdout: "", stderr: "",
+    agent: "deployer/task-1", log: ".gloop/sessions/run-task-1.jsonl",
+  }),
+  classifySpawn: (call) =>             // default: nothing is a spawn
+    call.name === "Bash" ? call.args.command : null,
+
+  // ---- interceptors: in the call path ----
+  interceptors: [{
+    name: "redact",
+    llmCall: async (ctx, next) => next({ ...ctx, input: redact(ctx.input) }),
+    toolCall: async (ctx, next) => { const r = await next(ctx); return r; },
+  }],
+  tracer: undefined,                   // spans per turn, LLM call, tool
+
+  // ---- context ----
+  contextStrategy: keepLastTurns(8),   // default: LLM pruner + summary
+  contextPruneInterval: 20,            // default 0: auto-prune cadence
+
+  // ---- guards ----
+  maxIterations: 50,                   // default 0: LLM calls per turn
+  llmIdleTimeoutMs: 120000,            // default 120s
+  maxTokens: 262144,                   // default 256k
+  isFatal: (err) => err.name === "RebootSignal",
+
+  // ---- debug ----
+  log: (label, content) => console.debug(label, content),
+});
+
+agent.start();
+agent.send("deploy api");
+await agent.sendSync("deploy web");
+agent.on("tool_start", (e) => console.log(e.name, e.preview));
+agent.respondToConfirm("c1", true);
+agent.interrupt();
+await agent.stop();
+
+// later, in a new process
+const resumed = await AgentLoop.resume({ provider, model, store });
+`;
+}
+
 function buildEffectExample(model: string) {
   return `import { Effect, Stream } from "effect";
 import {
@@ -150,7 +243,7 @@ function highlightLine(line: string): string {
       // Classify the word
       if (['type', 'function', 'switch', 'case', 'return', 'import', 'from', 'const', 'new', 'await', 'async', 'export'].includes(word)) {
         result += `<span class="code-keyword">${word}</span>`;
-      } else if (['Form', 'World', 'Record', 'string', 'any', 'AgentLoop', 'OpenRouterProvider', 'primitiveTools', 'Agent', 'Effect', 'Stream', 'OpenRouterProviderLive'].includes(word)) {
+      } else if (['Form', 'World', 'Record', 'string', 'any', 'AgentLoop', 'OpenRouterProvider', 'primitiveTools', 'createFileMemory', 'createJsonlEventStore', 'keepLastTurns', 'Agent', 'Effect', 'Stream', 'OpenRouterProviderLive'].includes(word)) {
         result += `<span class="code-type">${word}</span>`;
       } else {
         result += `<span class="code-ident">${word}</span>`;
@@ -254,10 +347,9 @@ function InfoRow({ icon: Icon, title, text }: { icon: React.ElementType; title: 
 }
 
 function App() {
-  const formattedLoopExample = useMemo(() => {
-    const model = models[Math.floor(Math.random() * models.length)];
-    return highlightCode(buildLoopExample(model));
-  }, []);
+  const loopModel = useMemo(() => models[Math.floor(Math.random() * models.length)], []);
+  const formattedLoopExample = useMemo(() => highlightCode(buildLoopExample(loopModel)), [loopModel]);
+  const formattedAllOptions = useMemo(() => highlightCode(buildAllOptionsExample(loopModel)), [loopModel]);
 
   const formattedEffectExample = useMemo(() => {
     const model = models[Math.floor(Math.random() * models.length)];
@@ -384,6 +476,15 @@ function App() {
             <pre className="font-mono text-sm md:text-base leading-relaxed overflow-x-auto text-[#666666]">
               <code className="font-mono whitespace-pre" dangerouslySetInnerHTML={{ __html: formattedLoopExample }} />
             </pre>
+            <details className="group mt-8 border-2 border-background/20">
+              <summary className="cursor-pointer select-none list-none flex items-center justify-between gap-4 px-4 py-3 font-mono text-xs tracking-widest text-[#F0B323] hover:bg-background/5">
+                <span>SEE ALL OPTIONS</span>
+                <CornerRightDown className="w-4 h-4 transition-transform group-open:rotate-180" />
+              </summary>
+              <pre className="font-mono text-xs md:text-sm leading-relaxed overflow-x-auto text-[#666666] border-t-2 border-background/20 p-4">
+                <code className="font-mono whitespace-pre" dangerouslySetInnerHTML={{ __html: formattedAllOptions }} />
+              </pre>
+            </details>
             <div className="mt-auto pt-8 flex items-center gap-4">
               <div className="h-[2px] w-full bg-background/20"></div>
               <span className="font-mono text-xs whitespace-nowrap text-[#F0B323]">READY TO LOOP</span>
