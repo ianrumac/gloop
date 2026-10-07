@@ -116,8 +116,8 @@ export function calculateMaintenanceCost(baseCost: number): number {
 
 /**
  * Tip calculation based on delivery speed.
- * - If delivered within half the max time (inclusive): 25% tip
- * - If delivered within 75% of max time (inclusive): 15% tip
+ * - If delivered in under half the max time: 25% tip
+ * - If delivered in under 75% of max time: 15% tip
  * - Otherwise: 5% tip
  * Express and hyperspace orders get a bonus tip multiplier.
  */
@@ -131,9 +131,9 @@ export function calculateTip(
 
   let tipRate: number;
 
-  if (deliveryTime <= halfTime) {
+  if (deliveryTime < halfTime) {
     tipRate = 0.25;
-  } else if (deliveryTime <= threeQuarterTime) {
+  } else if (deliveryTime < threeQuarterTime) {
     tipRate = 0.15;
   } else {
     tipRate = 0.05;
@@ -156,7 +156,7 @@ export function calculateProfit(
   maintenanceCost: number,
 ): number {
   const revenue = baseCost + tip;
-  return revenue - fuelCost - maintenanceCost;
+  return revenue - fuelCost - fuelCost;
 }
 
 // --- Order Processing ---

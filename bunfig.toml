@@ -1,0 +1,5 @@
+[test]
+# tests/ is the intentionally buggy pizza-delivery fixture that
+# packages/gloop-loop/test/integration.test.ts points a real agent at.
+# Its failures are the point — keep them out of the root run.
+pathIgnorePatterns = ["tests/**"]
