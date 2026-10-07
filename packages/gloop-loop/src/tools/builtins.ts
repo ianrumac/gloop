@@ -170,27 +170,54 @@ function _buildTools(io: BuiltinIO): ToolDefinition[] {
         if (file.newFileName) file.newFileName = file.newFileName.replace(/^[ab]\//, "");
       }
 
+      // Models writing an absolute path in a git-style header produce
+      // `a/home/user/x.ts`; after the prefix strip that is a relative path
+      // that resolves nowhere.  Prefer the path as written, fall back to the
+      // same path rooted at `/` when only that one exists.
+      const resolved = new Map<string, string>();
+      const resolvePath = async (name: string): Promise<string> => {
+        const cached = resolved.get(name);
+        if (cached !== undefined) return cached;
+        let out = name;
+        if (name && !name.startsWith("/") && !(await io.fileExists(name)) && (await io.fileExists(`/${name}`))) {
+          out = `/${name}`;
+        }
+        resolved.set(name, out);
+        return out;
+      };
+
       const applied: string[] = [];
       const errors: string[] = [];
+      const missing = new Set<string>();
 
       await new Promise<void>((resolve, reject) => {
         applyPatches(parsed, {
           loadFile(index, callback) {
-            const filePath = index.oldFileName ?? index.newFileName ?? "";
-            io.readFile(filePath)
-              .then(content => callback(null, content))
-              .catch(() => callback(null, "")); // new file — start empty
+            resolvePath(index.oldFileName ?? index.newFileName ?? "")
+              .then((filePath) =>
+                io.readFile(filePath).catch(() => {
+                  missing.add(filePath);
+                  return ""; // new file — start empty
+                }),
+              )
+              .then((content) => callback(null, content), (err) => callback(err, ""));
           },
           patched(index, content, callback) {
-            const filePath = index.newFileName ?? index.oldFileName ?? "";
-            if (content === false) {
-              errors.push(`Failed to apply patch to ${filePath}`);
-              callback(null);
-              return;
-            }
-            io.writeFile(filePath, content)
-              .then(() => { applied.push(filePath); callback(null); })
-              .catch(err => callback(err));
+            const name = index.newFileName ?? index.oldFileName ?? "";
+            const settle = async () => {
+              const filePath = await resolvePath(name);
+              if (content === false) {
+                errors.push(
+                  missing.has(filePath)
+                    ? `Failed to apply patch to ${filePath}: file not found (use the path exactly as ReadFile reported it)`
+                    : `Failed to apply patch to ${filePath}: context did not match the file's current content`,
+                );
+                return;
+              }
+              await io.writeFile(filePath, content);
+              applied.push(filePath);
+            };
+            settle().then(() => callback(null), (err) => callback(err));
           },
           complete(err) {
             if (err) reject(err);

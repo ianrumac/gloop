@@ -94,6 +94,58 @@ describe("WriteFile tool", () => {
   });
 });
 
+describe("Patch_file tool", () => {
+  const original = "a\nb\nc\n";
+  const patchFor = (oldName: string, newName: string) =>
+    `--- ${oldName}\n+++ ${newName}\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n`;
+
+  async function withFile(path: string) {
+    const files = new Map<string, string>([[path, original]]);
+    const io = mockIO({
+      readFile: async (p) => { const c = files.get(p); if (c === undefined) throw new Error(`File not found: ${p}`); return c; },
+      fileExists: async (p) => files.has(p),
+      writeFile: async (p, c) => { files.set(p, c); },
+    });
+    const registry = new ToolRegistry();
+    registerBuiltins(registry, io);
+    return { files, patch: registry.get("Patch_file")! };
+  }
+
+  it("applies a plain relative path", async () => {
+    const { files, patch } = await withFile("src/x.ts");
+    await patch.execute({ patch: patchFor("src/x.ts", "src/x.ts") });
+    expect(files.get("src/x.ts")).toBe("a\nB\nc\n");
+  });
+
+  it("applies git-style a/ b/ prefixes on a relative path", async () => {
+    const { files, patch } = await withFile("src/x.ts");
+    await patch.execute({ patch: patchFor("a/src/x.ts", "b/src/x.ts") });
+    expect(files.get("src/x.ts")).toBe("a\nB\nc\n");
+  });
+
+  it("applies git-style prefixes on an ABSOLUTE path (a/home/u/x.ts → /home/u/x.ts)", async () => {
+    const { files, patch } = await withFile("/home/u/x.ts");
+    const result = await patch.execute({ patch: patchFor("a/home/u/x.ts", "b/home/u/x.ts") });
+    expect(files.get("/home/u/x.ts")).toBe("a\nB\nc\n");
+    expect(result).toContain("/home/u/x.ts");
+  });
+
+  it("prefers the path as written when both exist", async () => {
+    const { files, patch } = await withFile("home/u/x.ts");
+    files.set("/home/u/x.ts", original);
+    await patch.execute({ patch: patchFor("a/home/u/x.ts", "b/home/u/x.ts") });
+    expect(files.get("home/u/x.ts")).toBe("a\nB\nc\n");
+    expect(files.get("/home/u/x.ts")).toBe(original);
+  });
+
+  it("says why it failed: missing file vs mismatched context", async () => {
+    const { patch } = await withFile("/home/u/x.ts");
+    await expect(patch.execute({ patch: patchFor("a/nope.ts", "b/nope.ts") })).rejects.toThrow(/file not found/);
+    const wrong = `--- a/home/u/x.ts\n+++ b/home/u/x.ts\n@@ -1,3 +1,3 @@\n a\n-ZZZ\n+B\n c\n`;
+    await expect(patch.execute({ patch: wrong })).rejects.toThrow(/context did not match/);
+  });
+});
+
 describe("Bash tool", () => {
   it("calls exec and formats result", async () => {
     const io = mockIO({

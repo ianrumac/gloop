@@ -84,6 +84,15 @@ describe("integration — pizza delivery", () => {
         else if (event.type === "tool_done") {
           process.stderr.write(`  [${event.name}] ${event.ok ? "done" : `error: ${event.output.slice(0, 100)}`}\n`);
         }
+        // Why a turn stopped is the first question when this test fails —
+        // an empty model response ends the loop with no other trace.
+        else if (event.type === "llm_response") {
+          process.stderr.write(`  [llm] finish=${event.finishReason} text=${event.text.length}ch toolCalls=${event.toolCalls.length}\n`);
+        } else if (event.type === "error" || event.type === "fatal") {
+          process.stderr.write(`  [${event.type}] ${event.error.message}\n`);
+        } else if (event.type === "turn_end") {
+          process.stderr.write(`  [turn_end] ${event.status}\n`);
+        }
       });
 
       try {
