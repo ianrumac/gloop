@@ -59,9 +59,11 @@ export class OpenRouterProvider implements AIProvider {
       ...(toolCalls.length > 0 && { toolCalls }),
       ...(response.usage && {
         usage: {
-          promptTokens: response.usage.promptTokens ?? 0,
-          completionTokens: response.usage.completionTokens ?? 0,
-          totalTokens: response.usage.totalTokens ?? 0,
+          // OpenAI-compatible endpoints (OpenRouter itself included) report
+          // usage in snake_case; some SDK responses expose camelCase aliases.
+          promptTokens: response.usage.promptTokens ?? response.usage.prompt_tokens ?? 0,
+          completionTokens: response.usage.completionTokens ?? response.usage.completion_tokens ?? 0,
+          totalTokens: response.usage.totalTokens ?? response.usage.total_tokens ?? 0,
         },
       }),
     };
