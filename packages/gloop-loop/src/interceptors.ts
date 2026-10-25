@@ -62,6 +62,8 @@ export interface LlmCallResult {
   readonly text: string;
   readonly toolCalls: ReadonlyArray<JsonToolCall>;
   readonly finishReason: FinishReason;
+  /** Token usage for this LLM call, when the provider reported it. */
+  readonly usage?: import("./ai/types.js").TokenUsage;
 }
 
 /** Context passed into the tool-call interceptor chain. */

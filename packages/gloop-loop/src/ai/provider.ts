@@ -72,7 +72,15 @@ export class OpenRouterProvider implements AIProvider {
     const streamPromise: Promise<AsyncIterable<any>> = this.client.chat.send({
       ...(this.httpReferer && { httpReferer: this.httpReferer }),
       ...(this.xTitle && { xTitle: this.xTitle }),
-      chatGenerationParams: { ...buildChatParams(config), stream: true },
+      chatGenerationParams: {
+        ...buildChatParams(config),
+        stream: true,
+        // Opt-in: ask the provider to emit a final usage chunk
+        // (OpenAI-compatible `stream_options.include_usage`). Off by
+        // default — providers that send `usage: null` on non-final chunks
+        // fail the pinned SDK's chunk schema.
+        ...(config.streamUsage && { streamOptions: { includeUsage: true } }),
+      },
     }) as any;
 
     // Accumulate tool call deltas across chunks
@@ -89,6 +97,15 @@ export class OpenRouterProvider implements AIProvider {
     const finishReasonPromise = new Promise<FinishReason>((resolve) => {
       resolveFinishReason = resolve;
     });
+
+    // Token usage from the provider's final usage chunk, if any.
+    let usageAcc: { promptTokens: number; completionTokens: number; totalTokens: number } | null = null;
+    let resolveUsage: (u: { promptTokens: number; completionTokens: number; totalTokens: number }) => void;
+    const usagePromise = new Promise<{ promptTokens: number; completionTokens: number; totalTokens: number }>(
+      (resolve) => {
+        resolveUsage = resolve;
+      },
+    );
 
     // Get the underlying async iterator once and reuse across next() calls
     let iteratorPromise: Promise<AsyncIterator<any>> | null = null;
@@ -118,6 +135,7 @@ export class OpenRouterProvider implements AIProvider {
       // the non-streaming path's fallback.
       const finish = lastFinishReason ?? (calls.length > 0 ? "tool_calls" : null);
       resolveFinishReason(finish);
+      resolveUsage(usageAcc ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 });
     }
 
     const textStream: AsyncIterableIterator<string> = {
@@ -133,6 +151,16 @@ export class OpenRouterProvider implements AIProvider {
           }
 
           const chunk = result.value;
+          // Usage-only chunk (no choices): capture and continue. The SDK
+          // remaps snake_case to camelCase; accept both defensively.
+          const u = chunk?.usage;
+          if (u) {
+            usageAcc = {
+              promptTokens: u.promptTokens ?? u.prompt_tokens ?? 0,
+              completionTokens: u.completionTokens ?? u.completion_tokens ?? 0,
+              totalTokens: u.totalTokens ?? u.total_tokens ?? 0,
+            };
+          }
           const choice = chunk?.choices?.[0];
           if (!choice) continue;
           const reason = coerceFinishReason(choice.finishReason);
@@ -176,6 +204,7 @@ export class OpenRouterProvider implements AIProvider {
       textStream,
       toolCalls: toolCallsPromise,
       finishReason: finishReasonPromise,
+      usage: usagePromise,
       cancel: async () => {
         // EventStream extends ReadableStream, cancel it if possible
         const es = await streamPromise;

@@ -72,6 +72,13 @@ export interface AIRequestConfig {
   provider?: ProviderRouting;
   tools?: JsonTool[];
   toolChoice?: ToolChoice;
+  /**
+   * Ask the provider to emit token usage in the final stream chunk
+   * (OpenAI-compatible `stream_options.include_usage`). Providers that
+   * send `usage: null` on non-final chunks need an SDK that tolerates
+   * explicit nulls — enable per provider, not globally.
+   */
+  streamUsage?: boolean;
 }
 
 export type FinishReason = "stop" | "length" | "content_filter" | "tool_calls" | null;
@@ -82,11 +89,14 @@ export interface AIResponse {
   content: string | null;
   finishReason: FinishReason;
   toolCalls?: JsonToolCall[];
-  usage?: {
-    promptTokens: number;
-    completionTokens: number;
-    totalTokens: number;
-  };
+  usage?: TokenUsage;
+}
+
+/** Token usage reported by the provider, if available. */
+export interface TokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
 }
 
 /** Result of a streaming request — provides concurrent text + tool call streams */
@@ -95,6 +105,13 @@ export interface StreamResult {
   toolCalls: Promise<JsonToolCall[]>;
   /** Resolves with the finish reason from the final chunk, or null if absent. */
   finishReason: Promise<FinishReason>;
+  /**
+   * Resolves with the token usage reported by the provider's final stream
+   * chunk (zeros when the provider does not report usage). Requires the
+   * provider to send usage in streaming mode (e.g. OpenAI-compatible
+   * `stream_options.include_usage`).
+   */
+  usage: Promise<TokenUsage>;
   cancel(): Promise<void>;
 }
 

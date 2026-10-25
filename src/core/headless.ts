@@ -146,11 +146,10 @@ if (rebootSession) {
   debugLog("REBOOT", `Restored session: ${rebootSession.reason}`);
 }
 
-// Usage tracking is not currently surfaced through the text stream API.
-// Kept as zero for the final summary — switch to a provider-side hook if
-// per-turn cost tracking becomes a priority.
-const totalPromptTokens = 0;
-const totalCompletionTokens = 0;
+// Token totals accumulate from llm_response events (usage surfaced through
+// the provider hook — see OpenRouterProvider.stream).
+let totalPromptTokens = 0;
+let totalCompletionTokens = 0;
 
 // ============================================================================
 // WIRE EVENTS → STDOUT + JSONL
@@ -163,6 +162,13 @@ agent.onEvent((event: AgentEvent) => {
     case "stream_chunk":
       currentStreamText += event.text;
       process.stdout.write(event.text);
+      break;
+
+    case "llm_response":
+      if (event.usage) {
+        totalPromptTokens += event.usage.promptTokens;
+        totalCompletionTokens += event.usage.completionTokens;
+      }
       break;
 
     case "stream_done":

@@ -735,7 +735,8 @@ async function evalThink(
                 fx.streamDone();
                 const calls = await raceIdleTimeout(stream.toolCalls, idleMs);
                 const finishReason = await raceIdleTimeout(stream.finishReason, idleMs);
-                return { text: fullText, toolCalls: calls, finishReason };
+                const usage = await raceIdleTimeout(stream.usage, idleMs).catch(() => undefined);
+                return { text: fullText, toolCalls: calls, finishReason, usage };
               } catch (err) {
                 if (err instanceof AbortError) {
                   await stream.cancel().catch(() => {});
@@ -773,6 +774,7 @@ async function evalThink(
         text: result.text,
         toolCalls: [...result.toolCalls],
         finishReason: result.finishReason,
+        ...(result.usage && { usage: result.usage }),
       });
       span.setAttribute("outputLength", result.text.length);
       span.setAttribute("toolCallsRequested", result.toolCalls.length);
