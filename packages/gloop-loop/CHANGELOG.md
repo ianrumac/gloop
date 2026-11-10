@@ -2,6 +2,42 @@
 
 All notable changes to `@hypen-space/gloop-loop` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.5.0]
+
+### Changed
+- **`maxTokens` has no default.** `max_tokens` is only sent when the host sets `maxTokens` (the previous 262144 default was rejected by low-balance OpenRouter accounts and some OpenAI-compatible servers). `AIConversation.setMaxTokens` accepts `undefined`.
+- **Only known slash commands are commands.** Input starting with `/` is a command only when its first token is `/skills`, `/skill`, `/install`, `/tools` or a skill name; anything else (`/etc/hosts looks wrong`) is a normal message to the model. Previously it produced `Unknown command: …` without calling the model.
+- **Malformed tool-call JSON is never executed.** `jsonToolCallsToToolCalls` no longer binds unparsable arguments to the tool's first argument (a response truncated by `max_tokens` could run raw JSON as a shell command); it sets `ToolCall.parseError` and leaves `args` empty. The interpreter answers such a call with a failed result asking for valid JSON — mentioning truncation when `finishReason === "length"`.
+- **Tool output is capped centrally** at 50,000 characters (head + tail kept, with a marker) — see `maxToolOutputChars`. `createNodeIO` no longer truncates (head-only, 100 KB); it keeps a 10 MB hard cap per command and kills the command beyond it.
+- `createNodeIO().exec` runs the command with `spawn` in its own process group: a timeout or abort kills the whole tree and returns at once (with the output so far), stdin is `/dev/null` instead of an open pipe, and the exit code is the real one (it was `1` for every failure). Timeouts still report `124`; an abort reports `130`.
+- `Patch_file` is atomic across files: if any file fails, nothing is written and the error says so. A blank context line whose leading space was stripped is read as context (as jsdiff does) instead of ending the hunk.
+- `OpenRouterProvider.stream()`'s `textStream` yields `""` as a heartbeat for chunks without text (tool-call / reasoning deltas, the usage chunk). Code that concatenates text is unaffected; the interpreter counts it as activity for `llmIdleTimeoutMs` without emitting it.
+- `AskUser`, `Remember` and `Forget` calls from the model now go through the `ask` / `memory` interceptor chains (previously only the form-level paths did). The `memory` boundary's final handler honours `ctx.op`.
+- Denied and unknown tool calls emit `tool_start` before their `tool_done`.
+- `setSystem()` and `{ role: "system" }` inbox messages append the skills listing like the constructor and `refreshSystem` do (never twice).
+- `Effects.manageContext` takes an optional third argument `{ tokens }`.
+
+### Fixed
+- A fatal error (`isFatal`) thrown by a **tool** now stops the loop with a `fatal` event; it used to become a failed tool result. It is never retried. `LoopConfig.isFatal` carries the predicate to the interpreter.
+- `AgentLoop.resume({ system })` runs with the host's prompt as documented; the `restored` event and `snapshot().system` agree. Without `system` the logged prompt is restored. Direct `hydrate()` calls are unchanged.
+- `llmIdleTimeoutMs` no longer fires on a stream that is busy sending tool-call arguments or reasoning.
+- A request the server never answers can be cancelled: each `stream()` gets its own `AbortController` wired into the SDK request, `cancel()` aborts it without awaiting anything, and `toolCalls` / `finishReason` / `usage` settle (never reject) on completion, error or cancel. Both the idle timeout and `interrupt()` used to hang forever.
+- `interrupt()` reaches running tools (see `ToolContext`) and the turn unwinds immediately even for tools that ignore the signal. History keeps the completed calls' results and answers the rest `Interrupted by the user before this tool call completed.`, so it stays provider-valid. An interrupted or failed tool now gets a failed `tool_done` instead of none.
+- Queued `sendSync` calls reject when a fatal error stops the loop (they hung), and `awaitIdle()` resolves when the loop stops (stop / fatal).
+- A failing context strategy no longer kills the turn: the model's `ManageContext` call gets a failed tool result, an automatic prune emits a failed `tool_done` and the turn continues. A throwing `remember` / `forget` becomes a failed tool result. Abort and fatal errors still propagate.
+- `stop` and `seed` are forwarded to the provider.
+- `foldTurns` keeps folding after an earlier fold.  A fold comes back from the log (`history_replaced`) attributed to the turn that ran the compaction, which made that turn look already folded — so it was never folded — and grouped it with the older turns. A fold right after a user message now counts as that message's turn.
+
+### Added
+- `ToolContext` — `ToolDefinition.execute(args, ctx?)` receives `{ signal }`, aborted when the turn is interrupted. `BuiltinIO.exec(command, timeoutMs?, signal?)`; the `Bash` builtin forwards it. `SpawnCall.signal` for spawn handlers. `AIRequestConfig.signal` (honoured by `complete()`, linked by `stream()`), `AIBuilder.signal()`, `AIConversation.request({ signal })`.
+- `ToolArgument.optional` — left out of the JSON schema's `required` list. `Bash`'s `timeoutMs` is optional.
+- `maxToolOutputChars` option / `LoopConfig.maxToolOutputChars` (default 50,000, `0` disables), `ToolDefinition.maxOutputChars` per-tool override, `truncateOutput(text, max)` and `DEFAULT_MAX_TOOL_OUTPUT_CHARS` exports.
+- **Token usage.** `Usage` type (`promptTokens`, `completionTokens`, `totalTokens`, optional `cachedTokens` / `reasoningTokens`); `StreamResult.usage` (the OpenRouter provider requests it with `stream_options.include_usage`); `usage` on `llm_response` and `LlmCallResult`; `AgentState.usage` and `TurnRecord.usage` folded from the log; `agent.usage()`. `ScriptedProvider` responses accept `usage` and `finishReason`.
+- **`context` option** — `{ strategy?, compactAtTokens?, everyToolCalls? }` (`ContextOptions`). `compactAtTokens` runs the strategy when the last request's prompt tokens (or a chars/4 estimate) reach the threshold, without re-firing while a run cannot shrink the history. `ContextStrategyContext.tokens` carries the current figure. `contextStrategy` / `contextPruneInterval` are deprecated aliases. `LoopConfig.compactAtTokens`, `World.lastUsage` / `World.compactArmed`.
+- **Compaction ranges.** `context.compactAtTokens` (and `LoopConfig.compactAtTokens`) also takes `{ trigger, target? }` (`CompactAtTokens` type; a bare number is a trigger with no target, as before). The constructor throws when `target >= trigger`; `normalizeCompactAt` is exported. A token-triggered run passes `ContextStrategyContext.targetTokens` (interval-triggered runs and the model's own `ManageContext` call do not); `Effects.manageContext`'s third argument carries it. After a run that changed the history the trigger fires again only when the context next reaches `trigger`; a run that changed nothing still disarms it until the context drops back under `trigger`.
+  - `foldTurns` honours `targetTokens`: it skips the `budget` gate, folds with `keep`, and while its estimate of the result (its estimator over the remaining messages, scaled by `ctx.tokens` / its estimate of the input when `tokens` is given) is above the target, folds with `keep - 1`, … down to 1 — never the in-progress last turn or the first node. Deterministic, and idempotent on its own output.
+  - `llmContextStrategy` tells the fork agent the current size and the target.
+
 ## [0.4.0]
 
 ### Breaking

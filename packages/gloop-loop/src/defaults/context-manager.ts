@@ -148,7 +148,7 @@ async function pruneWithFork(
 
   // Drive a single turn and wait for completion.
   await forkAgent.sendSync(
-    `Instructions: ${instructions}\n\nMessage index:\n${index}`,
+    `Instructions: ${instructions}${sizeNote(ctx)}\n\nMessage index:\n${index}`,
   );
   await forkAgent.stop();
 
@@ -167,6 +167,17 @@ async function pruneWithFork(
     }));
   }
   return contextGraph(graph.agent, kept);
+}
+
+/** The current size and the target, when an automatic run was given one. */
+function sizeNote(ctx: ContextStrategyContext): string {
+  if (ctx.targetTokens === undefined) return "";
+  const now = ctx.tokens !== undefined ? `The context is currently about ${ctx.tokens} tokens. ` : "";
+  const cut =
+    ctx.tokens !== undefined && ctx.tokens > ctx.targetTokens
+      ? ` (remove roughly ${ctx.tokens - ctx.targetTokens} tokens, i.e. ~${Math.round((1 - ctx.targetTokens / ctx.tokens) * 100)}% of it)`
+      : "";
+  return `\n\n${now}Bring it down to about ${ctx.targetTokens} tokens or less${cut}. Delete the oldest, largest, no-longer-needed messages first.`;
 }
 
 /**

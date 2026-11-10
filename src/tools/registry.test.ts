@@ -84,12 +84,12 @@ describe("ToolRegistry", () => {
       const jsonTools = registry.toJsonTools();
 
       expect(jsonTools).toHaveLength(1);
-      expect(jsonTools[0].type).toBe("function");
-      expect(jsonTools[0].function.name).toBe("ReadFile");
-      expect(jsonTools[0].function.description).toBe("ReadFile tool");
-      expect(jsonTools[0].function.parameters.type).toBe("object");
-      expect(jsonTools[0].function.parameters.properties.path.type).toBe("string");
-      expect(jsonTools[0].function.parameters.required).toEqual(["path"]);
+      expect(jsonTools[0]!.type).toBe("function");
+      expect(jsonTools[0]!.function.name).toBe("ReadFile");
+      expect(jsonTools[0]!.function.description).toBe("ReadFile tool");
+      expect(jsonTools[0]!.function.parameters.type).toBe("object");
+      expect(jsonTools[0]!.function.parameters.properties.path!.type).toBe("string");
+      expect(jsonTools[0]!.function.parameters.required).toEqual(["path"]);
     });
 
     test("tool with no arguments has empty properties", () => {
@@ -98,8 +98,8 @@ describe("ToolRegistry", () => {
       const jsonTools = registry.toJsonTools();
 
       expect(jsonTools).toHaveLength(1);
-      expect(jsonTools[0].function.parameters.properties).toEqual({});
-      expect(jsonTools[0].function.parameters.required).toBeUndefined();
+      expect(jsonTools[0]!.function.parameters.properties).toEqual({});
+      expect(jsonTools[0]!.function.parameters.required).toBeUndefined();
     });
 
     test("multiple tools", () => {
@@ -109,8 +109,8 @@ describe("ToolRegistry", () => {
       const jsonTools = registry.toJsonTools();
 
       expect(jsonTools).toHaveLength(2);
-      expect(jsonTools[0].function.name).toBe("A");
-      expect(jsonTools[1].function.name).toBe("B");
+      expect(jsonTools[0]!.function.name).toBe("A");
+      expect(jsonTools[1]!.function.name).toBe("B");
     });
 
     test("empty registry returns empty array", () => {
@@ -123,9 +123,9 @@ describe("ToolRegistry", () => {
       registry.register(makeTool("WriteFile", ["path", "content"]));
       const jsonTools = registry.toJsonTools();
 
-      expect(jsonTools[0].function.parameters.properties).toHaveProperty("path");
-      expect(jsonTools[0].function.parameters.properties).toHaveProperty("content");
-      expect(jsonTools[0].function.parameters.required).toEqual(["path", "content"]);
+      expect(jsonTools[0]!.function.parameters.properties).toHaveProperty("path");
+      expect(jsonTools[0]!.function.parameters.properties).toHaveProperty("content");
+      expect(jsonTools[0]!.function.parameters.required).toEqual(["path", "content"]);
     });
   });
 });

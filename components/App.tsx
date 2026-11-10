@@ -3,6 +3,7 @@ import { Box, Static, Text, useStdout } from "ink";
 import { Marked } from "marked";
 import { markedTerminal } from "marked-terminal";
 import type { AgentLoop, AgentEvent } from "../src/core/core.ts";
+import { formatUsageLine, type UsageView } from "../src/core/ui.ts";
 import ToolExecution from "./ToolExecution.tsx";
 import type { ToolStatus } from "./ToolExecution.tsx";
 import ConfirmDialog from "./ConfirmDialog.tsx";
@@ -42,7 +43,8 @@ function formatError(err: Error): string {
 
 /** Committed entry — finalized, rendered once via <Static> */
 type CommittedEntry =
-  | { kind: "header"; id: string; model: string }
+  | { kind: "header"; id: string; model: string; resumed?: { file: string; turns: number } }
+  | { kind: "notice"; id: string; text: string; tone?: "warn" | "info" }
   | { kind: "user"; id: string; content: string }
   | { kind: "assistant"; id: string; content: string }
   | { kind: "tool"; id: string; name: string; preview: string; status: ToolStatus; output?: string }
@@ -59,8 +61,18 @@ interface LiveTool {
 interface Props {
   model: string;
   rebootReason?: string;
+  /** Set when history was restored from a session log (`--resume` / reboot). */
+  resumed?: { file: string; turns: number };
   agent: AgentLoop;
+  /** The model's context window (tokens) — the status line shows `ctx` against it. */
+  contextWindow?: number;
+  /** One-line startup notices (e.g. a clamped `compactAt`). */
+  notices?: string[];
 }
+
+/** Automatic compaction arrives as a ManageContext tool call with this preview prefix. */
+const isAutoCompaction = (name: string, preview: string) =>
+  name === "ManageContext" && /^auto-/.test(preview);
 
 // ============================================================================
 // COMPONENT
@@ -69,13 +81,14 @@ interface Props {
 let _id = 0;
 const uid = () => `ui_${++_id}`;
 
-export default function App({ model, rebootReason, agent }: Props) {
+export default function App({ model, rebootReason, resumed, agent, contextWindow, notices }: Props) {
   const { stdout } = useStdout();
   const cols = stdout?.columns ?? 80;
 
   // Committed timeline — written once to stdout via <Static>.
   const [committed, setCommitted] = useState<CommittedEntry[]>([
-    { kind: "header", id: uid(), model },
+    { kind: "header", id: uid(), model, resumed },
+    ...(notices ?? []).map((text): CommittedEntry => ({ kind: "notice", id: uid(), text, tone: "warn" })),
   ]);
   // Live (running) tools — shown with spinners in the dynamic area.
   const [liveTools, setLiveTools] = useState<LiveTool[]>([]);
@@ -88,6 +101,8 @@ export default function App({ model, rebootReason, agent }: Props) {
   const [busy, setBusy] = useState(false);
   // Inbox size (kept in state so the indicator re-renders).
   const [queueSize, setQueueSize] = useState(0);
+  // Token usage: context size of the last request + session totals.
+  const [usage, setUsage] = useState<UsageView>(() => ({ totals: agent.usage(), contextWindow }));
 
   // Refs — used as mutation-safe accumulators, never read from JSX.
   const streamBufRef = useRef("");
@@ -161,11 +176,43 @@ export default function App({ model, rebootReason, agent }: Props) {
           break;
         }
 
+        case "llm_response":
+          if (event.usage) {
+            const contextTokens = event.usage.promptTokens;
+            setUsage({ contextTokens, totals: agent.usage(), contextWindow });
+          }
+          break;
+
+        case "retry":
+          setCommitted((c) => [
+            ...c,
+            {
+              kind: "notice",
+              id: uid(),
+              tone: "warn",
+              text: `↻ ${event.boundary === "llm" ? "model call" : (event.name ?? "tool")} failed (${event.error.message.split("\n")[0]!.slice(0, 80)}) — retrying in ${(event.delayMs / 1000).toFixed(1)}s (${event.attempt + 1}/${event.maxAttempts})`,
+            },
+          ]);
+          break;
+
         case "tool_done": {
-          const tool = liveToolsRef.current.find((t) => t.id === event.id);
-          if (!tool) break;
+          // Denied / unknown tools get their tool_start right before this,
+          // so normally the live entry exists; fall back to no preview.
+          const tool = liveToolsRef.current.find((t) => t.id === event.id) ?? { preview: "" };
           liveToolsRef.current = liveToolsRef.current.filter((t) => t.id !== event.id);
           setLiveTools(liveToolsRef.current);
+          if (isAutoCompaction(event.name, tool.preview)) {
+            setCommitted((c) => [
+              ...c,
+              {
+                kind: "notice",
+                id: uid(),
+                tone: event.ok ? "info" : "warn",
+                text: `● ${tool.preview} → ${event.output.split("\n")[0]!.slice(0, 120)}`,
+              },
+            ]);
+            break;
+          }
           const status: ToolStatus = event.ok
             ? "success"
             : event.output === "denied by user"
@@ -305,9 +352,22 @@ export default function App({ model, rebootReason, agent }: Props) {
           switch (entry.kind) {
             case "header":
               return (
-                <Box key={entry.id} marginBottom={1}>
-                  <Text bold color="cyan">gloop</Text>
-                  <Text dimColor> — {entry.model} (ctrl+c to exit, esc to interrupt)</Text>
+                <Box key={entry.id} marginBottom={1} flexDirection="column">
+                  <Box>
+                    <Text bold color="cyan">gloop</Text>
+                    <Text dimColor> — {entry.model} (ctrl+c to exit, esc to interrupt)</Text>
+                  </Box>
+                  {entry.resumed ? (
+                    <Text dimColor>
+                      resumed session {entry.resumed.file}, {entry.resumed.turns} turn{entry.resumed.turns === 1 ? "" : "s"}
+                    </Text>
+                  ) : null}
+                </Box>
+              );
+            case "notice":
+              return (
+                <Box key={entry.id}>
+                  <Text color={entry.tone === "warn" ? "yellow" : undefined} dimColor>  {entry.text}</Text>
                 </Box>
               );
             case "user":
@@ -382,6 +442,11 @@ export default function App({ model, rebootReason, agent }: Props) {
       {/* Confirm / AskUser dialogs */}
       {confirmReq ? <ConfirmDialog command={confirmReq.command} onResolve={handleConfirm} /> : null}
       {askReq ? <AskUserDialog question={askReq.question} onAnswer={handleAnswer} /> : null}
+
+      {/* Token usage — dim, once the provider has reported any */}
+      {formatUsageLine(usage) ? (
+        <Box><Text dimColor>{formatUsageLine(usage)}</Text></Box>
+      ) : null}
 
       {/* Input — always visible; inactive when a dialog needs input */}
       <InputPrompt

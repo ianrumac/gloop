@@ -129,3 +129,23 @@ describe("ToolRegistry", () => {
     });
   });
 });
+
+describe("ToolRegistry — optional arguments", () => {
+  test("optional arguments are left out of `required`", () => {
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "Run", description: "",
+      arguments: [{ name: "command", description: "" }, { name: "timeoutMs", description: "", optional: true }],
+      execute: async () => "",
+    });
+    const [json] = registry.toJsonTools();
+    expect(Object.keys(json!.function.parameters.properties)).toEqual(["command", "timeoutMs"]);
+    expect(json!.function.parameters.required).toEqual(["command"]);
+  });
+
+  test("a tool whose arguments are all optional has no `required` key", () => {
+    const registry = new ToolRegistry();
+    registry.register({ name: "T", description: "", arguments: [{ name: "a", description: "", optional: true }], execute: async () => "" });
+    expect(registry.toJsonTools()[0]!.function.parameters.required).toBeUndefined();
+  });
+});

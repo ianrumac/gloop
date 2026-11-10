@@ -17,6 +17,8 @@ import type {
   JsonToolCall,
 } from "../src/ai/types.js";
 import { AgentLoop, type AgentEvent } from "../src/agent.js";
+import { ScriptedProvider, echoTool } from "./mock-provider.js";
+import { contextGraph, type ContextStrategy } from "../src/context.js";
 
 // ---------------------------------------------------------------------------
 // Mock provider
@@ -312,5 +314,186 @@ describe("AgentLoop (construction & config)", () => {
 
     await runOneTurn(agent, "spawn something");
     expect(spawnTask).toBe("do-work");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review regressions & new options
+// ---------------------------------------------------------------------------
+
+
+const demoSkill = { name: "demo", description: "A demo skill", dir: "/tmp/demo", body: "body" };
+const systemOf = (p: ScriptedProvider, i = 0) => p.calls[i]?.messages.find((m) => m.role === "system")?.content;
+
+describe("AgentLoop — skills stay in the system prompt", () => {
+  test("setSystem() and role:'system' messages keep the skills listing (merged once)", async () => {
+    const provider = new ScriptedProvider([{ text: "a" }, { text: "b" }]);
+    const agent = new AgentLoop({ provider, model: "m", system: "base", tools: [], skills: [demoSkill] });
+    agent.setSystem("updated");
+    await agent.sendSync("one");
+    expect(systemOf(provider, 0)).toStartWith("updated");
+    expect(systemOf(provider, 0)).toContain("/demo");
+
+    await agent.sendSync({ role: "system", content: "from inbox" });
+    await agent.sendSync("two");
+    expect(systemOf(provider, 1)).toStartWith("from inbox");
+    expect(systemOf(provider, 1)).toContain("/demo");
+
+    // A prompt that already carries the listing is not merged twice.
+    agent.setSystem(agent.convo.getSystem()!);
+    expect(agent.convo.getSystem()!.split("AVAILABLE SKILLS").length).toBe(2);
+    expect(agent.snapshot().system).toBe(agent.convo.getSystem());
+    await agent.stop();
+  });
+});
+
+describe("AgentLoop — defaults and new options", () => {
+  test("max_tokens is not sent unless the host sets maxTokens", async () => {
+    const provider = new ScriptedProvider([{ text: "a" }, { text: "b" }]);
+    const a = new AgentLoop({ provider, model: "m", tools: [] });
+    await a.sendSync("x");
+    expect(provider.calls[0]!.maxTokens).toBeUndefined();
+    await a.stop();
+    const b = new AgentLoop({ provider, model: "m", tools: [], maxTokens: 4096 });
+    await b.sendSync("y");
+    expect(provider.calls[1]!.maxTokens).toBe(4096);
+    await b.stop();
+  });
+
+  test("maxToolOutputChars caps tool results (default 50k)", async () => {
+    const huge = { name: "Huge", description: "", arguments: [], execute: async () => "z".repeat(80_000) };
+    const provider = new ScriptedProvider([
+      { toolCalls: [tc("c1", "Huge", {})] }, { text: "ok" },
+      { toolCalls: [tc("c2", "Huge", {})] }, { text: "ok" },
+    ]);
+    const def = new AgentLoop({ provider, model: "m", tools: [huge] });
+    await def.sendSync("go");
+    const t1 = def.convo.getHistory().find((m) => m.role === "tool")!;
+    expect(t1.content.length).toBeLessThan(51_000);
+    expect(t1.content).toContain("output capped at 50000");
+    await def.stop();
+
+    const off = new AgentLoop({ provider, model: "m", tools: [huge], maxToolOutputChars: 0 });
+    await off.sendSync("go");
+    expect(off.convo.getHistory().find((m) => m.role === "tool")!.content.length).toBe(80_000);
+    await off.stop();
+  });
+});
+
+describe("AgentLoop — context.compactAtTokens", () => {
+  /** Strategy that records each call; drops everything but the last 2 messages when `shrink`. */
+  function recordingStrategy(shrink: boolean) {
+    const calls: Array<{ trigger: string; tokens?: number }> = [];
+    const strategy: ContextStrategy = (graph, ctx) => {
+      calls.push({ trigger: ctx.trigger, tokens: ctx.tokens });
+      return shrink ? contextGraph(graph.agent, graph.nodes.slice(-2)) : graph;
+    };
+    return { calls, strategy };
+  }
+  const usage = (promptTokens: number) => ({ promptTokens, completionTokens: 1, totalTokens: promptTokens + 1 });
+
+  test("runs the strategy when the last request's promptTokens reach the threshold, passing tokens", async () => {
+    const { calls, strategy } = recordingStrategy(true);
+    const provider = new ScriptedProvider([
+      { toolCalls: [tc("c1", "Echo", { text: "a" })], usage: usage(500) },
+      { toolCalls: [tc("c2", "Echo", { text: "b" })], usage: usage(1500) },
+      { text: "done", usage: usage(300) },
+    ]);
+    const agent = new AgentLoop({ provider, model: "m", tools: [echoTool], context: { strategy, compactAtTokens: 1000 } });
+    const done: string[] = [];
+    agent.on("tool_done", (e) => { if (e.name === "ManageContext") done.push(e.output); });
+    await agent.sendSync("go");
+    expect(calls).toEqual([{ trigger: "auto", tokens: 1500 }]);
+    expect(done.length).toBe(1);
+    await agent.stop();
+  });
+
+  test("does not re-fire every iteration when the strategy cannot get under the threshold", async () => {
+    const { calls, strategy } = recordingStrategy(false);
+    const provider = new ScriptedProvider([
+      { toolCalls: [tc("c1", "Echo", { text: "a" })], usage: usage(2000) },
+      { toolCalls: [tc("c2", "Echo", { text: "b" })], usage: usage(2100) },
+      { toolCalls: [tc("c3", "Echo", { text: "c" })], usage: usage(500) },  // back under → re-arm
+      { toolCalls: [tc("c4", "Echo", { text: "d" })], usage: usage(2200) },
+      { text: "done" },
+    ]);
+    const agent = new AgentLoop({ provider, model: "m", tools: [echoTool], context: { strategy, compactAtTokens: 1000 } });
+    await agent.sendSync("go");
+    expect(calls.map((c) => c.tokens)).toEqual([2000, 2200]);
+    await agent.stop();
+  });
+
+  test("falls back to a chars/4 estimate when the provider reports no usage", async () => {
+    const { calls, strategy } = recordingStrategy(true);
+    const provider = new ScriptedProvider([{ toolCalls: [tc("c1", "Echo", { text: "x".repeat(4000) })] }, { text: "done" }]);
+    const agent = new AgentLoop({ provider, model: "m", tools: [echoTool], context: { strategy, compactAtTokens: 1000 } });
+    await agent.sendSync("go");
+    expect(calls.length).toBe(1);
+    expect(calls[0]!.tokens!).toBeGreaterThanOrEqual(1000);
+    await agent.stop();
+  });
+
+  test("a range { trigger, target } fires at trigger and passes targetTokens", async () => {
+    const calls: Array<{ tokens?: number; targetTokens?: number }> = [];
+    const strategy: ContextStrategy = (graph, ctx) => {
+      calls.push({ tokens: ctx.tokens, targetTokens: ctx.targetTokens });
+      return contextGraph(graph.agent, graph.nodes.slice(-2));
+    };
+    const provider = new ScriptedProvider([
+      { toolCalls: [tc("c1", "Echo", { text: "a" })], usage: usage(800) },   // between target and trigger: no fire
+      { toolCalls: [tc("c2", "Echo", { text: "b" })], usage: usage(1500) },  // ≥ trigger: fire
+      { toolCalls: [tc("c3", "Echo", { text: "c" })], usage: usage(900) },   // above target, under trigger: no refire
+      { toolCalls: [tc("c4", "Echo", { text: "d" })], usage: usage(1100) },  // trigger reached again: fire
+      { text: "done" },
+    ]);
+    const agent = new AgentLoop({
+      provider, model: "m", tools: [echoTool],
+      context: { strategy, compactAtTokens: { trigger: 1000, target: 600 } },
+    });
+    await agent.sendSync("go");
+    expect(calls).toEqual([{ tokens: 1500, targetTokens: 600 }, { tokens: 1100, targetTokens: 600 }]);
+    await agent.stop();
+  });
+
+  test("a range does not re-fire every iteration when a run leaves history unchanged", async () => {
+    const { calls, strategy } = recordingStrategy(false);
+    const provider = new ScriptedProvider([
+      { toolCalls: [tc("c1", "Echo", { text: "a" })], usage: usage(2000) },
+      { toolCalls: [tc("c2", "Echo", { text: "b" })], usage: usage(2100) },
+      { toolCalls: [tc("c3", "Echo", { text: "c" })], usage: usage(2200) },
+      { text: "done" },
+    ]);
+    const agent = new AgentLoop({
+      provider, model: "m", tools: [echoTool],
+      context: { strategy, compactAtTokens: { trigger: 1000, target: 500 } },
+    });
+    await agent.sendSync("go");
+    expect(calls.map((c) => c.tokens)).toEqual([2000]);
+    await agent.stop();
+  });
+
+  test("a bare number passes no targetTokens; a bad range throws at construction", async () => {
+    let seen: number | undefined = -1;
+    const strategy: ContextStrategy = (graph, ctx) => { seen = ctx.targetTokens; return graph; };
+    const provider = new ScriptedProvider([{ toolCalls: [tc("c1", "Echo", { text: "a" })], usage: usage(1500) }, { text: "done" }]);
+    const agent = new AgentLoop({ provider, model: "m", tools: [echoTool], context: { strategy, compactAtTokens: 1000 } });
+    await agent.sendSync("go");
+    expect(seen).toBeUndefined();
+    await agent.stop();
+
+    const p = new ScriptedProvider([]);
+    expect(() => new AgentLoop({ provider: p, model: "m", context: { compactAtTokens: { trigger: 1000, target: 1000 } } }))
+      .toThrow("compactAtTokens.target (1000) must be below compactAtTokens.trigger (1000)");
+  });
+
+  test("context.everyToolCalls replaces contextPruneInterval (which still works)", async () => {
+    for (const opts of [{ context: { everyToolCalls: 1 } }, { contextPruneInterval: 1 }]) {
+      const { calls, strategy } = recordingStrategy(false);
+      const provider = new ScriptedProvider([{ toolCalls: [tc("c1", "Echo", { text: "a" })] }, { text: "done" }]);
+      const agent = new AgentLoop({ provider, model: "m", tools: [echoTool], contextStrategy: strategy, ...opts });
+      await agent.sendSync("go");
+      expect(calls.length).toBe(1);
+      await agent.stop();
+    }
   });
 });

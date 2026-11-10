@@ -39,7 +39,7 @@
  * ```
  */
 
-import type { AIProvider } from "./ai/types.js";
+import type { AIProvider, Usage } from "./ai/types.js";
 import { AI, type AIConversation } from "./ai/builder.js";
 import { ToolRegistry } from "./tools/registry.js";
 import { primitiveTools, type BuiltinIO } from "./tools/builtins.js";
@@ -54,9 +54,10 @@ import {
   type SpawnResult,
   type SpawnCall,
   type CoreEvent,
+  normalizeCompactAt,
 } from "./core/core.js";
 import { llmContextStrategy } from "./defaults/context-manager.js";
-import { describeTrim, projectContext, trimContext, type ContextStrategy } from "./context.js";
+import { describeTrim, projectContext, trimContext, type CompactAtTokens, type ContextStrategy } from "./context.js";
 import { mergeSkillsIntoSystem } from "./skills.js";
 import type { Skill } from "./skills.js";
 import { withSpan } from "./trace.js";
@@ -71,7 +72,7 @@ import {
   toErrorInfo,
 } from "./events.js";
 import { EventLog, type EventStore } from "./log.js";
-import { projectState, messagesToRequeue, type AgentState } from "./state.js";
+import { projectState, messagesToRequeue, addUsage, type AgentState } from "./state.js";
 import type { RetryConfig } from "./retry.js";
 import type { AgentHook, HookTarget, SendOptions } from "./hooks.js";
 
@@ -122,6 +123,9 @@ export type {
 // ============================================================================
 // Options
 // ============================================================================
+
+/** Heading `mergeSkillsIntoSystem` writes — used to avoid merging twice. */
+const SKILLS_MARKER = "==== AVAILABLE SKILLS ====";
 
 export interface AgentLoopOptions {
   /** AI provider (e.g. new OpenRouterProvider({ apiKey: "..." })) */
@@ -223,9 +227,11 @@ export interface AgentLoopOptions {
    * Classify a turn error as **fatal**.
    *
    * When the predicate returns `true`, the actor emits a `fatal` event
-   * (not `error`), clears the inbox, and stops the loop so the host can
-   * tear down cleanly.  The most common use is catching a self-modifying
-   * agent's `Reboot` signal.
+   * (not `error`), clears the inbox (rejecting queued `sendSync` calls), and
+   * stops the loop so the host can tear down cleanly.  The most common use
+   * is catching a self-modifying agent's `Reboot` signal.  Applies to errors
+   * thrown by tools too: a fatal error from `execute` is not turned into a
+   * failed tool result, and is never retried.
    *
    * Return `false` (or omit) for normal per-turn errors: the actor keeps
    * running and processes the next queued message.
@@ -252,6 +258,19 @@ export interface AgentLoopOptions {
   interceptors?: ReadonlyArray<import("./interceptors.js").Interceptor>;
 
   /**
+   * Context compaction — what trims the history and when it runs
+   * automatically.  See `ContextOptions`.
+   *
+   * @example
+   * ```ts
+   * context: { strategy: keepLastTurns(5), compactAtTokens: 150_000 }
+   * ```
+   */
+  context?: ContextOptions;
+
+  /**
+   * @deprecated Use `context.strategy`.
+   *
    * How context is trimmed when the model calls `ManageContext` or
    * `contextPruneInterval` fires: receives the agent's context graph
    * (`projectContext` — every message with the event and turn that wrote
@@ -267,7 +286,7 @@ export interface AgentLoopOptions {
   contextStrategy?: ContextStrategy;
 
   // ---- Loop config ----
-  /** Number of tool calls between automatic context prune. 0 disables. Default: 0 */
+  /** @deprecated Use `context.everyToolCalls`.  Number of tool calls between automatic context prune. 0 disables. Default: 0 */
   contextPruneInterval?: number;
   /** Classify tool calls as spawn tasks. */
   classifySpawn?: LoopConfig["classifySpawn"];
@@ -286,10 +305,46 @@ export interface AgentLoopOptions {
   llmIdleTimeoutMs?: number;
   /**
    * Cap completion tokens per request.  Passed to the provider as max_tokens.
-   * Default: 262144 (256k) — large enough that a long response with trailing
-   * tool calls won't be truncated mid-generation.  Reduce for cheaper runs.
+   * Default: unset — no `max_tokens` is sent and the provider's own limit
+   * applies (a large explicit cap is rejected by some OpenAI-compatible
+   * servers and by low-balance OpenRouter accounts).  A tool call cut off
+   * by the cap is answered with an error asking the model to retry smaller.
    */
   maxTokens?: number;
+  /**
+   * Cap on each tool result as the model sees it, in characters.  Longer
+   * output keeps its head and tail around a `… [N characters omitted …] …`
+   * marker.  `ToolDefinition.maxOutputChars` overrides it per tool.
+   * 0 disables.  Default: 50_000.
+   */
+  maxToolOutputChars?: number;
+}
+
+/** Grouped context-compaction options (`AgentLoopOptions.context`). */
+export interface ContextOptions {
+  /**
+   * How the history is trimmed — graph in, trimmed graph out (see
+   * `ContextStrategy`).  Used for the model's `ManageContext` calls and the
+   * automatic triggers below.  Default: `llmContextStrategy()`.
+   */
+  strategy?: ContextStrategy;
+  /**
+   * Run the strategy automatically once the context reaches this many
+   * tokens: the last request's `promptTokens` when the provider reports
+   * usage, else a chars/4 estimate of the history.  Checked after tool
+   * results are recorded, before the next model call.  If a run leaves the
+   * history unchanged, it does not fire again until the context has dropped
+   * back under the threshold.  0 / undefined disables.
+   *
+   * A range `{ trigger, target }` fires at `trigger` and asks the strategy
+   * to bring the context down to `target` (`ContextStrategyContext.targetTokens`;
+   * `foldTurns` and `llmContextStrategy` honour it), so the context settles
+   * between the two.  `target` must be below `trigger` — the constructor
+   * throws otherwise.  A bare number is a trigger with no target.
+   */
+  compactAtTokens?: CompactAtTokens;
+  /** Run the strategy automatically every N tool calls.  0 / undefined disables. */
+  everyToolCalls?: number;
 }
 
 export interface HydrateOptions {
@@ -335,8 +390,12 @@ export class AgentLoop implements HookTarget {
   private inboxWakers: Array<() => void> = [];
   private running = false;
   private loopPromise: Promise<void> | null = null;
-  /** `sendSync` promises still waiting for their turn — rejected by `stop()`. */
+  /** `sendSync` promises still waiting for their turn — rejected by `stop()` / a fatal error. */
   private pendingSends = new Map<string, (err: Error) => void>();
+  /** `awaitIdle()` callers — resolved when the loop exits (stop / fatal). */
+  private idleWaiters = new Set<() => void>();
+  /** Running token totals (see `usage()`). */
+  private usageTotals: Usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
   // ---- Per-turn state ----
   /** True from the moment a message is dequeued until its turn_end — see `awaitIdle`. */
@@ -358,6 +417,8 @@ export class AgentLoop implements HookTarget {
   private requestCounter = 0;
 
   constructor(opts: AgentLoopOptions) {
+    // Fail at construction, not at the first compaction, on a bad range.
+    normalizeCompactAt(opts.context?.compactAtTokens);
     this.options = opts;
     this.debugLog = opts.log;
     this.id = opts.id ?? "agent";
@@ -373,9 +434,10 @@ export class AgentLoop implements HookTarget {
     // 2. Build conversation
     const ai = new AI(opts.provider, opts.model);
     // An empty prompt is no prompt — keep the conversation and the log in agreement.
-    const system = mergeSkillsIntoSystem(opts.system, opts.skills ?? []) || undefined;
+    const system = this.withSkills(opts.system) || undefined;
     this.convo = ai.conversation({ model: opts.model, system });
-    this.convo.setMaxTokens(opts.maxTokens ?? 262_144);
+    // No default cap: only send max_tokens when the host asks for one.
+    if (opts.maxTokens !== undefined) this.convo.setMaxTokens(opts.maxTokens);
 
     // 3. Build world.  `world.signal` is swapped in per-turn by runLoop() so
     //    `interrupt()` only aborts the current turn and not the whole actor.
@@ -393,10 +455,13 @@ export class AgentLoop implements HookTarget {
 
     // 5. Loop config
     this.loopConfig = {
-      contextPruneInterval: opts.contextPruneInterval,
+      contextPruneInterval: opts.context?.everyToolCalls ?? opts.contextPruneInterval,
+      compactAtTokens: opts.context?.compactAtTokens,
       classifySpawn: opts.classifySpawn,
       maxIterations: opts.maxIterations,
       llmIdleTimeoutMs: opts.llmIdleTimeoutMs,
+      maxToolOutputChars: opts.maxToolOutputChars,
+      isFatal: opts.isFatal,
       skills: opts.skills,
       retry: opts.retry,
     };
@@ -415,8 +480,10 @@ export class AgentLoop implements HookTarget {
    *
    * The host owns configuration on resume: the `system` and `tools` passed
    * here are what the agent runs with (and are logged after the replayed
-   * events), not whatever the previous run last set.  Conversation history
-   * and queued work come from the log.
+   * events), not whatever the previous run last set — the `restored` event
+   * and `snapshot().system` carry the host's prompt.  Without `system`, the
+   * logged prompt is restored.  Conversation history and queued work come
+   * from the log.
    *
    * Throws if the log belongs to a different agent id — resuming someone
    * else's log would silently produce an empty conversation.
@@ -433,7 +500,11 @@ export class AgentLoop implements HookTarget {
       throw new Error(`Cannot resume "${id}" from a log written by ${[...owners].map((o) => `"${o}"`).join(", ")}`);
     }
     const agent = new AgentLoop({ ...rest, eventLog: log });
-    if (loaded.length > 0) agent.hydrate(loaded, { requeue, history });
+    if (loaded.length > 0) {
+      // The constructor already installed (and logged) the host's prompt.
+      const system = rest.system !== undefined ? agent.convo.getSystem() ?? "" : undefined;
+      agent.restore(loaded, { requeue, history }, system);
+    }
     return agent;
   }
 
@@ -454,19 +525,23 @@ export class AgentLoop implements HookTarget {
    * agent would splice re-queued messages into live work.
    */
   hydrate(events?: Iterable<LogEvent>, options: HydrateOptions = {}): AgentState {
+    return this.restore(events, options);
+  }
+
+  /** `hydrate`, optionally keeping `systemOverride` instead of the logged prompt. */
+  private restore(events: Iterable<LogEvent> | undefined, options: HydrateOptions, systemOverride?: string): AgentState {
     if (this.running || this.turnPending) {
       throw new Error("hydrate() must be called before start()");
     }
     const state = events ? projectState(events, this.id) : this.snapshot();
     const useLatest = options.history === "latest";
     const history = useLatest ? state.history : state.committedHistory;
-    const system = useLatest ? state.system : state.committedSystem;
+    const system = systemOverride ?? (useLatest ? state.system : state.committedSystem);
 
     this.convo.setHistory(history);
     if (system !== undefined) this.convo.setSystem(system);
-    this.world.toolCalls = 0;
-    this.world.llmCalls = 0;
-    this.world.pendingToolCalls = null;
+    this.resetWorld();
+    this.usageTotals = state.usage;
 
     const requeue = options.requeue ?? true;
     const messages = requeue ? messagesToRequeue(state) : [];
@@ -645,12 +720,16 @@ export class AgentLoop implements HookTarget {
       return;
     }
     return new Promise<void>((resolve) => {
-      const handler = (event: LogEvent): void => {
-        if (event.type === "idle") {
-          this.offEvent(handler);
-          resolve();
-        }
+      // Settles on `idle`, or when the loop exits (stop / fatal) — whichever first.
+      const done = (): void => {
+        this.offEvent(handler);
+        this.idleWaiters.delete(done);
+        resolve();
       };
+      const handler = (event: LogEvent): void => {
+        if (event.type === "idle") done();
+      };
+      this.idleWaiters.add(done);
       this.onEvent(handler);
     });
   }
@@ -727,6 +806,15 @@ export class AgentLoop implements HookTarget {
     return this.inbox.length;
   }
 
+  /**
+   * Token usage summed over every LLM call that reported it — this run plus
+   * whatever a `hydrate` / `resume` restored.  Per-turn figures are on
+   * `snapshot().turns[i].usage`.  Zeros when the provider reports no usage.
+   */
+  usage(): Usage {
+    return { ...this.usageTotals };
+  }
+
   // --------------------------------------------------------------------------
   // Public — request responses (default confirm/ask flow)
   // --------------------------------------------------------------------------
@@ -760,9 +848,7 @@ export class AgentLoop implements HookTarget {
   /** Clear the conversation history. */
   clear(): this {
     this.convo.clear();
-    this.world.toolCalls = 0;
-    this.world.llmCalls = 0;
-    this.world.pendingToolCalls = null;
+    this.resetWorld();
     this.emit({ type: "history_cleared" });
     return this;
   }
@@ -790,10 +876,14 @@ export class AgentLoop implements HookTarget {
     return this;
   }
 
-  /** Update the system prompt.  Takes effect on the next turn. */
+  /**
+   * Update the system prompt.  Takes effect on the next turn.  The skills
+   * listing (when `skills` are configured) is appended, as at construction.
+   */
   setSystem(prompt: string): this {
-    this.convo.setSystem(prompt);
-    this.emit({ type: "system_set", system: prompt });
+    const system = this.withSkills(prompt);
+    this.convo.setSystem(system);
+    this.emit({ type: "system_set", system });
     return this;
   }
 
@@ -803,6 +893,8 @@ export class AgentLoop implements HookTarget {
    */
   setHistory(history: import("./ai/types.js").Message[], reason = "host"): this {
     this.convo.setHistory(history);
+    this.world.lastUsage = undefined;
+    this.world.compactArmed = undefined;
     this.emit({ type: "history_replaced", history: [...history], reason });
     return this;
   }
@@ -810,6 +902,22 @@ export class AgentLoop implements HookTarget {
   // --------------------------------------------------------------------------
   // Internals
   // --------------------------------------------------------------------------
+
+  /** Merge the skills listing into a prompt — once (a prompt that already has it is kept). */
+  private withSkills(prompt: string | undefined): string {
+    const skills = this.options.skills ?? [];
+    if (!skills.length || prompt?.includes(SKILLS_MARKER)) return prompt ?? "";
+    return mergeSkillsIntoSystem(prompt, skills);
+  }
+
+  /** Reset the interpreter's per-conversation counters. */
+  private resetWorld(): void {
+    this.world.toolCalls = 0;
+    this.world.llmCalls = 0;
+    this.world.pendingToolCalls = null;
+    this.world.lastUsage = undefined;
+    this.world.compactArmed = undefined;
+  }
 
   /** Core enqueue step shared by `send` and `sendSync`.  Returns the id. */
   private enqueue(message: AgentMessage | string, options?: SendOptions): string {
@@ -914,8 +1022,9 @@ export class AgentLoop implements HookTarget {
                 // do NOT call the LLM.  They still go through the normal
                 // turn_start / turn_end lifecycle so `sendSync` and any other
                 // per-turn correlation keeps working.
-                this.convo.setSystem(msg.content);
-                this.emit({ type: "system_set", system: msg.content });
+                const system = this.withSkills(msg.content);
+                this.convo.setSystem(system);
+                this.emit({ type: "system_set", system });
                 this.emit({ type: "system_refreshed" });
               } else {
                 await runCore(msg.content, this.world, this.effects, this.loopConfig);
@@ -937,6 +1046,9 @@ export class AgentLoop implements HookTarget {
             // The host listens for `fatal` and tears down.
             this.running = false;
             this.inbox.length = 0;
+            // Queued `sendSync` callers will never get a turn — fail them now.
+            for (const [, reject] of this.pendingSends) reject(error);
+            this.pendingSends.clear();
             this.turnStatus = "fatal";
             this.emit({ type: "fatal", error });
           } else {
@@ -960,6 +1072,8 @@ export class AgentLoop implements HookTarget {
         this.emit({ type: "idle" });
       }
     }
+    // The loop is gone (stop / fatal) — nothing more will become idle.
+    for (const done of [...this.idleWaiters]) done();
   }
 
   private nextToolId(): string {
@@ -977,6 +1091,8 @@ export class AgentLoop implements HookTarget {
           return e as CoreEvent & EventEnvelope;
         }
         case "llm_response":
+          if (event.usage) this.usageTotals = addUsage(this.usageTotals, event.usage);
+          return this.emit(event, this.lastLlmRequestId) as CoreEvent & EventEnvelope;
         case "llm_error":
           return this.emit(event, this.lastLlmRequestId) as CoreEvent & EventEnvelope;
         default:
@@ -1059,7 +1175,7 @@ export class AgentLoop implements HookTarget {
         if (opts.refreshSystem) {
           const next = await opts.refreshSystem();
           if (typeof next === "string") {
-            const merged = mergeSkillsIntoSystem(next, opts.skills ?? []);
+            const merged = this.withSkills(next);
             this.convo.setSystem(merged);
             this.emit({ type: "system_set", system: merged });
           }
@@ -1067,13 +1183,16 @@ export class AgentLoop implements HookTarget {
         this.emit({ type: "system_refreshed" });
       },
 
-      manageContext: async (instructions, trigger = "tool") => {
+      manageContext: async (instructions, trigger = "tool", info) => {
         const graph = projectContext(this.log.eventsFor(this.id), this.id, this.convo.getHistory());
         this.debugLog?.("MANAGE_CONTEXT", `Starting context management, ${graph.nodes.length} messages: ${instructions}`);
-        const trim = await trimContext(opts.contextStrategy ?? llmContextStrategy(), graph, {
+        const strategy = opts.context?.strategy ?? opts.contextStrategy ?? llmContextStrategy();
+        const trim = await trimContext(strategy, graph, {
           agent: this.id,
           instructions,
           trigger,
+          ...(info?.tokens !== undefined && { tokens: info.tokens }),
+          ...(info?.targetTokens !== undefined && { targetTokens: info.targetTokens }),
           events: this.log.events(),
           eventLog: this.log,
           provider: this.convo.provider,

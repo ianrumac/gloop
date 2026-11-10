@@ -10,6 +10,9 @@
 
     // Bundler mode
     "moduleResolution": "bundler",
+    // Resolve workspace packages (@hypen-space/gloop-loop) to their source
+    // via the "bun" export condition, so typechecking needs no build step.
+    "customConditions": ["bun"],
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "noEmit": true,
@@ -28,5 +31,9 @@
 
     // Type roots
     "typeRoots": ["./types", "./node_modules/@types"]
-  }
+  },
+  // The CLI only.  tests/ is a deliberately buggy fixture app and lander/ a
+  // separate site, each with its own deps; packages/* typecheck themselves.
+  "include": ["bin", "src", "components", "types", "*.ts"],
+  "exclude": ["node_modules", "tests", "lander", "packages", ".gloop"]
 }

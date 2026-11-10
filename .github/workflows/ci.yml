@@ -7,6 +7,7 @@ on:
     branches: [main]
 
 jobs:
+  # Job id/name kept as "test" / "Test" so existing required checks still match.
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -19,10 +20,10 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.4.4
 
       - name: Install dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
         working-directory: .
 
       - name: Typecheck
@@ -31,8 +32,9 @@ jobs:
       - name: Build
         run: bun run build
 
+      # The API-key test runs in its own gated step below.
       - name: Unit tests
-        run: bun test --coverage -- --exclude test/integration.test.ts
+        run: bun test --coverage --path-ignore-patterns='test/integration.test.ts'
 
       - name: Integration tests
         if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
@@ -40,3 +42,56 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: bun test test/integration.test.ts
         timeout-minutes: 5
+
+  cli:
+    name: gloop CLI
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Resolves @hypen-space/gloop-loop to its source (customConditions:
+      # ["bun"]), so no engine build is needed.
+      - name: Typecheck
+        run: bun run typecheck
+
+      # bin/, src/, components/ — the engine's tests run in the job above,
+      # and tests/ is the deliberately buggy fixture app.
+      - name: Tests
+        run: bun run test:cli
+
+  effect:
+    name: gloop-effect
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/gloop-effect
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+        working-directory: .
+
+      # gloop-effect's tsc resolves gloop-loop through its built types.
+      - name: Build gloop-loop
+        run: bun run build
+        working-directory: packages/gloop-loop
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Tests
+        run: bun test

@@ -38,7 +38,7 @@
  * ```
  */
 
-import type { FinishReason, JsonTool, JsonToolCall, Message } from "./ai/types.js";
+import type { FinishReason, JsonTool, JsonToolCall, Message, Usage } from "./ai/types.js";
 import type { SpawnResult } from "./core/core.js";
 
 // ============================================================================
@@ -62,6 +62,8 @@ export interface LlmCallResult {
   readonly text: string;
   readonly toolCalls: ReadonlyArray<JsonToolCall>;
   readonly finishReason: FinishReason;
+  /** Token usage, when the provider reports it. */
+  readonly usage?: Usage;
 }
 
 /** Context passed into the tool-call interceptor chain. */

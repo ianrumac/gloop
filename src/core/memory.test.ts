@@ -142,9 +142,9 @@ describe("memory file operations", () => {
     );
     const defs = await extractToolDefsFromMemory();
     expect(defs).toHaveLength(1);
-    expect(defs[0].name).toBe("MyTool");
-    expect(defs[0].description).toBe("Does stuff");
-    expect(defs[0].arguments).toEqual([{ name: "input", description: "the input" }]);
+    expect(defs[0]!.name).toBe("MyTool");
+    expect(defs[0]!.description).toBe("Does stuff");
+    expect(defs[0]!.arguments).toEqual([{ name: "input", description: "the input" }]);
   });
 
   test("extractToolDefsFromMemory handles single quotes in args", async () => {
@@ -153,7 +153,7 @@ describe("memory file operations", () => {
     );
     const defs = await extractToolDefsFromMemory();
     expect(defs).toHaveLength(1);
-    expect(defs[0].arguments[0].name).toBe("key");
+    expect(defs[0]!.arguments[0]!.name).toBe("key");
   });
 
   test("extractToolDefsFromMemory handles path attribute", async () => {
@@ -162,7 +162,7 @@ describe("memory file operations", () => {
     );
     const defs = await extractToolDefsFromMemory();
     expect(defs).toHaveLength(1);
-    expect(defs[0].path).toBe("/custom/path.ts");
+    expect(defs[0]!.path).toBe("/custom/path.ts");
   });
 
   test("extractToolDefsFromMemory skips malformed JSON", async () => {

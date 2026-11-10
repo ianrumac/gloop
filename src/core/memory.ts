@@ -97,10 +97,11 @@ export async function extractToolDefsFromMemory(): Promise<MemoryToolDef[]> {
 
   let match: RegExpExecArray | null;
   while ((match = toolDefRe.exec(content)) !== null) {
-    const name = match[1];
-    const description = match[2];
-    const argsRaw = match[3];
-    const path = match[4];
+    // All four groups are required by the regex, so they are always set.
+    const name = match[1]!;
+    const description = match[2]!;
+    const argsRaw = match[3]!;
+    const path = match[4]!;
 
     try {
       // Normalise single quotes to double quotes before parsing

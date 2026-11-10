@@ -9,11 +9,12 @@
  */
 
 import type { AIConversation } from "../ai/builder.js";
-import type { JsonToolCall } from "../ai/types.js";
+import type { JsonToolCall, Usage } from "../ai/types.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { ToolCall, ToolResult } from "../tools/types.js";
 import { jsonToolCallsToToolCalls } from "../tools/parser.js";
 import { requiresConfirmation } from "../tools/validator.js";
+import { truncateOutput, DEFAULT_MAX_TOOL_OUTPUT_CHARS } from "../tools/output.js";
 import type { Skill } from "../skills.js";
 import {
   formatSkillsListing,
@@ -25,7 +26,7 @@ import type { Span, Tracer } from "../trace.js";
 import { NoopTracer, withSpan } from "../trace.js";
 import type { AgentEvent, EventEnvelope, EventRef } from "../events.js";
 import { toErrorInfo } from "../events.js";
-import type { ContextTrigger } from "../context.js";
+import type { CompactAtTokens, ContextTrigger } from "../context.js";
 import type { RetryConfig } from "../retry.js";
 import { withRetry, defaultRetryIf } from "../retry.js";
 import { AbortError, raceAbort } from "./abort.js";
@@ -80,6 +81,8 @@ export interface SpawnResult {
 export interface SpawnCall {
   /** The `spawn_start` event — pass it to the child so it can record `cause`. */
   cause?: EventRef;
+  /** Aborts when the turn is interrupted — kill the child when it fires. */
+  signal?: AbortSignal;
 }
 
 /** Continuation: what to do with tool results */
@@ -169,6 +172,19 @@ export interface World {
    * `interceptors[0]` is outermost. Empty / undefined → no overhead.
    */
   interceptors?: ReadonlyArray<Interceptor>;
+  /**
+   * Usage reported for the most recent LLM call, if any — the token figure
+   * `LoopConfig.compactAtTokens` checks.  Cleared when a context strategy
+   * rewrites history (the figure is stale until the next call).
+   */
+  lastUsage?: Usage;
+  /**
+   * Whether the token-based compaction trigger may fire.  Disarmed after a
+   * compaction that changed nothing, re-armed once the context is back
+   * under the threshold — so a strategy that cannot get under it does not
+   * re-run every iteration.  Undefined means armed.
+   */
+  compactArmed?: boolean;
 }
 
 export { AbortError, raceAbort };
@@ -269,8 +285,19 @@ export interface Effects {
   remember: (content: string) => Promise<void>;
   forget: (content: string) => Promise<void>;
   refreshSystem: () => Promise<void>;
-  /** `trigger` says who asked: the model's ManageContext call (`"tool"`) or `contextPruneInterval` (`"auto"`). */
-  manageContext: (instructions: string, trigger?: ContextTrigger) => Promise<string>;
+  /**
+   * `trigger` says who asked: the model's ManageContext call (`"tool"`) or
+   * an automatic trigger (`"auto"` — `contextPruneInterval` /
+   * `compactAtTokens`).  `info.tokens` is the current context size estimate
+   * (last reported prompt tokens, else a chars/4 estimate);
+   * `info.targetTokens` is where a token-triggered run should bring it
+   * (`compactAtTokens: { trigger, target }`).
+   */
+  manageContext: (
+    instructions: string,
+    trigger?: ContextTrigger,
+    info?: { tokens?: number; targetTokens?: number },
+  ) => Promise<string>;
   complete: (summary: string) => void;
   installTool: (source: string) => Promise<string>;
   listTools: () => string;
@@ -293,6 +320,34 @@ export interface LoopConfig {
 
   /** Number of tool calls between automatic context prune. 0 disables. Default: 0 */
   contextPruneInterval?: number;
+
+  /**
+   * Run the context strategy automatically when the context reaches this
+   * many tokens — the last request's `promptTokens` when the provider
+   * reports usage, else a chars/4 estimate of the history.  Checked at the
+   * same point as `contextPruneInterval` (after tool results are recorded,
+   * before the next model call).  0 / undefined disables.
+   *
+   * `{ trigger, target }` fires at `trigger` and passes `target` to the
+   * strategy as `ContextStrategyContext.targetTokens` — the size it should
+   * bring the context down to.  A bare number is a trigger with no target.
+   */
+  compactAtTokens?: CompactAtTokens;
+
+  /**
+   * Cap on each tool result as the model sees it, in characters.  Longer
+   * output keeps its head and tail with a marker in between
+   * (`truncateOutput`).  `ToolDefinition.maxOutputChars` overrides it per
+   * tool.  0 disables.  Default: 50_000.
+   */
+  maxToolOutputChars?: number;
+
+  /**
+   * Classify an error as fatal.  A tool that throws a fatal error is NOT
+   * turned into a failed tool result (and is never retried): the error
+   * propagates out of the turn, like one from the provider.
+   */
+  isFatal?: (error: Error) => boolean;
 
   /**
    * Maximum LLM calls per `run()` (one user turn).  When set (> 0), a
@@ -461,9 +516,10 @@ export function toolCallsToForm(toolCalls: ToolCall[], classifySpawn?: (call: To
 async function runSpawn(world: World, fx: Effects, task: string): Promise<SpawnResult> {
   return withWorldSpan(world, "spawn", { taskLength: task.length }, async (span) => {
     const started = fx.record?.({ type: "spawn_start", task });
-    const call: SpawnCall = started
-      ? { cause: { agent: started.agent, eventId: started.eventId } }
-      : {};
+    const call: SpawnCall = {
+      ...(started && { cause: { agent: started.agent, eventId: started.eventId } }),
+      ...(world.signal && { signal: world.signal }),
+    };
     const r = await chainBoundary(
       world.interceptors,
       "spawn",
@@ -480,6 +536,37 @@ async function runSpawn(world: World, fx: Effects, task: string): Promise<SpawnR
     span.setAttribute("exitCode", r.exitCode);
     return r;
   });
+}
+
+/** Run the memory boundary (interceptors + `fx.remember` / `fx.forget`). */
+function runMemory(world: World, fx: Effects, op: "remember" | "forget", content: string): Promise<void> {
+  return withWorldSpan(
+    world,
+    `memory.${op}`,
+    { contentLength: content.length },
+    () =>
+      chainBoundary(world.interceptors, "memory", (ctx) =>
+        ctx.op === "remember" ? fx.remember(ctx.content) : fx.forget(ctx.content),
+      )({ op, content } as MemoryContext),
+  );
+}
+
+/** Run the ask boundary (interceptors + `fx.ask`). */
+function runAsk(world: World, fx: Effects, question: string): Promise<string> {
+  return withWorldSpan(
+    world,
+    "request.ask",
+    { question },
+    async (span) => {
+      const result = await chainBoundary(
+        world.interceptors,
+        "ask",
+        (ctx) => fx.ask(ctx.question),
+      )({ question } as AskContext);
+      span.setAttribute("answerLength", result.length);
+      return result;
+    },
+  );
 }
 
 export function formatResults(results: ToolResult[]): string {
@@ -524,27 +611,11 @@ export async function eval_(
       return eval_(form.then, world, fx, config);
 
     case "remember":
-      await withWorldSpan(
-        world,
-        "memory.remember",
-        { contentLength: form.content.length },
-        () =>
-          chainBoundary(world.interceptors, "memory", (ctx) =>
-            fx.remember(ctx.content),
-          )({ op: "remember", content: form.content } as MemoryContext),
-      );
+      await runMemory(world, fx, "remember", form.content);
       return eval_(form.then, world, fx, config);
 
     case "forget":
-      await withWorldSpan(
-        world,
-        "memory.forget",
-        { contentLength: form.content.length },
-        () =>
-          chainBoundary(world.interceptors, "memory", (ctx) =>
-            fx.forget(ctx.content),
-          )({ op: "forget", content: form.content } as MemoryContext),
-      );
+      await runMemory(world, fx, "forget", form.content);
       return eval_(form.then, world, fx, config);
 
     case "confirm": {
@@ -567,20 +638,7 @@ export async function eval_(
     }
 
     case "ask": {
-      const answer = await withWorldSpan(
-        world,
-        "request.ask",
-        { question: form.question },
-        async (span) => {
-          const result = await chainBoundary(
-            world.interceptors,
-            "ask",
-            (ctx) => fx.ask(ctx.question),
-          )({ question: form.question } as AskContext);
-          span.setAttribute("answerLength", result.length);
-          return result;
-        },
-      );
+      const answer = await runAsk(world, fx, form.question);
       const next = form.then(answer);
       return eval_(next, world, fx, config);
     }
@@ -719,7 +777,7 @@ async function evalThink(
             policy,
             async (attempt): Promise<LlmCallResult> => {
               let fullText = "";
-              const stream = world.convo.request();
+              const stream = world.convo.request(world.signal ? { signal: world.signal } : undefined);
               try {
                 const iter = stream.textStream[Symbol.asyncIterator]();
                 while (true) {
@@ -728,6 +786,10 @@ async function evalThink(
                     idleMs,
                   );
                   if (done) break;
+                  // "" is a provider heartbeat (a chunk without text, e.g.
+                  // tool-call argument deltas): it resets the idle timer
+                  // above but is neither output nor history.
+                  if (value === "") continue;
                   streamedAny = true;
                   fx.streamChunk(value);
                   fullText += value;
@@ -735,7 +797,12 @@ async function evalThink(
                 fx.streamDone();
                 const calls = await raceIdleTimeout(stream.toolCalls, idleMs);
                 const finishReason = await raceIdleTimeout(stream.finishReason, idleMs);
-                return { text: fullText, toolCalls: calls, finishReason };
+                // Usage is best-effort: a provider that fails to report it
+                // must not fail the turn.
+                const usage = stream.usage
+                  ? await raceIdleTimeout(stream.usage, idleMs).catch(() => undefined)
+                  : undefined;
+                return { text: fullText, toolCalls: calls, finishReason, ...(usage && { usage }) };
               } catch (err) {
                 if (err instanceof AbortError) {
                   await stream.cancel().catch(() => {});
@@ -773,7 +840,9 @@ async function evalThink(
         text: result.text,
         toolCalls: [...result.toolCalls],
         finishReason: result.finishReason,
+        ...(result.usage && { usage: result.usage }),
       });
+      if (result.usage) world.lastUsage = result.usage;
       span.setAttribute("outputLength", result.text.length);
       span.setAttribute("toolCallsRequested", result.toolCalls.length);
       span.setAttribute("finishReason", result.finishReason ?? "unknown");
@@ -788,9 +857,16 @@ async function evalThink(
   }
 
   if (llmResult.toolCalls.length > 0) {
+    // A response cut off by max_tokens usually ends mid-arguments — say so,
+    // so the model retries with a smaller call instead of the same one.
+    const truncated = llmResult.finishReason === "length";
     const toolCalls = jsonToolCallsToToolCalls(
       [...llmResult.toolCalls],
       world.registry,
+    ).map((c) =>
+      truncated && c.parseError !== undefined
+        ? { ...c, parseError: `${c.parseError}; the response hit the max_tokens limit, so the arguments were probably cut off — split large content into smaller calls` }
+        : c,
     );
     fx.log?.("TOOL_CALLS", JSON.stringify(toolCalls));
     // Stash the response so evalInvoke can record the assistant's tool calls
@@ -815,10 +891,16 @@ async function evalThink(
  * assistant's TEXT (when non-empty); the toolCalls are merged into that
  * message so the response stays a single assistant turn.  Calls the
  * interpreter handles outside evalInvoke (CompleteTask, spawn-classified
- * tasks) get a synthetic response so the provider never sees an unanswered
+ * tasks) — or that never ran because the turn was cut short — get
+ * `unanswered` as their response so the provider never sees an unanswered
  * tool call id.
  */
-function recordNativeToolMessages(world: World, fx: Effects, results: ToolResult[]): void {
+function recordNativeToolMessages(
+  world: World,
+  fx: Effects,
+  results: ToolResult[],
+  unanswered = "(handled by the host — no tool output)",
+): void {
   const pending = world.pendingToolCalls;
   if (!pending) return;
   world.pendingToolCalls = null;
@@ -841,9 +923,348 @@ function recordNativeToolMessages(world: World, fx: Effects, results: ToolResult
       toolCallId: call.id,
       content: r
         ? (r.success ? r.output : `Error: ${r.output}`)
-        : "(handled by the host — no tool output)",
+        : unanswered,
     });
   }
+}
+
+/** Instructions handed to the context strategy by the automatic triggers. */
+const AUTO_PRUNE_INSTRUCTIONS =
+  "Prune old tool results and intermediate outputs. Keep the current task goal, recent results, and any information the agent is actively using.";
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** Is `err` one that must unwind the turn rather than become a tool result? */
+function mustPropagate(err: unknown, config?: LoopConfig): boolean {
+  return err instanceof AbortError || (err instanceof Error && (config?.isFatal?.(err) ?? false));
+}
+
+/**
+ * `compactAtTokens` as `{ trigger, target? }` — a bare number is a trigger
+ * with no target.  Throws when the target is not below the trigger (or
+ * either end is negative / not a number).
+ */
+export function normalizeCompactAt(value: CompactAtTokens | undefined): { trigger: number; target?: number } {
+  if (value === undefined) return { trigger: 0 };
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || value < 0) throw new Error(`compactAtTokens must be a non-negative number, got ${value}`);
+    return { trigger: value };
+  }
+  const { trigger, target } = value;
+  if (typeof trigger !== "number" || !Number.isFinite(trigger) || trigger < 0) {
+    throw new Error(`compactAtTokens.trigger must be a non-negative number, got ${String(trigger)}`);
+  }
+  if (target === undefined) return { trigger };
+  if (typeof target !== "number" || !Number.isFinite(target) || target < 0) {
+    throw new Error(`compactAtTokens.target must be a non-negative number, got ${String(target)}`);
+  }
+  if (trigger > 0 && target >= trigger) {
+    throw new Error(`compactAtTokens.target (${target}) must be below compactAtTokens.trigger (${trigger})`);
+  }
+  return { trigger, target };
+}
+
+/** Rough token count of the conversation (chars / 4) — used when the provider reports no usage. */
+function estimateTokens(world: World): number {
+  let chars = world.convo.getSystem()?.length ?? 0;
+  for (const m of world.convo.getHistory()) {
+    chars += m.content.length;
+    for (const tc of m.toolCalls ?? []) chars += tc.function.name.length + tc.function.arguments.length;
+  }
+  return Math.ceil(chars / 4);
+}
+
+/** The context size the compaction trigger compares against. */
+function contextTokens(world: World): number {
+  return world.lastUsage?.promptTokens ?? estimateTokens(world);
+}
+
+/** Did a context strategy change the history?  (`getHistory` copies the array, not the messages.) */
+function historyChanged(before: ReadonlyArray<Message>, after: ReadonlyArray<Message>): boolean {
+  return before.length !== after.length || before.some((m, i) => m !== after[i]);
+}
+
+/**
+ * Run `fx.manageContext`, clearing the stale usage figure when it rewrote
+ * history.  Returns whether it did.
+ */
+async function runManageContext(
+  world: World,
+  fx: Effects,
+  instructions: string,
+  trigger: ContextTrigger,
+  tokens: number,
+  targetTokens?: number,
+): Promise<{ output: string; changed: boolean }> {
+  const before = world.convo.getHistory();
+  const output = await fx.manageContext(instructions, trigger, {
+    tokens,
+    ...(targetTokens !== undefined && { targetTokens }),
+  });
+  const changed = historyChanged(before, world.convo.getHistory());
+  if (changed) world.lastUsage = undefined;
+  return { output, changed };
+}
+
+/**
+ * Automatic context compaction, run at the safe point after a batch of tool
+ * results is recorded: every `contextPruneInterval` tool calls, and when the
+ * context reaches `compactAtTokens`.  A failing strategy is reported as a
+ * failed `ManageContext` tool_done and the turn continues.
+ */
+async function autoCompact(world: World, fx: Effects, config: LoopConfig | undefined, callCount: number): Promise<void> {
+  const interval = config?.contextPruneInterval ?? 0;
+  const { trigger: threshold, target } = normalizeCompactAt(config?.compactAtTokens);
+  world.toolCalls += callCount;
+
+  let reason: string | null = null;
+  if (interval > 0 && world.toolCalls >= interval) {
+    world.toolCalls = 0;
+    reason = `auto-pruning after ${interval} tool calls`;
+  }
+  let tokens: number | undefined;
+  let byTokens = false;
+  if (threshold > 0) {
+    tokens = contextTokens(world);
+    if (tokens < threshold) world.compactArmed = true;
+    else if (world.compactArmed !== false) {
+      byTokens = true;
+      const range = target !== undefined ? `threshold ${threshold}, target ${target}` : `threshold ${threshold}`;
+      reason ??= `auto-compacting at ~${tokens} tokens (${range})`;
+    }
+  }
+  if (reason === null) return;
+
+  fx.toolStart("ManageContext", reason);
+  let changed = false;
+  try {
+    const r = await runManageContext(
+      world,
+      fx,
+      AUTO_PRUNE_INSTRUCTIONS,
+      "auto",
+      tokens ?? contextTokens(world),
+      byTokens ? target : undefined,
+    );
+    changed = r.changed;
+    fx.toolDone("ManageContext", true, r.output);
+  } catch (err) {
+    fx.toolDone("ManageContext", false, `Context management failed: ${errorMessage(err)}`);
+    if (mustPropagate(err, config)) throw err;
+  }
+  // Only re-arm the token trigger when compaction actually changed
+  // something; otherwise wait until the context is back under the threshold.
+  if (threshold > 0) world.compactArmed = changed;
+}
+
+/**
+ * Emit `tool_start`, run `body`, emit the matching `tool_done`.  If `body`
+ * throws (interrupt, fatal error) the tool still gets a failed `tool_done`
+ * so UIs keyed on tool_start never show it running forever.
+ */
+async function withToolEvents(
+  fx: Effects,
+  call: ToolCall,
+  preview: string,
+  body: () => Promise<{ result: ToolResult; done?: string }>,
+): Promise<ToolResult> {
+  fx.toolStart(call.name, preview, call.args, call.id);
+  try {
+    const { result, done } = await body();
+    fx.toolDone(call.name, result.success, done ?? (result.success ? "ok" : result.output));
+    return result;
+  } catch (err) {
+    fx.toolDone(call.name, false, err instanceof AbortError ? "interrupted" : errorMessage(err));
+    throw err;
+  }
+}
+
+/** Execute one tool call and produce its result (never throws for ordinary tool failures). */
+async function invokeOne(
+  call: ToolCall,
+  world: World,
+  fx: Effects,
+  config?: LoopConfig,
+): Promise<ToolResult> {
+  const ok = (output: string): ToolResult => ({ name: call.name, output, success: true, id: call.id });
+  const fail = (output: string): ToolResult => ({ name: call.name, output, success: false, id: call.id });
+
+  // Arguments that were not valid JSON are never executed — guessing could
+  // e.g. run half a JSON object as a shell command.
+  if (call.parseError !== undefined) {
+    const output =
+      `The arguments for ${call.name} were not valid JSON (${call.parseError}), so the tool was not run. ` +
+      `Re-issue the call with complete, valid JSON arguments.`;
+    return withToolEvents(fx, call, "(malformed arguments)", async () => ({ result: fail(output) }));
+  }
+
+  // A spawn-classified call (e.g. `Bash("gloop --task …")`) is a tool call
+  // whose "execute" is another agent: run it through the spawn boundary
+  // and record the result exactly like a tool result.
+  const spawnTask = config?.classifySpawn?.(call) ?? null;
+  if (spawnTask !== null) {
+    return withToolEvents(fx, call, `spawn: ${spawnTask.substring(0, 50)}`, async () => {
+      const r = await runSpawn(world, fx, spawnTask);
+      const result = spawnToToolResult(r);
+      return { result: { ...result, name: call.name, id: call.id }, done: r.success ? "ok" : result.output };
+    });
+  }
+
+  // AskUser — through the `ask` interceptor chain, like the Ask form.
+  if (call.name === "AskUser") {
+    const question = call.args.question ?? "What would you like to do?";
+    return withToolEvents(fx, call, question.substring(0, 60), async () => {
+      const answer = await runAsk(world, fx, question);
+      return { result: ok(`User answered: ${answer}`), done: "answered" };
+    });
+  }
+
+  // ManageContext — run the context strategy.  A failing strategy is a
+  // failed tool result, not a failed turn.
+  if (call.name === "ManageContext") {
+    const instructions = call.args.instructions ?? "Prune stale messages";
+    return withToolEvents(fx, call, instructions.substring(0, 60), async () => {
+      try {
+        const { output } = await runManageContext(world, fx, instructions, "tool", contextTokens(world));
+        return { result: ok(output), done: output };
+      } catch (err) {
+        if (mustPropagate(err, config)) throw err;
+        return { result: fail(`Context management failed: ${errorMessage(err)}`) };
+      }
+    });
+  }
+
+  // Remember / Forget — through the `memory` interceptor chain.
+  if (call.name === "Remember" || call.name === "Forget") {
+    const op = call.name === "Remember" ? "remember" : "forget";
+    const content = call.args.content ?? "";
+    return withToolEvents(fx, call, content.substring(0, 60), async () => {
+      try {
+        await runMemory(world, fx, op, content);
+      } catch (err) {
+        if (mustPropagate(err, config)) throw err;
+        return { result: fail(`Failed to ${op}: ${errorMessage(err)}`) };
+      }
+      return op === "remember"
+        ? { result: ok(`Remembered: ${content}`), done: "remembered" }
+        : { result: ok(`Forgot: ${content}`), done: "forgotten" };
+    });
+  }
+
+  // Build a short preview from declared argument order (insertion order of
+  // `call.args` matches the registry's declared argument list since the
+  // parser iterates `tool.arguments`).
+  const preview = Object.values(call.args)
+    .map((v) => `"${v.substring(0, 40)}${v.length > 40 ? "..." : ""}"`)
+    .join(", ");
+
+  // Resolve the tool early so askPermission is available
+  const tool = world.registry.get(call.name);
+  if (!tool) {
+    return withToolEvents(fx, call, preview, async () => ({ result: fail(`Unknown tool: ${call.name}`) }));
+  }
+
+  // Check if confirmation needed — first the legacy Bash check, then tool's own askPermission
+  let danger = requiresConfirmation(call);
+  if (danger === null && tool.askPermission) {
+    danger = tool.askPermission(call.args);
+  }
+  if (danger !== null) {
+    // Route through the same `confirm` interceptor chain as form-level
+    // Confirm so policy interceptors apply to tool gating too.
+    const approved = await chainBoundary(
+      world.interceptors,
+      "confirm",
+      (ctx) => fx.confirm(ctx.command),
+    )({ command: danger } as ConfirmContext);
+    if (!approved) {
+      return withToolEvents(fx, call, preview, async () => ({
+        result: fail("User denied execution"),
+        done: "denied by user",
+      }));
+    }
+  }
+
+  const cap = tool.maxOutputChars ?? config?.maxToolOutputChars ?? DEFAULT_MAX_TOOL_OUTPUT_CHARS;
+
+  return withToolEvents(fx, call, preview, () => withWorldSpan(
+    world,
+    `tool.${call.name}`,
+    { tool: call.name, argCount: Object.keys(call.args).length },
+    async (span) => {
+      const ctx: ToolCallContext = { name: call.name, args: call.args };
+      const result = await chainBoundary(
+        world.interceptors,
+        "toolCall",
+        async (innerCtx): Promise<ToolCallResult> => {
+          // Re-resolve the tool if an interceptor renamed it.
+          const resolved =
+            innerCtx.name === call.name ? tool : world.registry.get(innerCtx.name);
+          if (!resolved) {
+            return {
+              success: false,
+              output: `Unknown tool: ${innerCtx.name}`,
+            };
+          }
+          // Fatal errors are never retried.
+          const configured = resolved.retryable ? config?.retry?.tool : undefined;
+          const policy = configured
+            ? {
+                ...configured,
+                retryIf: (err: unknown, attempt: number) =>
+                  !mustPropagate(err, config) && (configured.retryIf ?? defaultRetryIf)(err, attempt),
+              }
+            : undefined;
+          try {
+            // Race against the turn's signal so an interrupt unwinds
+            // promptly even for a tool that ignores `ctx.signal`.
+            const output = await raceAbort(
+              world.signal,
+              withRetry(
+                policy,
+                () => resolved.execute(innerCtx.args, { signal: world.signal }),
+                {
+                  signal: world.signal,
+                  onRetry: (info) =>
+                    fx.record?.({
+                      type: "retry",
+                      boundary: "tool",
+                      name: innerCtx.name,
+                      attempt: info.attempt,
+                      maxAttempts: info.maxAttempts,
+                      delayMs: info.delayMs,
+                      error: toErrorInfo(info.error),
+                    }),
+                },
+              ),
+            );
+            return { success: true, output };
+          } catch (err) {
+            // Interrupts and fatal errors (e.g. a Reboot signal) unwind the turn.
+            if (mustPropagate(err, config)) throw err;
+            const msg = err instanceof Error
+              ? `${err.message}${err.stack ? "\n" + err.stack.split("\n").slice(1, 4).join("\n") : ""}`
+              : String(err);
+            return { success: false, output: msg, error: err };
+          }
+        },
+      )(ctx);
+
+      // One output policy for every tool — custom ones included.
+      const output = truncateOutput(result.output, cap);
+      span.setAttribute("ok", result.success);
+      span.setAttribute("outputLength", result.output.length);
+      if (!result.success && "error" in result && result.error !== undefined) {
+        span.recordException(result.error);
+      }
+      return {
+        result: { name: call.name, output, success: result.success, id: call.id },
+        done: result.success ? "ok" : output,
+      };
+    },
+  ));
 }
 
 /** Invoke: execute tools (with confirmation), then continue */
@@ -860,161 +1281,24 @@ async function evalInvoke(
   const hasReload = calls.some(c => c.name === "Reload");
 
   // Process each tool call
-  for (const call of calls) {
-    if (world.signal?.aborted) throw new AbortError();
-
-    // A spawn-classified call (e.g. `Bash("gloop --task …")`) is a tool call
-    // whose "execute" is another agent: run it through the spawn boundary
-    // and record the result exactly like a tool result.
-    const spawnTask = config?.classifySpawn?.(call) ?? null;
-    if (spawnTask !== null) {
-      fx.toolStart(call.name, `spawn: ${spawnTask.substring(0, 50)}`, call.args, call.id);
-      const r = await runSpawn(world, fx, spawnTask);
-      const result = spawnToToolResult(r);
-      results.push({ ...result, name: call.name, id: call.id });
-      fx.toolDone(call.name, r.success, r.success ? "ok" : result.output);
-      continue;
+  try {
+    for (const call of calls) {
+      if (world.signal?.aborted) throw new AbortError();
+      results.push(await invokeOne(call, world, fx, config));
     }
-
-    // Handle AskUser specially
-    if (call.name === "AskUser") {
-      const question = call.args.question ?? "What would you like to do?";
-      fx.toolStart("AskUser", question.substring(0, 60));
-      const answer = await fx.ask(question);
-      results.push({ name: "AskUser", output: `User answered: ${answer}`, success: true, id: call.id });
-      fx.toolDone("AskUser", true, "answered");
-      continue;
-    }
-
-    // Handle ManageContext specially — fork a mini agent loop
-    if (call.name === "ManageContext") {
-      const instructions = call.args.instructions ?? "Prune stale messages";
-      fx.toolStart("ManageContext", instructions.substring(0, 60));
-      const result = await fx.manageContext(instructions, "tool");
-      results.push({ name: "ManageContext", output: result, success: true, id: call.id });
-      fx.toolDone("ManageContext", true, result);
-      continue;
-    }
-
-    // Handle Remember specially — persist to memory + UI feedback
-    if (call.name === "Remember") {
-      const content = call.args.content ?? "";
-      fx.toolStart("Remember", content.substring(0, 60));
-      await fx.remember(content);
-      results.push({ name: "Remember", output: `Remembered: ${content}`, success: true, id: call.id });
-      fx.toolDone("Remember", true, "remembered");
-      continue;
-    }
-
-    // Handle Forget specially — remove from memory + UI feedback
-    if (call.name === "Forget") {
-      const content = call.args.content ?? "";
-      fx.toolStart("Forget", content.substring(0, 60));
-      await fx.forget(content);
-      results.push({ name: "Forget", output: `Forgot: ${content}`, success: true, id: call.id });
-      fx.toolDone("Forget", true, "forgotten");
-      continue;
-    }
-
-    // Resolve the tool early so askPermission is available
-    const tool = world.registry.get(call.name);
-    if (!tool) {
-      results.push({ name: call.name, output: `Unknown tool: ${call.name}`, success: false, id: call.id });
-      fx.toolDone(call.name, false, `Unknown tool: ${call.name}`);
-      continue;
-    }
-
-    // Check if confirmation needed — first the legacy Bash check, then tool's own askPermission
-    let danger = requiresConfirmation(call);
-    if (danger === null && tool.askPermission) {
-      danger = tool.askPermission(call.args);
-    }
-    if (danger !== null) {
-      // Route through the same `confirm` interceptor chain as form-level
-      // Confirm so policy interceptors apply to tool gating too.
-      const ok = await chainBoundary(
-        world.interceptors,
-        "confirm",
-        (ctx) => fx.confirm(ctx.command),
-      )({ command: danger } as ConfirmContext);
-      if (!ok) {
-        results.push({ name: call.name, output: "User denied execution", success: false, id: call.id });
-        fx.toolDone(call.name, false, "denied by user");
-        continue;
-      }
-    }
-
-    // Build a short preview from declared argument order (insertion order of
-    // `call.args` matches the registry's declared argument list since the
-    // parser iterates `tool.arguments`).
-    const preview = Object.values(call.args)
-      .map((v) => `"${v.substring(0, 40)}${v.length > 40 ? "..." : ""}"`)
-      .join(", ");
-    fx.toolStart(call.name, preview, call.args, call.id);
-
-    await withWorldSpan(
+  } catch (err) {
+    // The turn is unwinding mid-batch (interrupt, fatal error).  Still
+    // record what already ran — plus a note for every call that didn't —
+    // so history stays provider-valid and the model knows what happened.
+    recordNativeToolMessages(
       world,
-      `tool.${call.name}`,
-      { tool: call.name, argCount: Object.keys(call.args).length },
-      async (span) => {
-        const ctx: ToolCallContext = { name: call.name, args: call.args };
-        const result = await chainBoundary(
-          world.interceptors,
-          "toolCall",
-          async (innerCtx): Promise<ToolCallResult> => {
-            // Re-resolve the tool if an interceptor renamed it.
-            const resolved =
-              innerCtx.name === call.name ? tool : world.registry.get(innerCtx.name);
-            if (!resolved) {
-              return {
-                success: false,
-                output: `Unknown tool: ${innerCtx.name}`,
-              };
-            }
-            const policy = resolved.retryable ? config?.retry?.tool : undefined;
-            try {
-              const output = await withRetry(
-                policy,
-                () => resolved.execute(innerCtx.args),
-                {
-                  signal: world.signal,
-                  onRetry: (info) =>
-                    fx.record?.({
-                      type: "retry",
-                      boundary: "tool",
-                      name: innerCtx.name,
-                      attempt: info.attempt,
-                      maxAttempts: info.maxAttempts,
-                      delayMs: info.delayMs,
-                      error: toErrorInfo(info.error),
-                    }),
-                },
-              );
-              return { success: true, output };
-            } catch (err) {
-              if (err instanceof AbortError) throw err;
-              const msg = err instanceof Error
-                ? `${err.message}${err.stack ? "\n" + err.stack.split("\n").slice(1, 4).join("\n") : ""}`
-                : String(err);
-              return { success: false, output: msg, error: err };
-            }
-          },
-        )(ctx);
-
-        results.push({
-          name: call.name,
-          output: result.output,
-          success: result.success,
-          id: call.id,
-        });
-        fx.toolDone(call.name, result.success, result.success ? "ok" : result.output);
-        span.setAttribute("ok", result.success);
-        span.setAttribute("outputLength", result.output.length);
-        if (!result.success && "error" in result && result.error !== undefined) {
-          span.recordException(result.error);
-        }
-      },
+      fx,
+      results,
+      err instanceof AbortError
+        ? "Interrupted by the user before this tool call completed."
+        : `Not completed: the turn stopped with an error (${errorMessage(err)}).`,
     );
+    throw err;
   }
 
   // Record the assistant's tool calls and their results natively in history
@@ -1027,15 +1311,8 @@ async function evalInvoke(
     await fx.refreshSystem();
   }
 
-  // Auto-prune context every N tool calls (0 disables)
-  const interval = config?.contextPruneInterval ?? 0;
-  world.toolCalls += calls.length;
-  if (interval > 0 && world.toolCalls >= interval) {
-    world.toolCalls = 0;
-    fx.toolStart("ManageContext", `auto-pruning after ${interval} tool calls`);
-    const pruneResult = await fx.manageContext("Prune old tool results and intermediate outputs. Keep the current task goal, recent results, and any information the agent is actively using.", "auto");
-    fx.toolDone("ManageContext", true, pruneResult);
-  }
+  // Automatic context compaction (tool-call interval / token threshold)
+  await autoCompact(world, fx, config, calls.length);
 
   // Continue with the results
   const nextForm = then(results);
@@ -1047,7 +1324,9 @@ async function evalInvoke(
 // ============================================================================
 
 /** Parse raw user input into a Form: slash commands become special forms,
- *  everything else becomes Think. Like `read` in a Lisp REPL. */
+ *  everything else becomes Think. Like `read` in a Lisp REPL.
+ *  Only a known command (`/skills`, `/skill`, `/install`, `/tools`) or a
+ *  skill name is a command — "/etc/hosts looks wrong" goes to the model. */
 export function parseInput(input: string, config?: LoopConfig): Form {
   const t = input.trim();
   if (!t.startsWith("/")) return Think(t);
@@ -1088,7 +1367,8 @@ export function parseInput(input: string, config?: LoopConfig): Form {
   switch (cmd) {
     case "/install": return arg ? Install(arg) : Emit("Usage: /install <url|path>", Nil);
     case "/tools":   return ListTools();
-    default:         return Emit(`Unknown command: ${cmd}`, Nil);
+    // Not a command — a path, a regex, a fraction… — send it to the model.
+    default:         return Think(t);
   }
 }
 

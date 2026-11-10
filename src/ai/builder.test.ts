@@ -38,6 +38,7 @@ class MockProvider implements AIProvider {
     return {
       textStream,
       toolCalls: Promise.resolve([]),
+      finishReason: Promise.resolve("stop"),
       cancel: async () => {},
     };
   }
@@ -136,8 +137,8 @@ describe("AIBuilder", () => {
 
     await builder.query();
     expect(provider.lastConfig!.messages).toHaveLength(3);
-    expect(provider.lastConfig!.messages[0].content).toBe("first");
-    expect(provider.lastConfig!.messages[2].content).toBe("next");
+    expect(provider.lastConfig!.messages[0]!.content).toBe("first");
+    expect(provider.lastConfig!.messages[2]!.content).toBe("next");
   });
 
   test("streamToCompletion collects full content", async () => {
@@ -249,7 +250,7 @@ describe("AIConversation", () => {
 
     await convo.send("Follow up");
     expect(convo.getHistory()).toHaveLength(4);
-    expect(convo.getHistory()[3].content).toBe("Reply 2");
+    expect(convo.getHistory()[3]!.content).toBe("Reply 2");
   });
 
   test("send() includes system prompt in request", async () => {
@@ -328,11 +329,11 @@ describe("AIConversation", () => {
     const provider = new MockProvider(["ok", "ok"]);
     const convo = new AIConversation(provider, "m", "initial");
     await convo.send("first");
-    expect(provider.lastConfig!.messages[0].content).toBe("initial");
+    expect(provider.lastConfig!.messages[0]!.content).toBe("initial");
 
     convo.setSystem("updated");
     await convo.send("second");
-    expect(provider.lastConfig!.messages[0].content).toBe("updated");
+    expect(provider.lastConfig!.messages[0]!.content).toBe("updated");
   });
 
   test("fork() creates new conversation with fresh history", async () => {
@@ -344,7 +345,7 @@ describe("AIConversation", () => {
     expect(forked.getHistory()).toHaveLength(0);
 
     await forked.send("forked msg");
-    expect(provider.lastConfig!.messages[0].content).toBe("forked system");
+    expect(provider.lastConfig!.messages[0]!.content).toBe("forked system");
   });
 
   test("fork() preserves provider routing", async () => {
@@ -366,7 +367,7 @@ describe("AIConversation", () => {
       },
       stream(): StreamResult {
         const textStream: AsyncIterableIterator<string> = (async function* () {})();
-        return { textStream, toolCalls: Promise.resolve([]), cancel: async () => {} };
+        return { textStream, toolCalls: Promise.resolve([]), finishReason: Promise.resolve("stop"), cancel: async () => {} };
       },
     };
 
@@ -405,7 +406,7 @@ describe("AIConversation", () => {
     }]);
     await convo.send("use tool");
     expect(provider.lastConfig!.tools).toBeDefined();
-    expect(provider.lastConfig!.tools![0].function.name).toBe("TestTool");
+    expect(provider.lastConfig!.tools![0]!.function.name).toBe("TestTool");
   });
 
   test("clearJsonTools removes tools from requests", async () => {

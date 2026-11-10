@@ -80,6 +80,56 @@ gloop graph # print the last session's turn graph as Mermaid
 gloop graph --html # write a self-contained interactive log viewer next to the log
 ```
 
+`OPENROUTER_API_KEY` must be set (gloop exits with a one-line hint if it isn't), unless `OPENROUTER_BASE_URL` points at another OpenAI-compatible endpoint. `gloop --help` lists everything.
+
+### Options
+
+| Flag | Default | |
+|---|---|---|
+| `--task "<task>"` | | Run one task headless, print its summary, exit. |
+| `--provider <name>` | | Pin OpenRouter to one upstream provider. |
+| `--clone` | | Copy gloop's source into `.gloop/src/` and run from there; enables `Reboot`. |
+| `--resume [path]` | | Continue a session from its log (default: the newest). |
+| `--debug` | | Debug logs to `.gloop/debug.log`. |
+| `--max-iterations <n>` | 200 (100 for `--task`) | Model calls per turn before it is stopped. `0` = unlimited. |
+| `--retries <n>` | 3 | Attempts per model call, with exponential backoff. `1` = no retry. |
+| `--max-tool-output <n>` | 50000 | Characters of each tool result the model sees (head + tail kept). `0` = unlimited. |
+| `--compact-at <x>` | `0.85` | When to compact the context automatically: a fraction of the model's context window (`0 < x <= 1`, e.g. `0.85`), an absolute token count (an integer `> 1`, e.g. `150000`), or a range `target-trigger` (`0.6-0.85`, `90000-150000`; `..` works too) — compaction fires at the trigger and brings the context down toward the target, so it settles in the range. Both ends must be the same kind. An absolute trigger above the window is clamped to 95% of it (with a notice). `0` = never. |
+| `--context-window <n>` | looked up | The model's context window in tokens. By default it is looked up in the OpenRouter models list (`${OPENROUTER_BASE_URL}/models` when a base URL is set), cached per model for a day in `.gloop/models-cache.json`; if that fails (2 s timeout, never fatal) gloop assumes 128000. Subagents on the same model get the parent's figure. |
+| `--compaction fold\|llm` | `fold` | How automatic compaction trims: `fold` folds old turns into short notes without a model call; `llm` has a model summarise. The model's own `ManageContext` call always uses the model. |
+| `--task-timeout <ms>` | 1800000 | Kill a `--task` subagent after this long. `0` = no limit. |
+
+Subagents started with `gloop --task` from a Bash call inherit the parent's explicitly set options (their own flags win). Only a Bash call that is *just* the `gloop --task …` invocation runs as a linked subagent; `gloop --task x && echo done` or `… > out.txt` runs as an ordinary shell command.
+
+### `.gloop/config.json`
+
+The same settings, per project, as JSON. Flags override the file; the file overrides the defaults. Unknown keys are ignored (noted in the debug log); an invalid value stops gloop at startup with a message naming the key.
+
+```json
+{
+  "maxIterations": 300,
+  "retries": 3,
+  "maxToolOutput": 50000,
+  "compactAt": [0.6, 0.85],
+  "contextWindow": 200000,
+  "compaction": "fold",
+  "keepTurns": 3,
+  "taskTimeoutMs": 1800000,
+  "maxTokens": 16000,
+  "llmIdleTimeoutMs": 120000
+}
+```
+
+In the file, a `compactAt` range is a `[target, trigger]` array. `contextWindow` is usually best left unset (looked up per model). `keepTurns` (recent turns `fold` keeps whole, default 3; with a range, `fold` keeps fewer when it must to reach the target), `maxTokens` (completion cap per request, default unset — the provider's limit) and `llmIdleTimeoutMs` (fail a silent model stream, engine default 2 min, `0` disables) are file-only.
+
+### Interactive session
+
+The dim line above the prompt shows token usage: `ctx 42.1k/200k (21%) · in 310k · out 12k` — the size of the last request's context against the model's context window, then session totals. Retries and automatic compaction are noted inline; `--resume` starts with `resumed session <file>, N turns`.
+
+`Esc` interrupts the current turn: a running Bash command or subagent is killed (its process group), and the loop stays alive. `Ctrl+C` (or SIGINT / SIGTERM / SIGHUP) quits: it stops the turn, kills processes tied to it, flushes the session log and exits; press it again to quit immediately. A Bash command still running after 60 s is left running in the background on purpose — the model gets its PID and log file — and survives gloop exiting.
+
+Headless runs (`--task`, `src/core/headless.ts`) write real token totals in their `complete` and final `usage` JSONL events, and on a signal write a `shutdown` event and exit with 128 + the signal number.
+
 Every session is an append-only event log in `.gloop/sessions/` — inputs, outputs, tool calls, memory ops, confirmations. `--resume` (or a `Reboot`) rebuilds the agent from it; a turn that was cut off is rolled back and re-run. `gloop graph` shows a log as a graph of turns across agents (including `--task` subagents, whose logs are linked and followed), and `gloop graph --html` writes an interactive viewer: turn graph, per-event causality, and a scrubber that replays the agent's state at any point. The same viewer is hosted next to the homepage at `/viewer/` — drop any session file on it.
 
 ## Forms — S-expressions as Data
@@ -126,11 +176,13 @@ Pure data → injected effects. Serializable, testable, composable.
 │   ├── core.ts        Interpreter
 │   ├── memory.ts      Persistent notes
 │   ├── ui.ts          Ink renderer
+│   ├── config.ts      Safety settings: defaults, .gloop/config.json, flags
+│   ├── shutdown.ts    Clean exit on Ctrl+C / signals
 │   └── ...
-├── src/ai/            LLM abstraction (OpenRouter, etc.)
+├── src/ai/            Re-exports of gloop-loop's LLM layer
 ├── src/tools/         Registry, parser, builtins/tests
 ├── components/        React/Ink UI
-├── .gloop/            Memory (.gloop/memory.md), custom tools
+├── .gloop/            Memory (.gloop/memory.md), custom tools, config.json
 ├── docs/              SPECIFICATION.md
 └── tests              agent.test.ts, etc.
 ```

@@ -15,6 +15,7 @@ export type {
   AIRequestConfig,
   AIResponse,
   StreamResult,
+  Usage,
   AIProvider,
   AIProviderConfig,
   Lazy,
@@ -27,6 +28,7 @@ export { OpenRouterProvider } from "./ai/provider.js";
 export type {
   ToolArgument,
   ToolDefinition,
+  ToolContext,
   ToolCall,
   ToolResult,
 } from "./tools/types.js";
@@ -34,6 +36,7 @@ export type {
 export { ToolRegistry } from "./tools/registry.js";
 export { jsonToolCallsToToolCalls } from "./tools/parser.js";
 export { requiresConfirmation } from "./tools/validator.js";
+export { truncateOutput, DEFAULT_MAX_TOOL_OUTPUT_CHARS } from "./tools/output.js";
 
 // --- Builtin tools: portable tool implementations ---
 export type { BuiltinIO, ShellResult } from "./tools/builtins.js";
@@ -80,6 +83,7 @@ export {
   formatResults,
   parseInput,
   run,
+  normalizeCompactAt,
 } from "./core/core.js";
 
 // --- Defaults: batteries-included implementations ---
@@ -92,6 +96,12 @@ export {
 } from "./defaults/memory.js";
 export type { FileMemory, FileMemoryOptions } from "./defaults/memory.js";
 export { manageContextFork, llmContextStrategy } from "./defaults/context-manager.js";
+export {
+  foldTurns,
+  scoreEvidenceLine,
+  FOLD_DEFAULTS,
+  type FoldTurnsOptions,
+} from "./defaults/fold-turns.js";
 export type { ManageContextOptions, LlmContextStrategyOptions } from "./defaults/context-manager.js";
 
 // --- Skills (SKILL.md discovery is host-specific; helpers are portable) ---
@@ -221,6 +231,7 @@ export type {
   ContextStrategy,
   ContextStrategyContext,
   ContextTrigger,
+  CompactAtTokens,
   ContextTrim,
 } from "./context.js";
 export {
@@ -236,4 +247,4 @@ export {
 
 // --- AgentLoop: high-level actor-style entry point ---
 export { AgentLoop } from "./agent.js";
-export type { AgentLoopOptions, HydrateOptions } from "./agent.js";
+export type { AgentLoopOptions, ContextOptions, HydrateOptions } from "./agent.js";

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "bun:test";
-import { ToolRegistry, registerBuiltins, formatShellResult, type BuiltinIO, type ShellResult } from "../src/index.js";
+import { ToolRegistry, registerBuiltins, formatShellResult, createNodeIO, type BuiltinIO, type ShellResult } from "../src/index.js";
+import { normalizeHunkCounts } from "../src/tools/builtins.js";
 
 // ---------------------------------------------------------------------------
 // Mock IO
@@ -144,6 +145,40 @@ describe("Patch_file tool", () => {
     const wrong = `--- a/home/u/x.ts\n+++ b/home/u/x.ts\n@@ -1,3 +1,3 @@\n a\n-ZZZ\n+B\n c\n`;
     await expect(patch.execute({ patch: wrong })).rejects.toThrow(/context did not match/);
   });
+
+  it("treats an empty line inside a hunk as a blank context line", async () => {
+    const { files, patch } = await withFile("a.txt");
+    files.set("a.txt", "one\n\ntwo\nthree\n");
+    // The blank context line lost its leading space (editors strip it).
+    await patch.execute({ patch: "--- a/a.txt\n+++ b/a.txt\n@@ -1,4 +1,4 @@\n one\n\n-two\n+TWO\n three\n" });
+    expect(files.get("a.txt")).toBe("one\n\nTWO\nthree\n");
+  });
+
+  it("does not swallow the blank lines that end a patch or separate file sections", () => {
+    const patch =
+      "--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n x1\n-x2\n+X2\n\n" +
+      "--- a/y\n+++ b/y\n@@ -1,1 +1,1 @@\n-y\n+Y\n\n\n";
+    const out = normalizeHunkCounts(patch);
+    expect(out).toContain("@@ -1,2 +1,2 @@\n x1\n-x2\n+X2\n\n--- a/y");
+    expect(out).toContain("@@ -1,1 +1,1 @@\n-y\n+Y\n\n\n");
+  });
+
+  it("is atomic across files: nothing is written when any file fails", async () => {
+    const { files, patch } = await withFile("x.txt");
+    files.set("x.txt", "x1\nx2\n");
+    files.set("y.txt", "y1\ny2\n");
+    const multi =
+      "--- a/x.txt\n+++ b/x.txt\n@@ -1,2 +1,2 @@\n x1\n-x2\n+X2\n" +
+      "--- a/y.txt\n+++ b/y.txt\n@@ -1,2 +1,2 @@\n nope\n-y2\n+Y2\n";
+    await expect(patch.execute({ patch: multi })).rejects.toThrow(/No files were changed/);
+    expect(files.get("x.txt")).toBe("x1\nx2\n");
+    expect(files.get("y.txt")).toBe("y1\ny2\n");
+
+    const good = multi.replace(" nope", " y1");
+    expect(await patch.execute({ patch: good })).toContain("2 file(s)");
+    expect(files.get("x.txt")).toBe("x1\nX2\n");
+    expect(files.get("y.txt")).toBe("y1\nY2\n");
+  });
 });
 
 describe("Bash tool", () => {
@@ -169,6 +204,22 @@ describe("Bash tool", () => {
     await expect(
       registry.get("Bash")!.execute({ command: "echo", timeoutMs: "abc" })
     ).rejects.toThrow("Invalid timeoutMs");
+  });
+
+  it("forwards the turn's abort signal to io.exec", async () => {
+    let got: AbortSignal | undefined;
+    const registry = new ToolRegistry();
+    registerBuiltins(registry, mockIO({ exec: async (_c, _t, signal) => { got = signal; return { stdout: "", stderr: "", exitCode: 0 }; } }));
+    const ac = new AbortController();
+    await registry.get("Bash")!.execute({ command: "true" }, { signal: ac.signal });
+    expect(got).toBe(ac.signal);
+  });
+
+  it("declares timeoutMs as optional in its JSON schema", () => {
+    const registry = new ToolRegistry();
+    registerBuiltins(registry, mockIO());
+    const bash = registry.toJsonTools().find((t) => t.function.name === "Bash")!;
+    expect(bash.function.parameters.required).toEqual(["command"]);
   });
 
   it("askPermission flags rm commands", () => {
@@ -233,5 +284,34 @@ describe("formatShellResult", () => {
 
   it("shows (no output) for empty success", () => {
     expect(formatShellResult({ stdout: "", stderr: "", exitCode: 0 })).toBe("(no output)");
+  });
+});
+
+describe("createNodeIO().exec", () => {
+  const io = createNodeIO();
+
+  it("reports the real exit code (not always 1) and 124 on timeout", async () => {
+    expect((await io.exec("exit 3")).exitCode).toBe(3);
+    expect((await io.exec("nonexistent_cmd_xyz_123 2>/dev/null")).exitCode).toBe(127);
+    expect((await io.exec("true")).exitCode).toBe(0);
+    const t = await io.exec("echo partial; sleep 5", 200);
+    expect(t.exitCode).toBe(124);
+    expect(t.timedOut).toBe(true);
+    expect(t.stdout).toBe("partial\n");
+  });
+
+  it("kills the command (and its children) when the signal aborts", async () => {
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 50);
+    const t0 = Date.now();
+    const r = await io.exec("sleep 5; echo never", undefined, ac.signal);
+    expect(Date.now() - t0).toBeLessThan(2000);
+    expect(r.exitCode).toBe(130);
+    expect(r.stdout).toBe("");
+  });
+
+  it("does not truncate output itself (the model-facing cap lives in the interpreter)", async () => {
+    const r = await io.exec("head -c 150000 /dev/zero | tr '\\0' a");
+    expect(r.stdout.length).toBe(150000);
   });
 });

@@ -22,6 +22,8 @@ import type {
   ToolCallResult,
 } from "../src/interceptors.js";
 import { chain } from "../src/interceptors.js";
+import { ScriptedProvider, tc as scriptedCall } from "./mock-provider.js";
+import { primitiveTools } from "../src/tools/builtins.js";
 
 // ---------------------------------------------------------------------------
 // Mock provider (mirrors the one in agent.test.ts)
@@ -419,5 +421,42 @@ describe("AgentLoop interceptors", () => {
       "inner:after",
       "outer:after",
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Model-initiated AskUser / Remember / Forget go through the chains too
+// ---------------------------------------------------------------------------
+
+describe("ask / memory interceptors on model tool calls", () => {
+  test("AskUser, Remember and Forget calls from the model reach the ask / memory interceptors", async () => {
+    const seen: string[] = [];
+    const remembered: string[] = [];
+    const interceptor: Interceptor = {
+      name: "policy",
+      ask: async (ctx, next) => { seen.push(`ask:${ctx.question}`); return `${await next(ctx)}!`; },
+      memory: async (ctx, next) => { seen.push(`${ctx.op}:${ctx.content}`); return next({ ...ctx, content: ctx.content.toUpperCase() }); },
+    };
+    const agent = new AgentLoop({
+      provider: new ScriptedProvider([
+        { toolCalls: [
+          scriptedCall("c1", "AskUser", { question: "why?" }),
+          scriptedCall("c2", "Remember", { content: "note" }),
+          scriptedCall("c3", "Forget", { content: "old" }),
+        ] },
+        { text: "ok" },
+      ]),
+      model: "m",
+      tools: primitiveTools(),
+      interceptors: [interceptor],
+      ask: async () => "because",
+      remember: async (c) => { remembered.push(c); },
+    });
+    await agent.sendSync("go");
+    expect(seen).toEqual(["ask:why?", "remember:note", "forget:old"]);
+    expect(remembered).toEqual(["NOTE"]);
+    const tool = agent.convo.getHistory().find((m) => m.role === "tool")!;
+    expect(tool.content).toBe("User answered: because!");
+    await agent.stop();
   });
 });

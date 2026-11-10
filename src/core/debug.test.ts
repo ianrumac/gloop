@@ -91,7 +91,7 @@ describe("debug mode wiring", () => {
           messages: [],
           tools: [],
         },
-        async () => ({ text: "pong", toolCalls: [] }),
+        async () => ({ text: "pong", toolCalls: [], finishReason: "stop" as const }),
       );
 
       expect(result.text).toBe("pong");

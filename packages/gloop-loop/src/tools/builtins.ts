@@ -7,10 +7,27 @@ import { createNodeIO } from "../defaults/io.js";
 // confuse "lines 1..5 of the file" with "5 hunk body lines" and write
 // `@@ -1,5 +1,5 @@` for a 4-line body. `parsePatch` then fails with the
 // opaque "Hunk at line N contained invalid line". Recount before parsing.
+//
+// Editors and models also strip the single space off blank context lines,
+// leaving an empty line inside the hunk.  jsdiff reads those as context, so
+// we do too — but only when more hunk body follows before the next header,
+// file section or the end, so the blank line(s) that end a patch or
+// separate file sections are never swallowed into a hunk.
 export function normalizeHunkCounts(patch: string): string {
   const lines = patch.split("\n");
   const out: string[] = [];
   const hunkHeader = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/;
+  const isBody = (line: string) => line[0] === " " || line[0] === "-" || line[0] === "+" || line[0] === "\\";
+  const endsHunk = (line: string) => hunkHeader.test(line) || line.startsWith("--- ") || line.startsWith("diff ");
+  // Does more body follow the blank line at `from` (skipping further blanks)?
+  const bodyContinues = (from: number): boolean => {
+    for (let j = from + 1; j < lines.length; j++) {
+      const next = lines[j]!;
+      if (next === "") continue;
+      return !endsHunk(next) && isBody(next);
+    }
+    return false;
+  };
   let i = 0;
   while (i < lines.length) {
     const m = lines[i]!.match(hunkHeader);
@@ -21,14 +38,18 @@ export function normalizeHunkCounts(patch: string): string {
     i++;
     let oldN = 0, newN = 0;
     while (i < lines.length) {
-      const line = lines[i]!;
-      if (hunkHeader.test(line) || line.startsWith("--- ") || line.startsWith("diff ")) break;
+      let line = lines[i]!;
+      if (endsHunk(line)) break;
+      if (line === "") {
+        if (!bodyContinues(i)) break; // trailing blank — ends the hunk body
+        line = " "; // blank context line with its leading space stripped
+      }
       const c = line[0];
       if (c === " ") { oldN++; newN++; }
       else if (c === "-") oldN++;
       else if (c === "+") newN++;
       else if (c === "\\") { /* "\ No newline at end of file" — uncounted */ }
-      else break; // empty line / unknown prefix terminates the hunk body
+      else break; // unknown prefix terminates the hunk body
       out.push(line);
       i++;
     }
@@ -55,8 +76,11 @@ export interface BuiltinIO {
   fileExists(path: string): Promise<boolean>;
   /** Write text content to a file (create or overwrite). */
   writeFile(path: string, content: string): Promise<void>;
-  /** Execute a shell command. Return structured result. */
-  exec(command: string, timeoutMs?: number): Promise<ShellResult>;
+  /**
+   * Execute a shell command. Return structured result.  `signal` fires when
+   * the turn is interrupted — implementations should kill the process.
+   */
+  exec(command: string, timeoutMs?: number, signal?: AbortSignal): Promise<ShellResult>;
 }
 
 // ---------------------------------------------------------------------------
@@ -186,7 +210,10 @@ function _buildTools(io: BuiltinIO): ToolDefinition[] {
         return out;
       };
 
-      const applied: string[] = [];
+      // Apply every file in memory first and write only if all of them
+      // succeed — a multi-file patch is all-or-nothing.  A file patched by
+      // an earlier section is read back from `pending`, not from disk.
+      const pending = new Map<string, string>();
       const errors: string[] = [];
       const missing = new Set<string>();
 
@@ -195,29 +222,29 @@ function _buildTools(io: BuiltinIO): ToolDefinition[] {
           loadFile(index, callback) {
             resolvePath(index.oldFileName ?? index.newFileName ?? "")
               .then((filePath) =>
-                io.readFile(filePath).catch(() => {
-                  missing.add(filePath);
-                  return ""; // new file — start empty
-                }),
+                pending.has(filePath)
+                  ? pending.get(filePath)!
+                  : io.readFile(filePath).catch(() => {
+                      missing.add(filePath);
+                      return ""; // new file — start empty
+                    }),
               )
               .then((content) => callback(null, content), (err) => callback(err, ""));
           },
           patched(index, content, callback) {
             const name = index.newFileName ?? index.oldFileName ?? "";
-            const settle = async () => {
-              const filePath = await resolvePath(name);
+            resolvePath(name).then((filePath) => {
               if (content === false) {
                 errors.push(
                   missing.has(filePath)
                     ? `Failed to apply patch to ${filePath}: file not found (use the path exactly as ReadFile reported it)`
                     : `Failed to apply patch to ${filePath}: context did not match the file's current content`,
                 );
-                return;
+              } else {
+                pending.set(filePath, content);
               }
-              await io.writeFile(filePath, content);
-              applied.push(filePath);
-            };
-            settle().then(() => callback(null), (err) => callback(err));
+              callback(null);
+            }, (err) => callback(err));
           },
           complete(err) {
             if (err) reject(err);
@@ -227,7 +254,15 @@ function _buildTools(io: BuiltinIO): ToolDefinition[] {
       });
 
       if (errors.length > 0) {
-        throw new Error(errors.join("\n"));
+        const note = parsed.length > 1
+          ? "\nNo files were changed — the patch is applied all-or-nothing. Fix the failing section(s) and resend the whole patch."
+          : "";
+        throw new Error(errors.join("\n") + note);
+      }
+
+      const applied = [...pending.keys()];
+      for (const [filePath, content] of pending) {
+        await io.writeFile(filePath, content);
       }
 
       return `Patch applied successfully to ${applied.length} file(s): ${applied.join(", ")}`;
@@ -238,7 +273,7 @@ function _buildTools(io: BuiltinIO): ToolDefinition[] {
       "Execute a command in the shell. For long-running commands (servers/watchers), run them in the background (e.g. `... > /tmp/file.log 2>&1 &`) and then inspect logs in follow-up commands so the session does not block.",
     arguments: [
       { name: "command", description: "The command to execute" },
-      { name: "timeoutMs", description: "Optional timeout in milliseconds (e.g. 30000). If exceeded, the command is terminated." },
+      { name: "timeoutMs", description: "Optional timeout in milliseconds (e.g. 30000). If exceeded, the command is terminated.", optional: true },
     ],
     askPermission: (args) => {
       const cmd = args.command ?? "";
@@ -248,7 +283,7 @@ function _buildTools(io: BuiltinIO): ToolDefinition[] {
       }
       return null;
     },
-    execute: async (args) => {
+    execute: async (args, ctx) => {
       let timeoutMs: number | undefined;
       if (args.timeoutMs !== undefined && args.timeoutMs !== "") {
         const parsed = Number.parseInt(args.timeoutMs, 10);
@@ -258,7 +293,7 @@ function _buildTools(io: BuiltinIO): ToolDefinition[] {
         timeoutMs = parsed;
       }
 
-      const result = await io.exec(args.command!, timeoutMs);
+      const result = await io.exec(args.command!, timeoutMs, ctx?.signal);
       return formatShellResult(result);
     },
   }, {

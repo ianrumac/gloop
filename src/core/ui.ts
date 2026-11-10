@@ -169,3 +169,42 @@ export class StreamFilter {
     this.state = "normal";
   }
 }
+
+// ---- Token usage status line ----
+
+export interface UsageView {
+  /** Prompt tokens of the last model request — the current context size. */
+  contextTokens?: number;
+  /** Session totals (`agent.usage()`). */
+  totals: { promptTokens: number; completionTokens: number };
+  /** The model's context window — `ctx` is shown relative to it. */
+  contextWindow?: number;
+}
+
+/** 842 → "842", 4_210 → "4.2k", 42_100 → "42.1k", 310_000 → "310k", 1_250_000 → "1.25M". */
+export function formatTokens(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 100_000) return `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k`;
+  if (n < 1_000_000) return `${Math.round(n / 1000)}k`;
+  return `${(n / 1_000_000).toFixed(2).replace(/\.?0+$/, "")}M`;
+}
+
+/**
+ * `ctx 42.1k/200k (21%) · in 310k · out 12k` (`ctx 42.1k` without a known
+ * window), or "" before the provider reported any usage.
+ */
+export function formatUsageLine(u: UsageView): string {
+  const { promptTokens, completionTokens } = u.totals;
+  if (u.contextTokens === undefined && promptTokens === 0 && completionTokens === 0) return "";
+  const parts: string[] = [];
+  if (u.contextTokens !== undefined) {
+    const w = u.contextWindow;
+    parts.push(
+      w && w > 0
+        ? `ctx ${formatTokens(u.contextTokens)}/${formatTokens(w)} (${Math.round((u.contextTokens / w) * 100)}%)`
+        : `ctx ${formatTokens(u.contextTokens)}`,
+    );
+  }
+  parts.push(`in ${formatTokens(promptTokens)}`, `out ${formatTokens(completionTokens)}`);
+  return parts.join(" · ");
+}

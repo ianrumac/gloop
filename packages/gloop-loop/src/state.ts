@@ -10,13 +10,14 @@
  *   - `inbox` / `currentTurn`   — work that was queued or in flight
  *   - `turns`                   — every finished turn with its status
  *   - `memory`, `tools`         — what the agent remembered / had registered
+ *   - `usage`                   — token totals summed over every `llm_response`
  *   - `pendingConfirms/Asks`    — unanswered human-in-the-loop requests
  *
  * The reducer is immutable (every step returns a new object) so snapshots
  * taken at different points never alias each other.
  */
 
-import type { Message } from "./ai/types.js";
+import type { Message, Usage } from "./ai/types.js";
 import type { AgentMessage, LogEvent, TurnStatus } from "./events.js";
 
 // ============================================================================
@@ -39,6 +40,8 @@ export interface TurnRecord {
   llmCalls: number;
   /** Number of tool invocations started during the turn. */
   toolCalls: number;
+  /** Token usage summed over the turn's LLM calls (only those that reported usage). */
+  usage?: Usage;
 }
 
 export interface AgentState {
@@ -64,6 +67,8 @@ export interface AgentState {
   pendingAsks: Array<{ id: string; question: string }>;
   /** Summaries from every `task_complete`. */
   completions: string[];
+  /** Token usage summed over every LLM call that reported it. */
+  usage: Usage;
   /** Highest `seq` folded in. */
   lastSeq: number;
   /** Total events folded in. */
@@ -85,6 +90,7 @@ export function initialState(agent = "*"): AgentState {
     pendingConfirms: [],
     pendingAsks: [],
     completions: [],
+    usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
     lastSeq: 0,
     eventCount: 0,
   };
@@ -93,6 +99,21 @@ export function initialState(agent = "*"): AgentState {
 // ============================================================================
 // Reducer
 // ============================================================================
+
+/** Sum two usage records (optional counters stay absent until one reports them). */
+export function addUsage(a: Usage | undefined, b: Usage): Usage {
+  const sum = (x?: number, y?: number) =>
+    x === undefined && y === undefined ? undefined : (x ?? 0) + (y ?? 0);
+  const cached = sum(a?.cachedTokens, b.cachedTokens);
+  const reasoning = sum(a?.reasoningTokens, b.reasoningTokens);
+  return {
+    promptTokens: (a?.promptTokens ?? 0) + b.promptTokens,
+    completionTokens: (a?.completionTokens ?? 0) + b.completionTokens,
+    totalTokens: (a?.totalTokens ?? 0) + b.totalTokens,
+    ...(cached !== undefined && { cachedTokens: cached }),
+    ...(reasoning !== undefined && { reasoningTokens: reasoning }),
+  };
+}
 
 function withTurn(state: AgentState, patch: Partial<TurnRecord>): AgentState {
   if (!state.currentTurn) return state;
@@ -182,6 +203,12 @@ function step(s: AgentState, e: LogEvent): AgentState {
 
     case "tool_start":
       return withTurn(s, { toolCalls: (s.currentTurn?.toolCalls ?? 0) + 1 });
+
+    case "llm_response": {
+      if (!e.usage) return s;
+      const next = { ...s, usage: addUsage(s.usage, e.usage) };
+      return s.currentTurn ? withTurn(next, { usage: addUsage(s.currentTurn.usage, e.usage) }) : next;
+    }
 
     // ---- memory ------------------------------------------------------------
     case "memory": {
