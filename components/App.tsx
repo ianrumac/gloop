@@ -64,6 +64,10 @@ interface Props {
   /** Set when history was restored from a session log (`--resume` / reboot). */
   resumed?: { file: string; turns: number };
   agent: AgentLoop;
+  /** The model's context window (tokens) — the status line shows `ctx` against it. */
+  contextWindow?: number;
+  /** One-line startup notices (e.g. a clamped `compactAt`). */
+  notices?: string[];
 }
 
 /** Automatic compaction arrives as a ManageContext tool call with this preview prefix. */
@@ -77,13 +81,14 @@ const isAutoCompaction = (name: string, preview: string) =>
 let _id = 0;
 const uid = () => `ui_${++_id}`;
 
-export default function App({ model, rebootReason, resumed, agent }: Props) {
+export default function App({ model, rebootReason, resumed, agent, contextWindow, notices }: Props) {
   const { stdout } = useStdout();
   const cols = stdout?.columns ?? 80;
 
   // Committed timeline — written once to stdout via <Static>.
   const [committed, setCommitted] = useState<CommittedEntry[]>([
     { kind: "header", id: uid(), model, resumed },
+    ...(notices ?? []).map((text): CommittedEntry => ({ kind: "notice", id: uid(), text, tone: "warn" })),
   ]);
   // Live (running) tools — shown with spinners in the dynamic area.
   const [liveTools, setLiveTools] = useState<LiveTool[]>([]);
@@ -97,7 +102,7 @@ export default function App({ model, rebootReason, resumed, agent }: Props) {
   // Inbox size (kept in state so the indicator re-renders).
   const [queueSize, setQueueSize] = useState(0);
   // Token usage: context size of the last request + session totals.
-  const [usage, setUsage] = useState<UsageView>(() => ({ totals: agent.usage() }));
+  const [usage, setUsage] = useState<UsageView>(() => ({ totals: agent.usage(), contextWindow }));
 
   // Refs — used as mutation-safe accumulators, never read from JSX.
   const streamBufRef = useRef("");
@@ -174,7 +179,7 @@ export default function App({ model, rebootReason, resumed, agent }: Props) {
         case "llm_response":
           if (event.usage) {
             const contextTokens = event.usage.promptTokens;
-            setUsage({ contextTokens, totals: agent.usage() });
+            setUsage({ contextTokens, totals: agent.usage(), contextWindow });
           }
           break;
 

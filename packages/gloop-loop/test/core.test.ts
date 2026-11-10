@@ -30,6 +30,7 @@ import {
   ListTools,
   Spawn,
   AbortError,
+  normalizeCompactAt,
   type Form,
   type Effects,
   type World,
@@ -1264,5 +1265,37 @@ describe("streaming regressions", () => {
     expect(events.filter((e) => e.type === "stream_chunk")).toEqual([{ type: "stream_chunk", text: "hi" }]);
     expect(world.convo.getHistory().at(-1)).toEqual({ role: "assistant", content: "hi" });
     expect(world.lastUsage).toEqual({ promptTokens: 7, completionTokens: 1, totalTokens: 8 });
+  });
+});
+
+describe("compactAtTokens — range", () => {
+  test("normalizeCompactAt: number, range, and invalid ranges", () => {
+    expect(normalizeCompactAt(undefined)).toEqual({ trigger: 0 });
+    expect(normalizeCompactAt(1000)).toEqual({ trigger: 1000 });
+    expect(normalizeCompactAt({ trigger: 1000 })).toEqual({ trigger: 1000 });
+    expect(normalizeCompactAt({ trigger: 1000, target: 600 })).toEqual({ trigger: 1000, target: 600 });
+    expect(() => normalizeCompactAt({ trigger: 1000, target: 1000 })).toThrow("must be below");
+    expect(() => normalizeCompactAt({ trigger: 1000, target: 2000 })).toThrow("must be below");
+    expect(() => normalizeCompactAt({ trigger: 1000, target: -1 })).toThrow("target");
+    expect(() => normalizeCompactAt(-5)).toThrow("non-negative");
+  });
+
+  test("a token-triggered run passes targetTokens; an interval-triggered one does not", async () => {
+    const infos: Array<{ tokens?: number; targetTokens?: number } | undefined> = [];
+    const big = "x".repeat(4000);
+    for (const config of [
+      { compactAtTokens: { trigger: 500, target: 200 } },
+      { compactAtTokens: { trigger: 1_000_000, target: 200 }, contextPruneInterval: 1 },
+    ] satisfies LoopConfig[]) {
+      const provider = new MockProvider([{ toolCalls: [tc("c1", "Echo", { text: big })] }, { text: "done" }]);
+      const world = mkWorld(new AIConversation(provider, "m"), createTestRegistry());
+      const { fx } = createRecordingFx();
+      fx.manageContext = async (_i, _t, info) => { infos.push(info); return "ok"; };
+      await run("go", world, fx, config);
+    }
+    expect(infos).toHaveLength(2);
+    expect(infos[0]!.targetTokens).toBe(200);
+    expect(infos[0]!.tokens!).toBeGreaterThanOrEqual(500);
+    expect(infos[1]!.targetTokens).toBeUndefined();
   });
 });

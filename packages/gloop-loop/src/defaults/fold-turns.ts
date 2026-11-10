@@ -32,13 +32,14 @@ import { contextGraph, type ContextGraph, type ContextNode, type ContextStrategy
 // ============================================================================
 
 export interface FoldTurnsOptions {
-  /** Most recent turns kept whole. Default 3. */
+  /** Most recent turns kept whole. Default 3.  With `ctx.targetTokens`, fewer (down to 1) when needed to reach the target. */
   keep?: number;
   /**
    * Fold only once the foldable (older, still-unfolded) turns exceed this
    * many estimated tokens; then fold ALL of them in one step.  Batch folding
    * keeps the prompt-cache prefix stable between folds.  Default 20_000.
-   * 0 = always fold.
+   * 0 = always fold.  Not applied when `ctx.targetTokens` is set (the
+   * caller has already decided compaction is due).
    */
   budget?: number;
   /** Max characters of evidence kept per folded turn. Default 4_000. */
@@ -355,12 +356,7 @@ function foldMessage(turn: Turn, config: FoldConfig): Message {
 }
 
 function turnTokens(turn: Turn, estimate: (text: string) => number): number {
-  let total = 0;
-  for (const n of turn.nodes) {
-    total += estimate(n.message.content);
-    if (n.message.toolCalls?.length) total += estimate(JSON.stringify(n.message.toolCalls));
-  }
-  return total;
+  return graphTokens(turn.nodes, estimate);
 }
 
 function canFold(turn: Turn): boolean {
@@ -384,6 +380,15 @@ function canFold(turn: Turn): boolean {
  * in-progress last turn) into its user message plus one assistant message
  * holding an evidence block and the turn's final reply.  Nodes with an
  * unknown turn and turns folded before are left as they are.
+ *
+ * With `ctx.targetTokens` (an automatic run under
+ * `compactAtTokens: { trigger, target }`) the budget gate is skipped and
+ * the goal is an estimated context at or under the target: fold with
+ * `keep`, and while the estimate is still above the target, fold with
+ * `keep - 1`, `keep - 2`, … down to 1.  The estimate is the strategy's
+ * estimator over the resulting messages, scaled by
+ * `ctx.tokens / estimate(input)` when `ctx.tokens` is given (so the
+ * system prompt and tokenizer differences are accounted for).
  */
 export function foldTurns(options: FoldTurnsOptions = {}): ContextStrategy {
   const keep = Math.max(0, options.keep ?? FOLD_DEFAULTS.keep);
@@ -394,24 +399,38 @@ export function foldTurns(options: FoldTurnsOptions = {}): ContextStrategy {
     rerunnable: new Set(options.rerunnable ?? FOLD_DEFAULTS.rerunnable),
     scoreLine: options.scoreLine ?? scoreEvidenceLine,
   };
+  // A turn's fold depends only on the turn — cache it across `keep` attempts.
+  const foldOne = (turn: Turn, cache: Map<string, ContextNode>): ContextNode => {
+    let fold = cache.get(turn.id);
+    if (!fold) {
+      fold = { id: `fold#${turn.id}`, message: foldMessage(turn, config), turn: turn.id };
+      cache.set(turn.id, fold);
+    }
+    return fold;
+  };
 
-  return (graph) => {
-    const turns = turnsOf(graph);
-    // The last turn may still be running; the last `keep` are kept whole.
-    const older = turns.slice(0, Math.max(0, turns.length - Math.max(keep, 1)));
+  /** Fold the foldable turns among all but the last `k`; null when there are none. */
+  const foldWith = (
+    graph: ContextGraph,
+    turns: Turn[],
+    k: number,
+    gate: number | null,
+    cache: Map<string, ContextNode>,
+  ): ContextGraph | null => {
+    // The last turn may still be running; the last `k` are kept whole.
+    const older = turns.slice(0, Math.max(0, turns.length - Math.max(k, 1)));
     const foldable = older.filter(canFold);
-    if (foldable.length === 0) return graph;
-
-    const tokens = foldable.reduce((sum, t) => sum + turnTokens(t, estimate), 0);
-    if (tokens <= budget) return graph;
+    if (foldable.length === 0) return null;
+    if (gate !== null) {
+      const tokens = foldable.reduce((sum, t) => sum + turnTokens(t, estimate), 0);
+      if (tokens <= gate) return null;
+    }
 
     // Each folded turn becomes [head, fold] at the head's position.
     const replace = new Map<number, ContextNode[]>();
     const drop = new Set<number>();
     for (const turn of foldable) {
-      const head = turn.nodes[0]!;
-      const fold: ContextNode = { id: `fold#${turn.id}`, message: foldMessage(turn, config), turn: turn.id };
-      replace.set(turn.indices[0]!, [head, fold]);
+      replace.set(turn.indices[0]!, [turn.nodes[0]!, foldOne(turn, cache)]);
       for (const i of turn.indices.slice(1)) drop.add(i);
     }
 
@@ -423,4 +442,57 @@ export function foldTurns(options: FoldTurnsOptions = {}): ContextStrategy {
     });
     return contextGraph(graph.agent, nodes);
   };
+
+  return (graph, ctx) => {
+    const turns = turnsOf(reattributeFolds(graph));
+    const cache = new Map<string, ContextNode>();
+    const target = ctx?.targetTokens;
+    if (target === undefined) return foldWith(graph, turns, keep, budget, cache) ?? graph;
+
+    // Range mode: the caller decided compaction is due — no budget gate.
+    const inputEstimate = graphTokens(graph.nodes, estimate);
+    const scale = ctx.tokens !== undefined && ctx.tokens > 0 && inputEstimate > 0 ? ctx.tokens / inputEstimate : 1;
+    const fits = (g: ContextGraph) => graphTokens(g.nodes, estimate) * scale <= target;
+
+    // A smaller `k` folds a superset of the turns a larger one does; null
+    // means nothing (more) to fold at this `k`, so the last result stands.
+    let best: ContextGraph = graph;
+    for (let k = Math.max(keep, 1); k >= 1; k--) {
+      best = foldWith(graph, turns, k, null, cache) ?? best;
+      if (fits(best)) break;
+    }
+    return best;
+  };
+}
+
+/**
+ * A fold written by an earlier run comes back from the log attributed to
+ * the turn that ran the compaction (`history_replaced` only carries
+ * messages), which would make that turn look folded and group it with
+ * older ones.  A fold always directly follows its turn's user message:
+ * give it that message's turn again.  Node indices are unchanged.
+ */
+function reattributeFolds(graph: ContextGraph): ContextGraph {
+  let nodes: ContextNode[] | null = null;
+  graph.nodes.forEach((node, i) => {
+    const prev = graph.nodes[i - 1];
+    if (
+      prev && prev.turn !== null && prev.message.role === "user" && node.turn !== prev.turn &&
+      node.message.role === "assistant" && node.message.content.startsWith(FOLD_MARKER)
+    ) {
+      nodes ??= [...graph.nodes];
+      nodes[i] = { ...node, turn: prev.turn };
+    }
+  });
+  return nodes ? { ...graph, nodes } : graph;
+}
+
+/** Estimated tokens of a list of nodes (content plus tool-call JSON). */
+function graphTokens(nodes: ReadonlyArray<ContextNode>, estimate: (text: string) => number): number {
+  let total = 0;
+  for (const n of nodes) {
+    total += estimate(n.message.content);
+    if (n.message.toolCalls?.length) total += estimate(JSON.stringify(n.message.toolCalls));
+  }
+  return total;
 }

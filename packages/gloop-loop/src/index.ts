@@ -83,6 +83,7 @@ export {
   formatResults,
   parseInput,
   run,
+  normalizeCompactAt,
 } from "./core/core.js";
 
 // --- Defaults: batteries-included implementations ---
@@ -230,6 +231,7 @@ export type {
   ContextStrategy,
   ContextStrategyContext,
   ContextTrigger,
+  CompactAtTokens,
   ContextTrim,
 } from "./context.js";
 export {

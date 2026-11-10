@@ -1148,3 +1148,47 @@ describe("AgentLoop — interrupt reaches running tools", () => {
     await agent.stop();
   });
 });
+
+describe("AgentLoop — compaction range with foldTurns", () => {
+  test("fires at the trigger and settles the context between target and trigger", async () => {
+    const { ScriptedProvider, tc } = await import("./mock-provider.js");
+    const { foldTurns } = await import("../src/defaults/fold-turns.js");
+    const big = {
+      name: "Big",
+      description: "big output",
+      arguments: [],
+      execute: async () => Array.from({ length: 200 }, (_, i) => `filler line ${i} with some words in it`).join("\n"),
+    };
+    const responses = [];
+    for (let n = 1; n <= 6; n++) {
+      responses.push({ toolCalls: [tc(`c${n}`, "Big", {})] }, { text: `done ${n}` });
+    }
+    const sizes: Array<{ before: number; target?: number }> = [];
+    const fold = foldTurns({ evidenceChars: 200 });
+    const agent = new AgentLoop({
+      provider: new ScriptedProvider(responses),
+      model: "m",
+      tools: [big],
+      context: {
+        strategy: (g, ctx) => { sizes.push({ before: ctx.tokens!, target: ctx.targetTokens }); return fold(g, ctx); },
+        compactAtTokens: { trigger: 5000, target: 2500 },
+      },
+    });
+    const est = () => agent.convo.getHistory().reduce((s, m) => s + Math.ceil(m.content.length / 4), 0);
+    const after: number[] = [];
+    agent.on("tool_done", (e) => { if (e.name === "ManageContext") after.push(est()); });
+    for (let n = 1; n <= 6; n++) await agent.sendSync(`task ${n}`);
+    await agent.stop();
+
+    expect(sizes.length).toBe(2);
+    for (const s of sizes) {
+      expect(s.before).toBeGreaterThanOrEqual(5000);
+      expect(s.target).toBe(2500);
+    }
+    for (const a of after) expect(a).toBeLessThanOrEqual(2500);
+    // The last turn is whole.
+    const history = agent.convo.getHistory();
+    expect(history.at(-1)).toEqual({ role: "assistant", content: "done 6" });
+    expect(history.some((m) => m.role === "tool")).toBe(true);
+  });
+});

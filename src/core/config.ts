@@ -15,10 +15,20 @@ import {
   foldTurns,
   llmContextStrategy,
   type AgentLoopOptions,
+  type CompactAtTokens,
   type ContextStrategy,
 } from "@hypen-space/gloop-loop";
+import { DEFAULT_CONTEXT_WINDOW } from "./context-window.ts";
 
 export type CompactionMode = "fold" | "llm";
+
+/**
+ * When to compact automatically.  Each figure is a fraction of the model's
+ * context window (`0 < x <= 1`) or an absolute token count (an integer
+ * `> 1`); `[target, trigger]` (both the same kind, target < trigger)
+ * compacts at `trigger` down toward `target`.  `0` = never.
+ */
+export type CompactAtSetting = number | [number, number];
 export type RunMode = "interactive" | "headless";
 
 export interface GloopSettings {
@@ -28,8 +38,10 @@ export interface GloopSettings {
   retries: number;
   /** Cap on each tool result the model sees, in characters.  0 = unlimited. */
   maxToolOutput: number;
-  /** Compact the context automatically at this many prompt tokens.  0 = never. */
-  compactAt: number;
+  /** When to compact automatically — see `CompactAtSetting`.  Default 0.85 (of the context window). */
+  compactAt: CompactAtSetting;
+  /** The model's context window in tokens.  Unset = looked up (see context-window.ts). */
+  contextWindow?: number;
   /** How automatic compaction trims: fold old turns (no model call) or ask the model. */
   compaction: CompactionMode;
   /** Most recent turns `fold` keeps whole.  Unset = the engine default (3). */
@@ -51,6 +63,7 @@ export const SETTING_FLAGS = {
   maxToolOutput: "--max-tool-output",
   compactAt: "--compact-at",
   compaction: "--compaction",
+  contextWindow: "--context-window",
   taskTimeoutMs: "--task-timeout",
 } as const satisfies Partial<Record<SettingKey, string>>;
 
@@ -87,7 +100,7 @@ export function defaultSettings(mode: RunMode): GloopSettings {
     maxIterations: mode === "interactive" ? 200 : 100,
     retries: 3,
     maxToolOutput: 50_000,
-    compactAt: 120_000,
+    compactAt: 0.85,
     compaction: "fold",
     taskTimeoutMs: 30 * 60_000,
   };
@@ -109,12 +122,29 @@ type Rule = { expected: string; check: (v: unknown) => boolean };
 const nonNegInt: Rule = { expected: "a non-negative integer", check: (v) => Number.isInteger(v) && (v as number) >= 0 };
 const posInt: Rule = { expected: "a positive integer", check: (v) => Number.isInteger(v) && (v as number) >= 1 };
 
+const isFraction = (v: unknown): v is number => typeof v === "number" && v > 0 && v <= 1;
+const isTokenCount = (v: unknown): v is number => Number.isInteger(v) && (v as number) > 1;
+
+/** `compactAt`: 0, a fraction, a token count, or `[target, trigger]` of one kind with target < trigger. */
+function validCompactAt(v: unknown): boolean {
+  if (v === 0 || isFraction(v) || isTokenCount(v)) return true;
+  if (!Array.isArray(v) || v.length !== 2) return false;
+  const [target, trigger] = v as unknown[];
+  const sameKind = (isFraction(target) && isFraction(trigger)) || (isTokenCount(target) && isTokenCount(trigger));
+  return sameKind && (target as number) < (trigger as number);
+}
+
 const RULES: Record<SettingKey, Rule & { hint?: string }> = {
   maxIterations: { ...nonNegInt, hint: "0 = unlimited" },
   retries: { ...posInt, hint: "1 = no retry" },
   maxToolOutput: { ...nonNegInt, hint: "characters, 0 = unlimited" },
-  compactAt: { ...nonNegInt, hint: "tokens, 0 = never" },
+  compactAt: {
+    expected: "a fraction of the context window (0 < x <= 1), a token count (> 1), or a range [target, trigger] of one kind with target < trigger",
+    hint: "0 = never",
+    check: validCompactAt,
+  },
   compaction: { expected: '"fold" or "llm"', check: (v) => v === "fold" || v === "llm" },
+  contextWindow: { ...posInt, hint: "tokens" },
   keepTurns: posInt,
   taskTimeoutMs: { ...nonNegInt, hint: "milliseconds, 0 = no limit" },
   maxTokens: posInt,
@@ -131,8 +161,27 @@ function describeRule(key: SettingKey): string {
 /** Parse a flag's string value: integers may use `_` separators. */
 function parseFlagValue(key: FlagSettingKey, raw: string): unknown {
   if (key === "compaction") return raw;
+  if (key === "compactAt") return parseCompactAt(raw);
   const s = raw.replace(/_/g, "");
   return /^-?\d+$/.test(s) ? Number(s) : NaN;
+}
+
+/** `0.85`, `120_000`, `0.6-0.85`, `90000..150000` → the setting (NaN when malformed). */
+export function parseCompactAt(raw: string): CompactAtSetting {
+  const num = (part: string): number => {
+    const t = part.trim().replace(/_/g, "");
+    return /^(\d+(\.\d*)?|\.\d+)$/.test(t) ? Number(t) : NaN;
+  };
+  const s = raw.trim();
+  const parts = s.includes("..") ? s.split("..") : s.split("-");
+  if (parts.length === 1) return num(parts[0]!);
+  if (parts.length === 2) return [num(parts[0]!), num(parts[1]!)];
+  return NaN;
+}
+
+/** The setting as a flag value — `0.85`, `120000`, `0.6-0.85`. */
+export function formatCompactAt(value: CompactAtSetting): string {
+  return Array.isArray(value) ? `${value[0]}-${value[1]}` : String(value);
 }
 
 export interface ResolvedSettings {
@@ -236,8 +285,35 @@ export function contextStrategyFor(settings: Pick<GloopSettings, "compaction" | 
   return (graph, ctx) => (ctx.trigger === "tool" ? llm(graph, ctx) : fold(graph, ctx));
 }
 
-/** The `AgentLoop` options these settings translate to. */
-export function agentOptionsFor(settings: GloopSettings): Pick<
+/**
+ * `compactAt` in tokens for a context window: fractions are taken of the
+ * window; an absolute trigger above the window is clamped to 95% of it
+ * (`notice` says so; a target that no longer fits under it is scaled
+ * down with it).  `0` → `0` (off).
+ */
+export function resolveCompactAt(
+  compactAt: CompactAtSetting,
+  contextWindow: number,
+): { tokens: CompactAtTokens; notice?: string } {
+  if (compactAt === 0) return { tokens: 0 };
+  const toTokens = (x: number) => (x <= 1 ? Math.floor(x * contextWindow) : x);
+  let target = Array.isArray(compactAt) ? toTokens(compactAt[0]) : undefined;
+  let trigger = toTokens(Array.isArray(compactAt) ? compactAt[1] : compactAt);
+  let notice: string | undefined;
+  if (trigger > contextWindow) {
+    const was = trigger;
+    trigger = Math.floor(contextWindow * 0.95);
+    if (target !== undefined && target >= trigger) target = Math.floor((target * trigger) / was);
+    notice =
+      `compactAt ${was} is above the model's ${contextWindow}-token context window; compacting at ${trigger}` +
+      (target !== undefined ? ` (target ${target})` : "") + " instead.";
+  }
+  if (target !== undefined && !(target < trigger)) target = undefined;
+  return { tokens: target !== undefined ? { trigger, target } : trigger, ...(notice && { notice }) };
+}
+
+/** The `AgentLoop` options these settings translate to, for a model with this context window. */
+export function agentOptionsFor(settings: GloopSettings, contextWindow: number = DEFAULT_CONTEXT_WINDOW): Pick<
   AgentLoopOptions,
   "maxIterations" | "retry" | "maxToolOutputChars" | "context" | "maxTokens" | "llmIdleTimeoutMs"
 > {
@@ -247,7 +323,7 @@ export function agentOptionsFor(settings: GloopSettings): Pick<
     maxToolOutputChars: settings.maxToolOutput,
     context: {
       strategy: contextStrategyFor(settings),
-      compactAtTokens: settings.compactAt,
+      compactAtTokens: resolveCompactAt(settings.compactAt, contextWindow).tokens,
     },
     ...(settings.maxTokens !== undefined && { maxTokens: settings.maxTokens }),
     ...(settings.llmIdleTimeoutMs !== undefined && { llmIdleTimeoutMs: settings.llmIdleTimeoutMs }),
@@ -263,7 +339,10 @@ export function agentOptionsFor(settings: GloopSettings): Pick<
 export function inheritedFlags(resolved: ResolvedSettings): SettingFlags {
   const out: SettingFlags = {};
   for (const key of Object.keys(SETTING_FLAGS) as FlagSettingKey[]) {
-    if (resolved.sources[key] !== "default") out[key] = String(resolved.settings[key]);
+    if (resolved.sources[key] === "default") continue;
+    const value = resolved.settings[key];
+    if (value === undefined) continue;
+    out[key] = key === "compactAt" ? formatCompactAt(value as CompactAtSetting) : String(value);
   }
   return out;
 }

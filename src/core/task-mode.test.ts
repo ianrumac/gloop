@@ -11,6 +11,7 @@ import {
   hasShellSyntax,
   runTaskSubagent,
   taskSpawnOptions,
+  childInheritFlags,
   formatDuration,
 } from "./task-mode.ts";
 import { trackedChildCount } from "./children.ts";
@@ -343,6 +344,17 @@ describe("runTaskSubagent", () => {
     expect(opts.classifySpawn({ name: "Bash", args: { command: 'gloop --task "x" && ls' } })).toBeNull();
     expect(opts.classifySpawn({ name: "ReadFile", args: { command: 'gloop --task "x"' } })).toBeNull();
     expect(opts.classifySpawn({ name: "Bash", args: { command: 'gloop --task "x" --max-iterations 3' } })).toBe("x");
+  });
+
+  test("childInheritFlags: the resolved context window goes to a child on the same model only", () => {
+    const parent = { model: "a/m", inheritFlags: { retries: "2" }, contextWindow: 200_000 };
+    expect(childInheritFlags(parent, "a/m")).toEqual({ retries: "2", contextWindow: "200000" });
+    expect(childInheritFlags(parent, "b/other")).toEqual({ retries: "2" });
+    // An explicit window is kept for the same model, dropped for another.
+    const explicit = { ...parent, inheritFlags: { contextWindow: "64000" } };
+    expect(childInheritFlags(explicit, "a/m")).toEqual({ contextWindow: "64000" });
+    expect(childInheritFlags(explicit, "b/other")).toEqual({});
+    expect(childInheritFlags({ model: "a/m", inheritFlags: {} }, "a/m")).toEqual({});
   });
 
   test("formatDuration", () => {

@@ -29,7 +29,16 @@ import { appendFileSync } from "fs";
 import { taskSpawnOptions } from "./task-mode.ts";
 import { parseHeadlessArgs } from "./cli-args.ts";
 import { installTool } from "../../bin/install-tool.ts";
-import { agentOptionsFor, inheritedFlags, loadSettings, missingApiKeyMessage, ConfigError, type ResolvedSettings } from "./config.ts";
+import {
+  agentOptionsFor,
+  inheritedFlags,
+  loadSettings,
+  missingApiKeyMessage,
+  resolveCompactAt,
+  ConfigError,
+  type ResolvedSettings,
+} from "./config.ts";
+import { resolveContextWindow } from "./context-window.ts";
 import { createShutdown, installSignalHandlers } from "./shutdown.ts";
 
 // ============================================================================
@@ -38,7 +47,7 @@ import { createShutdown, installSignalHandlers } from "./shutdown.ts";
 
 function usage(): never {
   console.error(
-    'Usage: bun headless.ts --model <provider/model> [--provider <name>] [--output <path>] [--debug] [--task "<task>"] [--session <log>] [--agent-id <id>] [--cause <json>] [--max-iterations <n>] [--retries <n>] [--max-tool-output <n>] [--compact-at <n>] [--compaction fold|llm] [--task-timeout <ms>] "<instruction>"',
+    'Usage: bun headless.ts --model <provider/model> [--provider <name>] [--output <path>] [--debug] [--task "<task>"] [--session <log>] [--agent-id <id>] [--cause <json>] [--max-iterations <n>] [--retries <n>] [--max-tool-output <n>] [--compact-at <n|range>] [--context-window <tokens>] [--compaction fold|llm] [--task-timeout <ms>] "<instruction>"',
   );
   process.exit(1);
 }
@@ -84,6 +93,19 @@ debugLog("CONFIG", JSON.stringify(settings));
 
 await ensureGloopDir();
 
+// The model's context window: the setting (a parent passes its own as
+// --context-window), else the (cached) models list, else 128k.
+const contextWindow = await resolveContextWindow({
+  model,
+  explicit: settings.contextWindow,
+  baseUrl: process.env.OPENROUTER_BASE_URL,
+  ...(process.env.OPENROUTER_BASE_URL && { apiKey: process.env.OPENROUTER_API_KEY }),
+});
+for (const note of contextWindow.notes) debugLog("CONTEXT_WINDOW", note);
+const compactAt = resolveCompactAt(settings.compactAt, contextWindow.tokens);
+debugLog("CONFIG", `compactAtTokens ${JSON.stringify(compactAt.tokens)}`);
+if (compactAt.notice) console.error(`gloop: ${compactAt.notice}`);
+
 const skills = await discoverSkills(process.cwd());
 
 let systemPrompt = await buildSystemPrompt({ clone, maxToolOutput: settings.maxToolOutput });
@@ -119,7 +141,7 @@ const agent: AgentLoop = await AgentLoop.resume({
   // wireRebootHandler below.
   isFatal: rebootIsFatal,
   // Safety settings: iteration cap, LLM retry, output cap, compaction.
-  ...agentOptionsFor(settings),
+  ...agentOptionsFor(settings, contextWindow.tokens),
 
   // `gloop --task "..."` in a Bash call runs as a linked subagent that
   // inherits these settings.
@@ -130,6 +152,7 @@ const agent: AgentLoop = await AgentLoop.resume({
     parentLog: sessionLogPath,
     inheritFlags: inheritedFlags(resolved),
     timeoutMs: settings.taskTimeoutMs,
+    contextWindow: contextWindow.tokens,
   }),
 
   // Non-interactive: auto-approve everything.  No UI dialogs.
@@ -284,7 +307,7 @@ wireRebootHandler(agent, sessionLogPath, async (reason) => {
 debugLog("USER", instruction);
 console.log(`gloop headless | model=${model}`);
 console.log(`instruction: ${instruction}\n`);
-logEvent({ type: "start", model, instruction });
+logEvent({ type: "start", model, instruction, contextWindow: contextWindow.tokens, compactAtTokens: compactAt.tokens });
 
 // Send the instruction and wait for its turn to finish.  RebootError is
 // routed through `wireRebootHandler` above (it emits `fatal`, saves the

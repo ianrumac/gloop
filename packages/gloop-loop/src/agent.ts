@@ -54,9 +54,10 @@ import {
   type SpawnResult,
   type SpawnCall,
   type CoreEvent,
+  normalizeCompactAt,
 } from "./core/core.js";
 import { llmContextStrategy } from "./defaults/context-manager.js";
-import { describeTrim, projectContext, trimContext, type ContextStrategy } from "./context.js";
+import { describeTrim, projectContext, trimContext, type CompactAtTokens, type ContextStrategy } from "./context.js";
 import { mergeSkillsIntoSystem } from "./skills.js";
 import type { Skill } from "./skills.js";
 import { withSpan } from "./trace.js";
@@ -334,8 +335,14 @@ export interface ContextOptions {
    * results are recorded, before the next model call.  If a run leaves the
    * history unchanged, it does not fire again until the context has dropped
    * back under the threshold.  0 / undefined disables.
+   *
+   * A range `{ trigger, target }` fires at `trigger` and asks the strategy
+   * to bring the context down to `target` (`ContextStrategyContext.targetTokens`;
+   * `foldTurns` and `llmContextStrategy` honour it), so the context settles
+   * between the two.  `target` must be below `trigger` — the constructor
+   * throws otherwise.  A bare number is a trigger with no target.
    */
-  compactAtTokens?: number;
+  compactAtTokens?: CompactAtTokens;
   /** Run the strategy automatically every N tool calls.  0 / undefined disables. */
   everyToolCalls?: number;
 }
@@ -410,6 +417,8 @@ export class AgentLoop implements HookTarget {
   private requestCounter = 0;
 
   constructor(opts: AgentLoopOptions) {
+    // Fail at construction, not at the first compaction, on a bad range.
+    normalizeCompactAt(opts.context?.compactAtTokens);
     this.options = opts;
     this.debugLog = opts.log;
     this.id = opts.id ?? "agent";
@@ -1183,6 +1192,7 @@ export class AgentLoop implements HookTarget {
           instructions,
           trigger,
           ...(info?.tokens !== undefined && { tokens: info.tokens }),
+          ...(info?.targetTokens !== undefined && { targetTokens: info.targetTokens }),
           events: this.log.events(),
           eventLog: this.log,
           provider: this.convo.provider,

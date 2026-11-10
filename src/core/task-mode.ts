@@ -465,6 +465,20 @@ export interface TaskSpawnParent {
   inheritFlags: SettingFlags;
   /** Default time limit per child (`taskTimeoutMs`). */
   timeoutMs: number;
+  /**
+   * The parent model's resolved context window — passed to a child on the
+   * same model as `--context-window`, so it does not look it up again.  A
+   * child on another model resolves its own (any inherited window is dropped).
+   */
+  contextWindow?: number;
+}
+
+/** The flags a child gets: the parent's, with the context window only when the model is the same. */
+export function childInheritFlags(parent: Pick<TaskSpawnParent, "model" | "inheritFlags" | "contextWindow">, childModel: string): SettingFlags {
+  const flags: SettingFlags = { ...parent.inheritFlags };
+  if (childModel !== parent.model) delete flags.contextWindow;
+  else if (parent.contextWindow !== undefined && flags.contextWindow === undefined) flags.contextWindow = String(parent.contextWindow);
+  return flags;
 }
 
 /**
@@ -489,10 +503,11 @@ export function taskSpawnOptions(parent: TaskSpawnParent): {
     spawn: (task, call) => {
       const req = requests.get(task);
       requests.delete(task);
+      const model = req?.model ?? parent.model;
       return runTaskSubagent(
         {
           task,
-          model: req?.model ?? parent.model,
+          model,
           provider: req?.provider ?? parent.provider,
           debug: req?.debug,
           settings: req?.settings,
@@ -501,7 +516,7 @@ export function taskSpawnOptions(parent: TaskSpawnParent): {
           cwd: parent.cwd,
           cause: call.cause,
           parentLog: parent.parentLog,
-          inheritFlags: parent.inheritFlags,
+          inheritFlags: childInheritFlags(parent, model),
           timeoutMs: parent.timeoutMs,
           signal: call.signal,
         },

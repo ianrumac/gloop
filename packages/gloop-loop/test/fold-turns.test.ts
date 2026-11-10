@@ -258,6 +258,101 @@ describe("foldTurns", () => {
   });
 });
 
+describe("foldTurns — targetTokens (compactAtTokens range)", () => {
+  const big = (n: number) => Array.from({ length: 200 }, (_, i) => `line ${i} of step ${n} with some filler text`).join("\n");
+  const bigTurns = () => build([1, 2, 3, 4, 5, 6].map((n) => [`t${n}`, toolTurn(n, big(n))]));
+  const est = (g: ContextGraph) =>
+    g.nodes.reduce(
+      (sum, n) => sum + estimateTokens(n.message.content) + (n.message.toolCalls?.length ? estimateTokens(JSON.stringify(n.message.toolCalls)) : 0),
+      0,
+    );
+  const opts = { evidenceChars: 200 };
+  const withKeep = (g: ContextGraph, keep: number) => foldTurns({ ...opts, budget: 0, keep })(g, ctx) as ContextGraph;
+  const targeted = (g: ContextGraph, targetTokens: number, extra: Record<string, unknown> = {}, tokens?: number) =>
+    foldTurns({ ...opts, ...extra })(g, { ...ctx, targetTokens, ...(tokens !== undefined && { tokens }) }) as ContextGraph;
+
+  test("the budget gate does not stop a targeted run", () => {
+    const g = bigTurns();
+    const out = targeted(g, est(g), { budget: 1e9 });
+    expect(out.nodes.map((n) => n.message)).toEqual(withKeep(g, 3).nodes.map((n) => n.message));
+  });
+
+  test("folds with `keep` when that reaches the target", () => {
+    const g = bigTurns();
+    const k3 = withKeep(g, 3);
+    const out = targeted(g, est(k3));
+    expect(out.nodes.map((n) => n.message)).toEqual(k3.nodes.map((n) => n.message));
+  });
+
+  test("reduces keep until the estimate is at or under the target", () => {
+    const g = bigTurns();
+    const k3 = withKeep(g, 3);
+    const k2 = withKeep(g, 2);
+    expect(est(k2)).toBeLessThan(est(k3));
+    const out = targeted(g, est(k3) - 1);
+    expect(out.nodes.map((n) => n.message)).toEqual(k2.nodes.map((n) => n.message));
+    expect(est(out)).toBeLessThanOrEqual(est(k3) - 1);
+    expect(messagesOf(out, "t5")).toEqual(messagesOf(g, "t5"));
+  });
+
+  test("an unreachable target folds everything but the last turn — never the last turn or the first node", () => {
+    const g = bigTurns();
+    const out = targeted(g, 1);
+    expect(out.nodes.map((n) => n.message)).toEqual(withKeep(g, 1).nodes.map((n) => n.message));
+    expect(messagesOf(out, "t6")).toEqual(messagesOf(g, "t6"));
+    expect(out.nodes[0]).toBe(g.nodes[0]);
+    for (const t of ["t1", "t2", "t3", "t4", "t5"]) expect(messagesOf(out, t)).toHaveLength(2);
+  });
+
+  test("calibrates the estimate against ctx.tokens", () => {
+    const g = bigTurns();
+    const k3 = withKeep(g, 3);
+    // Uncalibrated, keep 3 fits; with the real figure twice the estimate it does not.
+    expect(targeted(g, est(k3)).nodes.length).toBe(k3.nodes.length);
+    const out = targeted(g, est(k3), {}, est(g) * 2);
+    expect(out.nodes.length).toBeLessThan(k3.nodes.length);
+    expect(est(out) * 2).toBeLessThanOrEqual(est(k3));
+  });
+
+  test("deterministic and idempotent", async () => {
+    const g = bigTurns();
+    const target = est(withKeep(g, 3)) - 1;
+    const a = targeted(g, target);
+    const b = targeted(g, target);
+    expect(a.nodes.map((n) => n.message)).toEqual(b.nodes.map((n) => n.message));
+    const again = await trimContext(foldTurns(opts), a, { ...ctx, targetTokens: target });
+    expect(again.changed).toBe(false);
+    const unreachable = targeted(g, 1);
+    expect((await trimContext(foldTurns(opts), unreachable, { ...ctx, targetTokens: 1 })).changed).toBe(false);
+  });
+
+  test("folds from an earlier run that the log attributes to a later turn still count as folded, and that turn can fold", () => {
+    // What projectContext gives after a history_replaced in turn t3: the
+    // folds of t1 and t2 carry t3's turn id.
+    const first = withKeep(build([1, 2, 3].map((n) => [`t${n}`, toolTurn(n, big(n))])), 1);
+    const relabeled = first.nodes.map((n) => (n.message.content.startsWith(FOLD_MARKER) ? { ...n, turn: "t3" } : n));
+    const g = contextGraph("agent", [
+      ...relabeled,
+      ...build([4, 5].map((n) => [`t${n}`, toolTurn(n, big(n))])).nodes.map((n) => ({ ...n, id: `x${n.id}` })),
+    ]);
+    const out = targeted(g, 1);
+    // Every turn but the last is [user, fold]; the last is whole.
+    const msgs = out.nodes.map((n) => n.message);
+    expect(msgs.slice(0, 8).map((m) => m.role)).toEqual(Array(4).fill(["user", "assistant"]).flat());
+    for (const [i, n] of [1, 2, 3, 4].entries()) {
+      expect(msgs[i * 2]!.content).toBe(`task ${n}`);
+      expect(msgs[i * 2 + 1]!.content.startsWith(FOLD_MARKER)).toBe(true);
+      expect(msgs[i * 2 + 1]!.content.endsWith(`done with task ${n}`)).toBe(true);
+    }
+    expect(msgs.slice(8)).toEqual(toolTurn(5, big(5)));
+  });
+
+  test("without a target the budget gate still applies", () => {
+    const g = bigTurns();
+    expect(foldTurns({ ...opts, budget: 1e9 })(g, { ...ctx, tokens: 1e9 })).toBe(g);
+  });
+});
+
 describe("scoreEvidenceLine", () => {
   test("ranks errors and identifiers over summaries over plain lines; drops noise", () => {
     const s = scoreEvidenceLine;

@@ -138,6 +138,25 @@ describe("contextStrategy", () => {
     expect(triggers).toEqual(["auto"]);
   });
 
+  test("the model's own ManageContext call gets no targetTokens, even with a range configured", async () => {
+    const seen: Array<{ trigger: string; target?: number }> = [];
+    const agent = new AgentLoop({
+      model: "m",
+      tools: [echoTool, completeTool, manageContextTool],
+      provider: new ScriptedProvider([
+        { toolCalls: [tc("c1", "ManageContext", { instructions: "trim" })] },
+        { text: "done" },
+      ]),
+      context: {
+        strategy: (g, ctx) => { seen.push({ trigger: ctx.trigger, target: ctx.targetTokens }); return g; },
+        compactAtTokens: { trigger: 1_000_000, target: 10 },
+      },
+    });
+    await agent.sendSync("go");
+    await agent.stop();
+    expect(seen).toEqual([{ trigger: "tool", target: undefined }]);
+  });
+
   test("keepLastTurns drops whole older turns without asking a model", async () => {
     const agent = await twoTurnAgent(keepLastTurns(1));
     const contents = agent.convo.getHistory().map((m) => m.content);

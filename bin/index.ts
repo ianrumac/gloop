@@ -39,8 +39,10 @@ import {
   inheritedFlags,
   loadSettings,
   missingApiKeyMessage,
+  resolveCompactAt,
   type ResolvedSettings,
 } from "../src/core/config.ts";
+import { resolveContextWindow } from "../src/core/context-window.ts";
 import { createShutdown, installSignalHandlers } from "../src/core/shutdown.ts";
 import { killTrackedChildren } from "../src/core/children.ts";
 
@@ -87,6 +89,18 @@ for (const note of resolved.notes) debugLog("CONFIG", note);
 debugLog("CONFIG", JSON.stringify(settings));
 
 await ensureGloopDir();
+
+// The model's context window: the setting, else the (cached) models list,
+// else 128k.  `compactAt` fractions are taken of it.
+const contextWindow = await resolveContextWindow({
+  model,
+  explicit: settings.contextWindow,
+  baseUrl: process.env.OPENROUTER_BASE_URL,
+  ...(process.env.OPENROUTER_BASE_URL && { apiKey: process.env.OPENROUTER_API_KEY }),
+});
+for (const note of contextWindow.notes) debugLog("CONTEXT_WINDOW", note);
+const compactAt = resolveCompactAt(settings.compactAt, contextWindow.tokens);
+debugLog("CONFIG", `compactAtTokens ${JSON.stringify(compactAt.tokens)}`);
 
 const skills = await discoverSkills(process.cwd());
 
@@ -137,7 +151,7 @@ const agent: AgentLoop = await AgentLoop.resume({
   // event — see wireRebootHandler below.
   isFatal: rebootIsFatal,
   // Safety settings: iteration cap, LLM retry, output cap, compaction.
-  ...agentOptionsFor(settings),
+  ...agentOptionsFor(settings, contextWindow.tokens),
 
   // `gloop --task "..."` in a Bash call runs as a linked subagent that
   // inherits these settings and is killed when the turn is interrupted.
@@ -148,6 +162,7 @@ const agent: AgentLoop = await AgentLoop.resume({
     parentLog: sessionLogPath,
     inheritFlags: inheritedFlags(resolved),
     timeoutMs: settings.taskTimeoutMs,
+    contextWindow: contextWindow.tokens,
   }),
 
   // confirm / ask are NOT set — the actor will emit confirm_request /
@@ -206,6 +221,8 @@ const instance = render(
     rebootReason: rebootSession?.reason,
     resumed,
     agent,
+    contextWindow: contextWindow.tokens,
+    ...(compactAt.notice && { notices: [compactAt.notice] }),
   }),
 );
 

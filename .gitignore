@@ -39,4 +39,6 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # gloop session event logs + reboot pointer (generated per run)
 .gloop/sessions/
 .gloop/reboot_session.json
+# context-window lookups (src/core/context-window.ts)
+.gloop/models-cache.json
 pack-out/

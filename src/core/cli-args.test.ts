@@ -37,6 +37,14 @@ describe("parseGloopArgs", () => {
     expect(a.model).toBe("some/model");
   });
 
+  test("--compact-at ranges and --context-window", () => {
+    const a = parseGloopArgs(["--compact-at", "0.6-0.85", "--context-window=200000", "some/model"]);
+    expect(a.settings).toEqual({ compactAt: "0.6-0.85", contextWindow: "200000" });
+    expect(a.model).toBe("some/model");
+    expect(parseHeadlessArgs(["--compact-at=90000..150000", "--context-window", "64000", "go"]).settings)
+      .toEqual({ compactAt: "90000..150000", contextWindow: "64000" });
+  });
+
   test("a setting flag without a value is kept as empty so validation can reject it", () => {
     expect(parseGloopArgs(["--max-tool-output", "--debug"]).settings).toEqual({ maxToolOutput: "" });
   });

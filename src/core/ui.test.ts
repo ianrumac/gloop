@@ -218,5 +218,10 @@ describe("usage status line", () => {
       .toBe("ctx 42.1k · in 310k · out 12k");
     // Resumed session: totals known, no request yet this run.
     expect(formatUsageLine({ totals: { promptTokens: 5_000, completionTokens: 300 } })).toBe("in 5k · out 300");
+    // Relative to the context window when it is known.
+    expect(formatUsageLine({ contextTokens: 42_100, contextWindow: 200_000, totals: { promptTokens: 310_000, completionTokens: 12_000 } }))
+      .toBe("ctx 42.1k/200k (21%) · in 310k · out 12k");
+    expect(formatUsageLine({ contextTokens: 900, contextWindow: 1_000_000, totals: { promptTokens: 900, completionTokens: 5 } }))
+      .toBe("ctx 900/1M (0%) · in 900 · out 5");
   });
 });

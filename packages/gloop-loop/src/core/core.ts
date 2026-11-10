@@ -26,7 +26,7 @@ import type { Span, Tracer } from "../trace.js";
 import { NoopTracer, withSpan } from "../trace.js";
 import type { AgentEvent, EventEnvelope, EventRef } from "../events.js";
 import { toErrorInfo } from "../events.js";
-import type { ContextTrigger } from "../context.js";
+import type { CompactAtTokens, ContextTrigger } from "../context.js";
 import type { RetryConfig } from "../retry.js";
 import { withRetry, defaultRetryIf } from "../retry.js";
 import { AbortError, raceAbort } from "./abort.js";
@@ -289,9 +289,15 @@ export interface Effects {
    * `trigger` says who asked: the model's ManageContext call (`"tool"`) or
    * an automatic trigger (`"auto"` — `contextPruneInterval` /
    * `compactAtTokens`).  `info.tokens` is the current context size estimate
-   * (last reported prompt tokens, else a chars/4 estimate).
+   * (last reported prompt tokens, else a chars/4 estimate);
+   * `info.targetTokens` is where a token-triggered run should bring it
+   * (`compactAtTokens: { trigger, target }`).
    */
-  manageContext: (instructions: string, trigger?: ContextTrigger, info?: { tokens?: number }) => Promise<string>;
+  manageContext: (
+    instructions: string,
+    trigger?: ContextTrigger,
+    info?: { tokens?: number; targetTokens?: number },
+  ) => Promise<string>;
   complete: (summary: string) => void;
   installTool: (source: string) => Promise<string>;
   listTools: () => string;
@@ -321,8 +327,12 @@ export interface LoopConfig {
    * reports usage, else a chars/4 estimate of the history.  Checked at the
    * same point as `contextPruneInterval` (after tool results are recorded,
    * before the next model call).  0 / undefined disables.
+   *
+   * `{ trigger, target }` fires at `trigger` and passes `target` to the
+   * strategy as `ContextStrategyContext.targetTokens` — the size it should
+   * bring the context down to.  A bare number is a trigger with no target.
    */
-  compactAtTokens?: number;
+  compactAtTokens?: CompactAtTokens;
 
   /**
    * Cap on each tool result as the model sees it, in characters.  Longer
@@ -931,6 +941,31 @@ function mustPropagate(err: unknown, config?: LoopConfig): boolean {
   return err instanceof AbortError || (err instanceof Error && (config?.isFatal?.(err) ?? false));
 }
 
+/**
+ * `compactAtTokens` as `{ trigger, target? }` — a bare number is a trigger
+ * with no target.  Throws when the target is not below the trigger (or
+ * either end is negative / not a number).
+ */
+export function normalizeCompactAt(value: CompactAtTokens | undefined): { trigger: number; target?: number } {
+  if (value === undefined) return { trigger: 0 };
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || value < 0) throw new Error(`compactAtTokens must be a non-negative number, got ${value}`);
+    return { trigger: value };
+  }
+  const { trigger, target } = value;
+  if (typeof trigger !== "number" || !Number.isFinite(trigger) || trigger < 0) {
+    throw new Error(`compactAtTokens.trigger must be a non-negative number, got ${String(trigger)}`);
+  }
+  if (target === undefined) return { trigger };
+  if (typeof target !== "number" || !Number.isFinite(target) || target < 0) {
+    throw new Error(`compactAtTokens.target must be a non-negative number, got ${String(target)}`);
+  }
+  if (trigger > 0 && target >= trigger) {
+    throw new Error(`compactAtTokens.target (${target}) must be below compactAtTokens.trigger (${trigger})`);
+  }
+  return { trigger, target };
+}
+
 /** Rough token count of the conversation (chars / 4) — used when the provider reports no usage. */
 function estimateTokens(world: World): number {
   let chars = world.convo.getSystem()?.length ?? 0;
@@ -961,9 +996,13 @@ async function runManageContext(
   instructions: string,
   trigger: ContextTrigger,
   tokens: number,
+  targetTokens?: number,
 ): Promise<{ output: string; changed: boolean }> {
   const before = world.convo.getHistory();
-  const output = await fx.manageContext(instructions, trigger, { tokens });
+  const output = await fx.manageContext(instructions, trigger, {
+    tokens,
+    ...(targetTokens !== undefined && { targetTokens }),
+  });
   const changed = historyChanged(before, world.convo.getHistory());
   if (changed) world.lastUsage = undefined;
   return { output, changed };
@@ -977,7 +1016,7 @@ async function runManageContext(
  */
 async function autoCompact(world: World, fx: Effects, config: LoopConfig | undefined, callCount: number): Promise<void> {
   const interval = config?.contextPruneInterval ?? 0;
-  const threshold = config?.compactAtTokens ?? 0;
+  const { trigger: threshold, target } = normalizeCompactAt(config?.compactAtTokens);
   world.toolCalls += callCount;
 
   let reason: string | null = null;
@@ -986,17 +1025,29 @@ async function autoCompact(world: World, fx: Effects, config: LoopConfig | undef
     reason = `auto-pruning after ${interval} tool calls`;
   }
   let tokens: number | undefined;
+  let byTokens = false;
   if (threshold > 0) {
     tokens = contextTokens(world);
     if (tokens < threshold) world.compactArmed = true;
-    else if (world.compactArmed !== false) reason ??= `auto-compacting at ~${tokens} tokens (threshold ${threshold})`;
+    else if (world.compactArmed !== false) {
+      byTokens = true;
+      const range = target !== undefined ? `threshold ${threshold}, target ${target}` : `threshold ${threshold}`;
+      reason ??= `auto-compacting at ~${tokens} tokens (${range})`;
+    }
   }
   if (reason === null) return;
 
   fx.toolStart("ManageContext", reason);
   let changed = false;
   try {
-    const r = await runManageContext(world, fx, AUTO_PRUNE_INSTRUCTIONS, "auto", tokens ?? contextTokens(world));
+    const r = await runManageContext(
+      world,
+      fx,
+      AUTO_PRUNE_INSTRUCTIONS,
+      "auto",
+      tokens ?? contextTokens(world),
+      byTokens ? target : undefined,
+    );
     changed = r.changed;
     fx.toolDone("ManageContext", true, r.output);
   } catch (err) {

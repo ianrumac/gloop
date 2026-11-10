@@ -7,7 +7,8 @@ import type {
   JsonToolCall,
 } from "../src/ai/types.js";
 import { AIConversation } from "../src/ai/builder.js";
-import { manageContextFork } from "../src/defaults/context-manager.js";
+import { manageContextFork, llmContextStrategy } from "../src/defaults/context-manager.js";
+import { contextFromHistory } from "../src/context.js";
 import { AgentLoop, type AgentEvent } from "../src/agent.js";
 
 // ---------------------------------------------------------------------------
@@ -450,5 +451,37 @@ describe("manageContextFork — event-sourcing options", () => {
     let called = false;
     await manageContextFork(convo, "prune", undefined, { onReplaced: () => { called = true; } });
     expect(called).toBe(false);
+  });
+});
+
+describe("llmContextStrategy — target size", () => {
+  const userText = (p: ContextMockProvider) =>
+    (p.calls[0]!.messages ?? []).filter((m) => m.role === "user").map((m) => m.content).join("\n");
+  const base = (provider: ContextMockProvider) => ({
+    agent: "a",
+    instructions: "prune",
+    trigger: "auto" as const,
+    events: [],
+    provider,
+    model: "m",
+  });
+  const graph = contextFromHistory([
+    { role: "user", content: "hello" },
+    { role: "assistant", content: "hi" },
+  ]);
+
+  test("tells the fork the current size and the target", async () => {
+    const provider = new ContextMockProvider([{ toolCalls: [tc("c1", "CompleteTask", { summary: "ok" })] }]);
+    await llmContextStrategy()(graph, { ...base(provider), tokens: 150_000, targetTokens: 90_000 });
+    const text = userText(provider);
+    expect(text).toContain("currently about 150000 tokens");
+    expect(text).toContain("about 90000 tokens or less");
+    expect(text).toContain("remove roughly 60000 tokens");
+  });
+
+  test("says nothing about size without a target", async () => {
+    const provider = new ContextMockProvider([{ toolCalls: [tc("c1", "CompleteTask", { summary: "ok" })] }]);
+    await llmContextStrategy()(graph, { ...base(provider), tokens: 150_000 });
+    expect(userText(provider)).not.toContain("tokens");
   });
 });

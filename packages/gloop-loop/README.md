@@ -337,7 +337,7 @@ const elideOldToolOutput: ContextStrategy = (graph) => {
 };
 ```
 
-`ctx` carries `instructions`, `trigger` (`"tool"` | `"auto"`), `tokens` (the current context size — see below), the whole log as `events` (feed it to `projectGraph` — `node.turn` joins to `TurnNode.turn` — or `projectState`), `eventLog`, the agent's `provider` / `model`, and the turn's abort `signal`. A tool-call group the result only partly keeps is dropped as a unit, so a strategy can never leave an unanswered tool call behind. The default is `llmContextStrategy()`: a forked agent (`${id}/context` on the same log) marks stale messages and writes a summary. `projectContext(events, agent)` gives you the same graph outside a prune.
+`ctx` carries `instructions`, `trigger` (`"tool"` | `"auto"`), `tokens` (the current context size — see below), `targetTokens` (where a token-triggered run with a range should bring it — see below), the whole log as `events` (feed it to `projectGraph` — `node.turn` joins to `TurnNode.turn` — or `projectState`), `eventLog`, the agent's `provider` / `model`, and the turn's abort `signal`. A tool-call group the result only partly keeps is dropped as a unit, so a strategy can never leave an unanswered tool call behind. The default is `llmContextStrategy()`: a forked agent (`${id}/context` on the same log) marks stale messages and writes a summary. `projectContext(events, agent)` gives you the same graph outside a prune.
 
 **When it runs automatically** — the `context` option groups the strategy with its triggers:
 
@@ -350,9 +350,19 @@ new AgentLoop({
     everyToolCalls: 0,                // …and/or every N tool calls (0 = off)
   },
 });
+
+// A range: compact at 150k, down toward 90k — the context settles in between.
+new AgentLoop({
+  provider, model,
+  context: { strategy: foldTurns(), compactAtTokens: { trigger: 150_000, target: 90_000 } },
+});
 ```
 
-`compactAtTokens` compares against the last request's `promptTokens` when the provider reports usage, and a chars/4 estimate of the history when it does not. Both triggers are checked after a batch of tool results is recorded, before the next model call. If a run leaves the history unchanged (the strategy could not shrink it), the token trigger waits until the context has dropped back under the threshold instead of re-running every iteration. A strategy that throws is reported as a failed `ManageContext` `tool_done` (or a failed tool result, when the model called it) and the turn goes on. `contextStrategy` and `contextPruneInterval` still work as deprecated aliases for `context.strategy` / `context.everyToolCalls`.
+`compactAtTokens` compares against the last request's `promptTokens` when the provider reports usage, and a chars/4 estimate of the history when it does not. Both triggers are checked after a batch of tool results is recorded, before the next model call. If a run leaves the history unchanged (the strategy could not shrink it), the token trigger waits until the context has dropped back under the threshold instead of re-running every iteration.
+
+`compactAtTokens` also takes a range, `{ trigger, target }` (type `CompactAtTokens`; `target` must be below `trigger` or the constructor throws). It fires at `trigger` and passes `targetTokens: target` to the strategy alongside `tokens` — only on runs the token trigger started, not on `everyToolCalls` runs or the model's own `ManageContext` calls. After a run that changed the history it fires again only once the context next reaches `trigger`. `foldTurns` honours the target: it skips its `budget` gate, folds with `keep`, and while its estimate of the result (its estimator over the remaining messages, scaled by `tokens` / its estimate of the input, so the system prompt and tokenizer differences count) is still above the target, it folds with `keep - 1`, `keep - 2`, … down to 1 — never the in-progress last turn or the first node. `llmContextStrategy` tells the fork agent the current size and the target. A bare number is a trigger with no target, as before.
+
+A strategy that throws is reported as a failed `ManageContext` `tool_done` (or a failed tool result, when the model called it) and the turn goes on. `contextStrategy` and `contextPruneInterval` still work as deprecated aliases for `context.strategy` / `context.everyToolCalls`.
 
 ### Token usage
 
@@ -695,7 +705,7 @@ Discriminated union on `.type`. Every delivered event also carries the envelope 
 | `eventLog` | fresh `EventLog` | Share a log with other agents |
 | `hooks` | — | `AgentHook[]` attached at construction |
 | `retry` | off | `{ llm?, tool? }` retry policies |
-| `context` | — | `{ strategy?, compactAtTokens?, everyToolCalls? }` — see *Context trimming* |
+| `context` | — | `{ strategy?, compactAtTokens?, everyToolCalls? }` — `compactAtTokens` is a number or `{ trigger, target? }`; see *Context trimming* |
 | `contextPruneInterval` | 0 (off) | *Deprecated* — `context.everyToolCalls` |
 | `contextStrategy` | `llmContextStrategy()` | *Deprecated* — `context.strategy` |
 | `classifySpawn` | — | Classify tool calls as spawn tasks |
@@ -710,7 +720,7 @@ Discriminated union on `.type`. Every delivered event also carries the envelope 
 - **Event sourcing**: `EventLog`, `MemoryEventStore`, `createJsonlEventStore`, `parseJsonlEvents`, `EventStore`, `LogEvent`, `EventEnvelope`, `isEphemeralEvent`, `serializeEvent`, `toErrorInfo`
 - **State**: `projectState`, `reduce`, `initialState`, `messagesToRequeue`, `AgentState`, `TurnRecord`
 - **Hooks**: `AgentHook`, `bridgeAgents`, `HookTarget`, `SendOptions`
-- **Context**: `ContextOptions`, `projectContext`, `contextFromHistory`, `contextGraph`, `contextNode`, `closeToolGroups`, `trimContext`, `describeTrim`, `keepLastTurns`, `foldTurns`, `FoldTurnsOptions`, `scoreEvidenceLine`, `llmContextStrategy`, `ContextStrategy`, `ContextStrategyContext`, `ContextGraph`, `ContextNode`, `ContextEdge`, `ContextTrim`, `ContextTrigger`
+- **Context**: `ContextOptions`, `CompactAtTokens`, `normalizeCompactAt`, `projectContext`, `contextFromHistory`, `contextGraph`, `contextNode`, `closeToolGroups`, `trimContext`, `describeTrim`, `keepLastTurns`, `foldTurns`, `FoldTurnsOptions`, `scoreEvidenceLine`, `llmContextStrategy`, `ContextStrategy`, `ContextStrategyContext`, `ContextGraph`, `ContextNode`, `ContextEdge`, `ContextTrim`, `ContextTrigger`
 - **Graph**: `projectGraph`, `graphToMermaid`, `linkedLogs`, `mergeEvents`, `AgentGraph`, `TurnNode`, `MessageEdge`, `LinkedLog`
 - **Testing** (`@hypen-space/gloop-loop/testing`): `ScriptedProvider` (scripted responses may set `usage` / `finishReason`), `tc`, `tcNoId`, `echoTool`, `completeTool`, `bashTool`, `spawnPrefixClassifier`
 - **Retry**: `withRetry`, `RetryPolicy`, `RetryConfig`, `backoffDelay`, `defaultRetryIf`

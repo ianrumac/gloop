@@ -62,8 +62,15 @@ SAFETY OPTIONS (also settable in .gloop/config.json; flags win)
   --max-tool-output <n>
                        Characters of each tool result the model sees
                        (head + tail kept).  Default 50000.  0 = unlimited.
-  --compact-at <n>     Compact the context automatically at this many
-                       prompt tokens.  Default 120000.  0 = never.
+  --compact-at <x>     When to compact the context automatically: a
+                       fraction of the model's context window (0.85), a
+                       token count (150000), or a range target-trigger
+                       (0.6-0.85, 90000-150000; also ..) — compact at the
+                       top, down toward the bottom.  Default 0.85.
+                       0 = never.
+  --context-window <n> The model's context window in tokens.  Default:
+                       looked up from the OpenRouter models list (cached
+                       a day in .gloop/models-cache.json), else 128000.
   --compaction <mode>  How automatic compaction trims: fold (default; old
                        turns folded into short notes, no model call) or
                        llm (a model summarises).
@@ -79,9 +86,9 @@ SUBCOMMANDS
 
 CONFIG FILE
   .gloop/config.json   Optional, per project.  Keys: maxIterations, retries,
-                       maxToolOutput, compactAt, compaction, keepTurns,
-                       taskTimeoutMs, maxTokens, llmIdleTimeoutMs.  e.g.
-                       { "compactAt": 80000, "maxTokens": 16000 }
+                       maxToolOutput, compactAt, contextWindow, compaction,
+                       keepTurns, taskTimeoutMs, maxTokens, llmIdleTimeoutMs.
+                       e.g. { "compactAt": [0.6, 0.85], "maxTokens": 16000 }
 
 ENVIRONMENT
   OPENROUTER_API_KEY   Required (unless OPENROUTER_BASE_URL is set).

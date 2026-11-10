@@ -433,6 +433,59 @@ describe("AgentLoop — context.compactAtTokens", () => {
     await agent.stop();
   });
 
+  test("a range { trigger, target } fires at trigger and passes targetTokens", async () => {
+    const calls: Array<{ tokens?: number; targetTokens?: number }> = [];
+    const strategy: ContextStrategy = (graph, ctx) => {
+      calls.push({ tokens: ctx.tokens, targetTokens: ctx.targetTokens });
+      return contextGraph(graph.agent, graph.nodes.slice(-2));
+    };
+    const provider = new ScriptedProvider([
+      { toolCalls: [tc("c1", "Echo", { text: "a" })], usage: usage(800) },   // between target and trigger: no fire
+      { toolCalls: [tc("c2", "Echo", { text: "b" })], usage: usage(1500) },  // ≥ trigger: fire
+      { toolCalls: [tc("c3", "Echo", { text: "c" })], usage: usage(900) },   // above target, under trigger: no refire
+      { toolCalls: [tc("c4", "Echo", { text: "d" })], usage: usage(1100) },  // trigger reached again: fire
+      { text: "done" },
+    ]);
+    const agent = new AgentLoop({
+      provider, model: "m", tools: [echoTool],
+      context: { strategy, compactAtTokens: { trigger: 1000, target: 600 } },
+    });
+    await agent.sendSync("go");
+    expect(calls).toEqual([{ tokens: 1500, targetTokens: 600 }, { tokens: 1100, targetTokens: 600 }]);
+    await agent.stop();
+  });
+
+  test("a range does not re-fire every iteration when a run leaves history unchanged", async () => {
+    const { calls, strategy } = recordingStrategy(false);
+    const provider = new ScriptedProvider([
+      { toolCalls: [tc("c1", "Echo", { text: "a" })], usage: usage(2000) },
+      { toolCalls: [tc("c2", "Echo", { text: "b" })], usage: usage(2100) },
+      { toolCalls: [tc("c3", "Echo", { text: "c" })], usage: usage(2200) },
+      { text: "done" },
+    ]);
+    const agent = new AgentLoop({
+      provider, model: "m", tools: [echoTool],
+      context: { strategy, compactAtTokens: { trigger: 1000, target: 500 } },
+    });
+    await agent.sendSync("go");
+    expect(calls.map((c) => c.tokens)).toEqual([2000]);
+    await agent.stop();
+  });
+
+  test("a bare number passes no targetTokens; a bad range throws at construction", async () => {
+    let seen: number | undefined = -1;
+    const strategy: ContextStrategy = (graph, ctx) => { seen = ctx.targetTokens; return graph; };
+    const provider = new ScriptedProvider([{ toolCalls: [tc("c1", "Echo", { text: "a" })], usage: usage(1500) }, { text: "done" }]);
+    const agent = new AgentLoop({ provider, model: "m", tools: [echoTool], context: { strategy, compactAtTokens: 1000 } });
+    await agent.sendSync("go");
+    expect(seen).toBeUndefined();
+    await agent.stop();
+
+    const p = new ScriptedProvider([]);
+    expect(() => new AgentLoop({ provider: p, model: "m", context: { compactAtTokens: { trigger: 1000, target: 1000 } } }))
+      .toThrow("compactAtTokens.target (1000) must be below compactAtTokens.trigger (1000)");
+  });
+
   test("context.everyToolCalls replaces contextPruneInterval (which still works)", async () => {
     for (const opts of [{ context: { everyToolCalls: 1 } }, { contextPruneInterval: 1 }]) {
       const { calls, strategy } = recordingStrategy(false);

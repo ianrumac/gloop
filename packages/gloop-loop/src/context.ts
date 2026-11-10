@@ -68,6 +68,14 @@ export interface ContextGraph {
 /** What asked for the trim: the model's `ManageContext` call, or an automatic trigger (`context.everyToolCalls` / `context.compactAtTokens`). */
 export type ContextTrigger = "tool" | "auto";
 
+/**
+ * When automatic compaction fires (`context.compactAtTokens`): a token count
+ * (trigger only), or a range — fire at `trigger`, ask the strategy to bring
+ * the context down to `target` (`ContextStrategyContext.targetTokens`).
+ * `target` must be below `trigger`.
+ */
+export type CompactAtTokens = number | { trigger: number; target?: number };
+
 export interface ContextStrategyContext {
   /** Id of the agent whose context is being trimmed. */
   agent: string;
@@ -91,6 +99,13 @@ export interface ContextStrategyContext {
    * decide how much to drop (e.g. for `compactAtTokens`).
    */
   tokens?: number;
+  /**
+   * Where an automatic, token-triggered run should bring the context
+   * (tokens) — set when `context.compactAtTokens` is a range
+   * `{ trigger, target }` and the token trigger fired.  A strategy that
+   * honours it trims until its estimate is at or under it.
+   */
+  targetTokens?: number;
   /** Aborts when the turn is interrupted. */
   signal?: AbortSignal;
   /** Debug logger — `(label, content)` pairs. */
