@@ -2,6 +2,32 @@
 
 All notable changes to `gloop` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- **Safety settings**, from flags, an optional per-project `.gloop/config.json`, or defaults (flag > file > default; unknown keys ignored with a debug-log note; invalid values stop startup with a message naming the flag or key). One module, `src/core/config.ts`, used by the interactive CLI, headless mode and `--task`:
+  - `--max-iterations <n>` / `maxIterations` — model calls per turn; default 200 interactive, 100 headless / `--task`; `0` = unlimited. (The "safety cap" headless.ts already promised now exists.)
+  - `--retries <n>` / `retries` — attempts per model call with exponential backoff; default 3; `1` = no retry.
+  - `--max-tool-output <n>` / `maxToolOutput` — characters of each tool result the model sees; default 50,000; `0` = unlimited. The system prompt tells the model about the cap.
+  - `--compact-at <n>` / `compactAt` — automatic compaction at this many prompt tokens; default 120,000; `0` = off. `--compaction fold|llm` / `compaction` — `fold` (default: gloop-loop's model-free `foldTurns`) or `llm`; `keepTurns` (file only). The model's own `ManageContext` call keeps using the LLM fork.
+  - `--task-timeout <ms>` / `taskTimeoutMs` — kill a `--task` subagent after this long (default 30 min, `0` = none); the parent gets a failed result saying it timed out.
+  - `maxTokens`, `llmIdleTimeoutMs` — file only, unset by default.
+  - Subagents inherit the parent's explicitly set settings as flags (the `gloop --task …` call's own flags win), plus its provider routing and model.
+- **Token usage.** The TUI shows a dim `ctx 42.1k · in 310k · out 12k` line (last request's context, session totals; restored on `--resume`). Headless `complete` / `usage` JSONL events and the final console line carry real totals instead of zeros. `runTaskSubagent` returns the child's `usage`.
+- TUI notices for LLM retries and automatic compaction; `--resume` starts with `resumed session <file>, N turns`.
+- Root `test`, `test:cli` and `typecheck` scripts. CI also typechecks and tests the CLI and runs gloop-effect's typecheck and tests; Bun is pinned to 1.4.4 in all workflows.
+
+### Fixed
+- **Long-running Bash is no longer reported as a failure.** A command still running after 60 s was shown to the model as `(exit code 1)`; it now sees that it is still running in the background, its PID, where its output keeps going, how to stop it, and the last lines of output.
+- **Interrupt kills running work.** `Esc` / `interrupt()` kills the running Bash command's whole process group (partial output is returned) and a running `--task` subagent (SIGTERM, then SIGKILL after 3 s).
+- **Clean exit.** `Ctrl+C`, SIGINT, SIGTERM and SIGHUP unmount the TUI, restore the terminal, stop the agent (interrupting the turn and flushing the session log), kill child processes tied to in-flight tool calls (commands deliberately left in the background are kept) and exit (0 for Ctrl+C in the TUI, 128 + signal otherwise); a second Ctrl+C exits at once. The launcher forwards signals to the agent, waits for it, and never mistakes a signal exit for a reboot. Headless mode does the same and writes a final `shutdown` + `usage` event.
+- **Bounded shell output.** Bash output goes to temp files instead of unbounded in-memory buffers; at most 2 MiB per stream is read back (head + tail). A backgrounded command keeps writing to its log file and no longer keeps gloop's event loop alive. Subagent stdout/stderr are capped likewise. `killProcessTree` now falls back to the single process when it is not a group leader (the fallback never ran) and never throws from its escalation timer.
+- **Missing API key** fails fast at startup (interactive, headless, `--task`) with a one-line hint, unless `OPENROUTER_BASE_URL` is set.
+- **`gloop --task "x" && echo done`** (or `> out.txt`, `| tee`, `$(…)`) is no longer turned into a subagent spawn that silently drops the rest; only a Bash call that is solely the `gloop --task` invocation is. Model / provider / flags given in that call are now honoured.
+- Denied and unknown tool calls show in the TUI as `denied by user` / errors (gloop-loop now emits their `tool_start`).
+- System prompt: no more "Reload or Restart" (the tool is `Reboot`, and only with `--clone`); the custom-tool example imports `ToolDefinition` from where gloop is actually installed and mentions `execute(args, ctx)` / `ctx.signal`; "Your source code is at" names the package root.
+- Root `tsc --noEmit` passes: scoped to `bin/`, `src/`, `components/`, workspace packages resolved to source via `customConditions: ["bun"]`, type errors fixed. The unused, uncompilable `src/ai/provider.ts` (superseded by gloop-loop's provider) is removed.
+
 ## [0.3.0]
 
 ### Added

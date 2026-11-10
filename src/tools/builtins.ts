@@ -6,9 +6,10 @@ import {
   createInvokeSkillTool,
   registerBuiltins as libRegisterBuiltins,
   type BuiltinIO,
+  type ShellResult,
   type Skill,
 } from "@hypen-space/gloop-loop";
-import { exec as shellExec, formatShellResult as gloopFormatShellResult } from "../../bin/shell.ts";
+import { exec as shellExec, formatBackgrounded, type ShellResult as GloopShellResult } from "../../bin/shell.ts";
 
 /** Thrown by the Reboot tool — caught by the outer run loop to trigger process restart. */
 export class RebootError extends Error {
@@ -34,30 +35,48 @@ const BUILTIN_NAMES = new Set([
 ]);
 const TOOLS_DIR = join(process.cwd(), ".gloop", "tools");
 
-/** Bun-specific IO adapter for the lib's builtin tools */
-const bunIO: BuiltinIO = {
-  async readFile(path: string) {
-    const file = Bun.file(path);
-    return await file.text();
-  },
-  async fileExists(path: string) {
-    return await Bun.file(path).exists();
-  },
-  async writeFile(path: string, content: string) {
-    await Bun.write(path, content);
-  },
-  async exec(command: string, timeoutMs?: number) {
-    const result = await shellExec({ command, timeoutMs });
-    return {
-      stdout: result.stdout,
-      stderr: result.stderr,
-      exitCode: result.exitCode ?? 1,
-      timedOut: result.exitCode === null && !result.backgrounded,
-    };
-  },
-};
+/**
+ * Map a shell.ts result onto the lib's `ShellResult`, which the lib's Bash
+ * tool formats for the model.  A command left running in the background is
+ * not a failure: it reports exit code 0 with the "still running, PID …"
+ * status as its output, so the model sees that instead of `(exit code 1)`.
+ */
+export function toBuiltinShellResult(r: GloopShellResult): ShellResult {
+  if (r.backgrounded) return { stdout: formatBackgrounded(r), stderr: "", exitCode: 0 };
+  return {
+    stdout: r.stdout,
+    stderr: r.stderr,
+    exitCode: r.exitCode ?? 1,
+    timedOut: r.timedOut,
+  };
+}
 
-export interface BuiltinOptions {
+export interface BunIOOptions {
+  /** Leave a Bash command without `timeoutMs` running in the background after this long.  Default 60s. */
+  bashBackgroundAfterMs?: number;
+}
+
+/** Bun-specific IO adapter for the lib's builtin tools */
+export function createBunIO(options: BunIOOptions = {}): BuiltinIO {
+  return {
+    async readFile(path: string) {
+      const file = Bun.file(path);
+      return await file.text();
+    },
+    async fileExists(path: string) {
+      return await Bun.file(path).exists();
+    },
+    async writeFile(path: string, content: string) {
+      await Bun.write(path, content);
+    },
+    async exec(command: string, timeoutMs?: number, signal?: AbortSignal) {
+      const result = await shellExec({ command, timeoutMs, signal, bgTimeoutMs: options.bashBackgroundAfterMs });
+      return toBuiltinShellResult(result);
+    },
+  };
+}
+
+export interface BuiltinOptions extends BunIOOptions {
   clone?: boolean;
   /** When set, registers InvokeSkill so the agent can load skill bodies by name. */
   skills?: Skill[];
@@ -65,7 +84,7 @@ export interface BuiltinOptions {
 
 export function registerBuiltins(registry: ToolRegistry, options: BuiltinOptions = {}): void {
   // Register all portable builtins from the lib
-  libRegisterBuiltins(registry, bunIO);
+  libRegisterBuiltins(registry, createBunIO(options));
 
   const invokeSkill = createInvokeSkillTool(options.skills ?? []);
   if (invokeSkill) registry.register(invokeSkill);

@@ -8,7 +8,12 @@ import {
   appendTaskPromptSuffix,
   parseTaskCliArgs,
   TASK_PROMPT_SUFFIX,
+  hasShellSyntax,
+  runTaskSubagent,
+  taskSpawnOptions,
+  formatDuration,
 } from "./task-mode.ts";
+import { trackedChildCount } from "./children.ts";
 
 // ---------------------------------------------------------------------------
 // splitShellCommand
@@ -119,6 +124,46 @@ describe("parseGloopTaskBashCommand", () => {
     expect(result).not.toBeNull();
     expect(result!.provider).toBe("openai");
   });
+
+  test("parses setting flags", () => {
+    const result = parseGloopTaskBashCommand('gloop --task "test" --max-iterations 20 --task-timeout=60000');
+    expect(result!.settings).toEqual({ maxIterations: "20", taskTimeoutMs: "60000" });
+  });
+
+  test("is not a spawn when the command does more than run gloop", () => {
+    // Treating these as spawns would silently drop everything after the task.
+    for (const cmd of [
+      'gloop --task "x" && echo done',
+      'gloop --task "x" > out.txt',
+      'gloop --task "x" | tee log',
+      'gloop --task "x"; ls',
+      'gloop --task "x" &',
+      'gloop --task "$(cat task.txt)"',
+      "gloop --task `cat task.txt`",
+      'gloop --task "x" 2>&1',
+      'gloop --task "x"\necho hi',
+    ]) {
+      expect(parseGloopTaskBashCommand(cmd)).toBeNull();
+    }
+  });
+
+  test("operators inside quotes are part of the task", () => {
+    expect(parseGloopTaskBashCommand('gloop --task "build && test; report > file | grep x"')!.task)
+      .toBe("build && test; report > file | grep x");
+    expect(parseGloopTaskBashCommand("gloop --task 'costs $5 (maybe)'")!.task).toBe("costs $5 (maybe)");
+  });
+});
+
+describe("hasShellSyntax", () => {
+  test("plain commands and quoted operators", () => {
+    expect(hasShellSyntax("gloop --task hi")).toBe(false);
+    expect(hasShellSyntax('echo "a && b"')).toBe(false);
+    expect(hasShellSyntax("echo 'a | b'")).toBe(false);
+    expect(hasShellSyntax("echo a\\;b")).toBe(false);
+    expect(hasShellSyntax("echo $HOME")).toBe(true);
+    expect(hasShellSyntax('echo "$HOME"')).toBe(true);
+    expect(hasShellSyntax("a || b")).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -206,5 +251,103 @@ describe("subagent log linking", () => {
     expect(decodeCause(at("--cause")!)).toEqual({ agent: "gloop", eventId: "r-7", log: "/s/parent.jsonl" });
     expect(at("--model")).toBe("m");
     expect(argv[argv.length - 1]).toContain("do it");
+  });
+
+  test("buildTaskArgv passes setting flags through", () => {
+    const argv = buildTaskArgv(
+      { task: "do it" },
+      "/tmp/out.jsonl",
+      { sessionLog: "/s/c.jsonl", agentId: "a", flags: { maxIterations: "5", compaction: "llm" } },
+    );
+    const at = (flag: string) => argv[argv.indexOf(flag) + 1];
+    expect(at("--max-iterations")).toBe("5");
+    expect(at("--compaction")).toBe("llm");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runTaskSubagent — with a fake child standing in for headless.ts
+// ---------------------------------------------------------------------------
+
+/** argv for a child that writes `lines` to the JSONL output, then runs `then` (shell). */
+const fakeChild = (lines: object[], then = "") => (out: string) => [
+  "sh", "-c",
+  `printf '%s\\n' ${lines.map((l) => `'${JSON.stringify(l)}'`).join(" ")} > "${out}"; ${then}`,
+];
+
+describe("runTaskSubagent", () => {
+  test("returns the summary and the child's token usage", async () => {
+    const r = await runTaskSubagent({ task: "t" }, {
+      sessionLog: "/tmp/x.jsonl",
+      argv: fakeChild([
+        { type: "complete", summary: "all done" },
+        { type: "usage", promptTokens: 100, completionTokens: 20, totalTokens: 120 },
+      ]),
+    });
+    expect(r.success).toBe(true);
+    expect(r.summary).toBe("all done");
+    expect(r.usage).toEqual({ promptTokens: 100, completionTokens: 20, totalTokens: 120 });
+  });
+
+  test("a child that runs past its time limit is killed and reported", async () => {
+    const start = Date.now();
+    const r = await runTaskSubagent({ task: "t" }, {
+      sessionLog: "/tmp/x.jsonl",
+      timeoutMs: 150,
+      killGraceMs: 100,
+      argv: fakeChild([], "sleep 11"),
+    });
+    expect(Date.now() - start).toBeLessThan(2000);
+    expect(r.success).toBe(false);
+    expect(r.timedOut).toBe(true);
+    expect(r.exitCode).toBe(124);
+    expect(r.summary).toContain("timed out after 0s");
+    expect(trackedChildCount()).toBe(0);
+  });
+
+  test("a request's --task-timeout overrides the parent's limit", async () => {
+    const r = await runTaskSubagent({ task: "t", settings: { taskTimeoutMs: "100" } }, {
+      sessionLog: "/tmp/x.jsonl",
+      timeoutMs: 60_000,
+      killGraceMs: 100,
+      argv: fakeChild([], "sleep 11"),
+    });
+    expect(r.timedOut).toBe(true);
+  });
+
+  test("the abort signal kills the child (SIGKILL after the grace period if it ignores SIGTERM)", async () => {
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 100);
+    const start = Date.now();
+    const r = await runTaskSubagent({ task: "t" }, {
+      sessionLog: "/tmp/x.jsonl",
+      signal: ac.signal,
+      killGraceMs: 200,
+      argv: fakeChild([], "trap '' TERM; sleep 11"),
+    });
+    expect(Date.now() - start).toBeLessThan(2000);
+    expect(r.success).toBe(false);
+    expect(r.exitCode).toBe(130);
+    expect(r.summary).toBe("Task was interrupted and killed.");
+  });
+
+  // Keep the process alive past the SIGKILL escalations above.
+  test("leaves nothing running", async () => {
+    await Bun.sleep(300);
+    const ps = Bun.spawnSync(["sh", "-c", "ps -eo stat,args | grep 'sleep 11' | grep -v grep | grep -v '^Z' || true"]);
+    expect(ps.stdout.toString().trim()).toBe("");
+  });
+
+  test("taskSpawnOptions keeps the parsed request between classify and spawn", () => {
+    const opts = taskSpawnOptions({ model: "parent/model", cwd: "/", parentLog: "/p.jsonl", inheritFlags: {}, timeoutMs: 0 });
+    expect(opts.classifySpawn({ name: "Bash", args: { command: 'gloop --task "x" && ls' } })).toBeNull();
+    expect(opts.classifySpawn({ name: "ReadFile", args: { command: 'gloop --task "x"' } })).toBeNull();
+    expect(opts.classifySpawn({ name: "Bash", args: { command: 'gloop --task "x" --max-iterations 3' } })).toBe("x");
+  });
+
+  test("formatDuration", () => {
+    expect(formatDuration(1_800_000)).toBe("30m");
+    expect(formatDuration(90_000)).toBe("1m 30s");
+    expect(formatDuration(3_600_000)).toBe("1h");
   });
 });

@@ -6,6 +6,7 @@
  */
 
 import React from "react";
+import { relative } from "path";
 import { render } from "ink";
 import { OpenRouterProvider } from "@hypen-space/gloop-loop";
 import { registerBuiltins } from "../src/tools/index.ts";
@@ -27,11 +28,21 @@ import {
   wireRebootHandler,
 } from "../src/core/session.ts";
 import { AgentLoop } from "../src/core/core.ts";
-import { parseGloopTaskBashCommand, parseTaskCliArgs, runTaskSubagent } from "../src/core/task-mode.ts";
+import { parseTaskCliArgs, runTaskCli, taskSpawnOptions } from "../src/core/task-mode.ts";
 import { ensureSelfCopy } from "./self-copy.ts";
 import App from "../components/App.tsx";
 import { installTool } from "./install-tool.ts";
 import { parseGloopArgs } from "../src/core/cli-args.ts";
+import {
+  agentOptionsFor,
+  ConfigError,
+  inheritedFlags,
+  loadSettings,
+  missingApiKeyMessage,
+  type ResolvedSettings,
+} from "../src/core/config.ts";
+import { createShutdown, installSignalHandlers } from "../src/core/shutdown.ts";
+import { killTrackedChildren } from "../src/core/children.ts";
 
 // Special exit code that signals "please restart me"
 const REBOOT_EXIT_CODE = 75;
@@ -50,27 +61,37 @@ if (clone) {
 
 const taskRequest = parseTaskCliArgs(args);
 if (taskRequest) {
-  const result = await runTaskSubagent(taskRequest, { cwd: process.cwd() });
-  if (result.success) {
-    console.log(result.summary);
-    process.exit(0);
-  }
-  console.error(`Task mode failed: ${result.summary}`);
-  if (result.stderr) console.error(result.stderr);
-  if (result.stdout) console.error(result.stdout);
-  process.exit(result.exitCode === 0 ? 1 : result.exitCode);
+  process.exit(await runTaskCli(taskRequest));
 }
 
-const { debug, providerName, resume, model } = parseGloopArgs(args);
+const { debug, providerName, resume, model, settings: settingFlags } = parseGloopArgs(args);
+
+// Fail fast on a missing key or bad settings — before the TUI starts.
+const missingKey = missingApiKeyMessage();
+if (missingKey) {
+  console.error(missingKey);
+  process.exit(1);
+}
+let resolved: ResolvedSettings;
+try {
+  resolved = await loadSettings("interactive", settingFlags);
+} catch (err) {
+  if (!(err instanceof ConfigError)) throw err;
+  console.error(`gloop: ${err.message}`);
+  process.exit(1);
+}
+const { settings } = resolved;
 
 if (debug) enableDebug();
+for (const note of resolved.notes) debugLog("CONFIG", note);
+debugLog("CONFIG", JSON.stringify(settings));
 
 await ensureGloopDir();
 
 const skills = await discoverSkills(process.cwd());
 
 // Build system prompt
-let systemPrompt = await buildSystemPrompt({ clone });
+let systemPrompt = await buildSystemPrompt({ clone, maxToolOutput: settings.maxToolOutput });
 debugLog("SYSTEM", systemPrompt);
 
 // Which event log is this session?  A reboot pointer wins, then --resume,
@@ -115,13 +136,19 @@ const agent: AgentLoop = await AgentLoop.resume({
   // A RebootError from the Reboot tool stops the loop and fires a `fatal`
   // event — see wireRebootHandler below.
   isFatal: rebootIsFatal,
+  // Safety settings: iteration cap, LLM retry, output cap, compaction.
+  ...agentOptionsFor(settings),
 
-  // Spawn classifier: detect `gloop --task "..."` in Bash calls.
-  classifySpawn: (call) => {
-    if (call.name !== "Bash") return null;
-    const req = parseGloopTaskBashCommand(call.args.command ?? "");
-    return req ? req.task : null;
-  },
+  // `gloop --task "..."` in a Bash call runs as a linked subagent that
+  // inherits these settings and is killed when the turn is interrupted.
+  ...taskSpawnOptions({
+    model,
+    provider: providerName,
+    cwd: process.cwd(),
+    parentLog: sessionLogPath,
+    inheritFlags: inheritedFlags(resolved),
+    timeoutMs: settings.taskTimeoutMs,
+  }),
 
   // confirm / ask are NOT set — the actor will emit confirm_request /
   // ask_request events and the UI will respond via
@@ -137,15 +164,12 @@ const agent: AgentLoop = await AgentLoop.resume({
   },
 
   refreshSystem: async () => {
-    systemPrompt = await buildSystemPrompt({ clone });
+    systemPrompt = await buildSystemPrompt({ clone, maxToolOutput: settings.maxToolOutput });
     debugLog("SYSTEM", "System prompt refreshed");
     return systemPrompt;
   },
 
   installTool: (source) => installTool(source, agent.registry),
-
-  spawn: (task, call) =>
-    runTaskSubagent({ task, model }, { cwd: process.cwd(), cause: call.cause, parentLog: sessionLogPath }),
 });
 
 // Register builtins into the actor's registry so Reload/install see the same
@@ -166,17 +190,55 @@ if (rebootSession) {
   debugLog("REBOOT", `Restored session: ${rebootSession.reason}`);
 }
 
+// What a resumed session restored — shown as the first line of the TUI.
+const restored = agent.snapshot();
+const resumed = (resume.requested || rebootSession) && restored.eventCount > 0
+  ? { file: relative(process.cwd(), sessionLogPath), turns: restored.turns.length }
+  : undefined;
+
 // ============================================================================
 // RENDER
 // ============================================================================
 
-const { unmount } = render(
+const instance = render(
   React.createElement(App, {
     model,
     rebootReason: rebootSession?.reason,
+    resumed,
     agent,
-  })
+  }),
 );
+
+/** Tear down Ink and give the terminal back. */
+function releaseTerminal(): void {
+  instance.unmount();
+  if (process.stdin.isTTY) process.stdin.setRawMode(false);
+}
+
+// ============================================================================
+// SHUTDOWN
+// ============================================================================
+//
+// Ctrl+C in the TUI unmounts Ink (raw mode: no SIGINT); SIGINT / SIGTERM /
+// SIGHUP arrive as signals.  Either way: unmount, stop the agent (interrupts
+// the turn — a running Bash command or subagent is killed through its abort
+// signal — and flushes the session log), kill tracked children that are
+// left (never commands deliberately moved to the background), exit.  A
+// second Ctrl+C while that runs exits at once.
+
+let rebooting = false;
+const shutdown = createShutdown({
+  beforeStop: () => {
+    releaseTerminal();
+    setTimeout(() => process.stderr.write("Stopping gloop… (Ctrl+C again to force quit)\n"), 500).unref();
+  },
+  stopAgent: () => agent.stop(),
+  log: (m) => debugLog("SHUTDOWN", m),
+});
+installSignalHandlers(shutdown);
+void instance.waitUntilExit().then(() => {
+  if (!rebooting && !shutdown.inProgress) void shutdown.request("quit");
+});
 
 // ============================================================================
 // REBOOT HANDLING
@@ -187,8 +249,9 @@ const { unmount } = render(
 // saves the session + invokes our restart callback, which tears down Ink
 // and exits with a special code that the launcher recognises as "restart".
 wireRebootHandler(agent, sessionLogPath, async () => {
-  unmount();
-  if (process.stdin.isTTY) process.stdin.setRawMode(false);
+  rebooting = true;
+  releaseTerminal();
   await agent.stop();
+  killTrackedChildren();
   process.exit(REBOOT_EXIT_CODE);
 });

@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { StreamFilter, type ToolParsedInfo } from "./ui.ts";
+import { StreamFilter, formatTokens, formatUsageLine, type ToolParsedInfo } from "./ui.ts";
 
 // Helper: collect all emitted text from a StreamFilter
 function filterText(input: string, onToolParsed?: (info: ToolParsedInfo) => void): string {
@@ -115,8 +115,8 @@ Done.`;
       filterText(input, (info) => parsed.push(info));
 
       expect(parsed).toHaveLength(2);
-      expect(parsed[0].name).toBe("ReadFile");
-      expect(parsed[1].name).toBe("Bash");
+      expect(parsed[0]!.name).toBe("ReadFile");
+      expect(parsed[1]!.name).toBe("Bash");
     });
 
     test("includes preview in callback", () => {
@@ -125,7 +125,7 @@ Done.`;
       filterText(input, (info) => parsed.push(info));
 
       expect(parsed).toHaveLength(1);
-      expect(parsed[0].preview).toContain("./very/long/path");
+      expect(parsed[0]!.preview).toContain("./very/long/path");
     });
 
     test("fires during streaming (before block closes)", () => {
@@ -134,7 +134,7 @@ Done.`;
 
       filter.write('<tools><tool>ReadFile("x")</tool>');
       expect(parsed).toHaveLength(1);
-      expect(parsed[0].name).toBe("ReadFile");
+      expect(parsed[0]!.name).toBe("ReadFile");
 
       filter.write('<tool>Bash("ls")</tool></tools>');
       expect(parsed).toHaveLength(2);
@@ -198,5 +198,25 @@ Done.`;
       filter.flush();
       expect(out).toBe("end <");
     });
+  });
+});
+
+describe("usage status line", () => {
+  test("formatTokens", () => {
+    expect(formatTokens(842)).toBe("842");
+    expect(formatTokens(4_210)).toBe("4.2k");
+    expect(formatTokens(42_100)).toBe("42.1k");
+    expect(formatTokens(12_000)).toBe("12k");
+    expect(formatTokens(310_000)).toBe("310k");
+    expect(formatTokens(1_250_000)).toBe("1.25M");
+    expect(formatTokens(2_000_000)).toBe("2M");
+  });
+
+  test("formatUsageLine", () => {
+    expect(formatUsageLine({ totals: { promptTokens: 0, completionTokens: 0 } })).toBe("");
+    expect(formatUsageLine({ contextTokens: 42_100, totals: { promptTokens: 310_000, completionTokens: 12_000 } }))
+      .toBe("ctx 42.1k · in 310k · out 12k");
+    // Resumed session: totals known, no request yet this run.
+    expect(formatUsageLine({ totals: { promptTokens: 5_000, completionTokens: 300 } })).toBe("in 5k · out 300");
   });
 });

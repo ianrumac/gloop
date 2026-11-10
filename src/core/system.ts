@@ -1,12 +1,19 @@
+import { join, resolve } from "path";
 import { readMemory } from "./memory.ts";
+import { toolOutputCapNote } from "./config.ts";
 
 export interface SystemPromptOptions {
   clone?: boolean;
+  /** The tool-output cap in characters (settings.maxToolOutput); 0 / unset = no note. */
+  maxToolOutput?: number;
 }
 
 export async function buildSystemPrompt(options: SystemPromptOptions = {}): Promise<string> {
   const cwd = process.cwd();
-  const gloopSrc = import.meta.dirname;
+  // This file is <root>/src/core/system.ts.
+  const gloopRoot = resolve(import.meta.dirname, "..", "..");
+  const toolTypes = join(gloopRoot, "src", "tools", "types.ts");
+  const capNote = toolOutputCapNote(options.maxToolOutput ?? 0);
   const date = new Date().toLocaleString();
   const memory = await readMemory();
 
@@ -16,12 +23,14 @@ Design: Bauhaus, Technofuturism, 1970s, Pino Tovalgia, Penguin/Pelican, Neominim
 
 You are running on a unix system and are allowed to use tools to help you complete tasks.
 
-Your source code is at: ${gloopSrc}
+Your source code is at: ${gloopRoot}
 You are currently in the following directory: ${cwd}
 Date is ${date}
 You can remember and forget things by calling the Remember and Forget tools.
 Use this to remember things about the system, the projects, the tools, the user (name, personality, email, preferences, etc.) or even yourself (preferences, goals, dreams, ideas, thoughts, etc.).
-If something is wrong or you need to update your code, you can fix yourself by editing your code and calling Reload or Restart to load it.
+${options.clone
+  ? "If something is wrong or you need to update your code, fix it in .gloop/src/ and call Reboot to restart with it (see SELF-MODIFICATION)."
+  : "Custom tools in .gloop/tools/ are (re)loaded with Reload (see CREATING CUSTOM TOOLS)."}
 Feel free to plan things for yourself by creating temporary plan files or TODO lists for you.
 Before you complete a task, make sure to test if it works. That can include writing tests, running the code, screenshotting the output, checking
 You can spawn other gloop subagents to perform long-running tasks (explore, refactor something, plan things) by calling Bash("gloop --task \\"<task description>\\""). Once it is completed, you will receive the result.
@@ -45,7 +54,7 @@ Each file must have: name, description, arguments array, and an execute function
 It must be written in TypeScript.
 Example .gloop/tools/MyTool.ts:
 \`\`\`ts
-import type { ToolDefinition } from "../../src/tools/types.ts";
+import type { ToolDefinition } from "${toolTypes}";
 
 const MyTool: ToolDefinition = {
   name: "MyTool",
@@ -58,7 +67,9 @@ const MyTool: ToolDefinition = {
     if (args.input?.includes("dangerous")) return \`MyTool will process dangerous input: \${args.input}\`;
     return null;
   },
-  execute: async (args) => {
+  // ctx.signal aborts when the user interrupts the turn — pass it to fetch()
+  // or kill child processes with it in long-running tools.
+  execute: async (args, ctx) => {
     return \`Processed: \${args.input}\`;
   },
 };
@@ -85,7 +96,7 @@ If you need to patch a file or just modify a part of it, use Patch_file instead 
 ==== TOOL CALLING ====
 Tools are available as function calls. The system will present available tools and you can call them directly.
 Tool results will be returned to you for further processing.
-
+${capNote ? `${capNote}\n` : ""}
 ==== TASK COMPLETION ====
 When you finish a task, call CompleteTask with a short summary. That is the explicit "done" signal — the harness uses it to mark the task complete and stop the turn cleanly.
 

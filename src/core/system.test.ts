@@ -50,4 +50,24 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain("Forget");
     expect(prompt).toContain("MEMORY USAGE");
   });
+
+  test("never mentions a Reload-or-Restart tool; Reboot only with --clone", async () => {
+    const plain = await buildSystemPrompt();
+    expect(plain).not.toContain("Restart to load");
+    expect(plain).not.toContain("call Reboot");
+    expect(await buildSystemPrompt({ clone: true })).toContain("call Reboot");
+  });
+
+  test("custom-tool example imports types from where gloop is installed", async () => {
+    const prompt = await buildSystemPrompt();
+    const path = /import type \{ ToolDefinition \} from "([^"]+)"/.exec(prompt)?.[1];
+    expect(path).toBeDefined();
+    expect(await Bun.file(path!).exists()).toBe(true);
+    expect(prompt).toContain("ctx.signal");
+  });
+
+  test("tells the model about the tool output cap", async () => {
+    expect(await buildSystemPrompt({ maxToolOutput: 50_000 })).toContain("longer than 50,000 characters");
+    expect(await buildSystemPrompt({ maxToolOutput: 0 })).not.toContain("characters are cut");
+  });
 });
