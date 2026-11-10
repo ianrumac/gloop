@@ -2,7 +2,7 @@
 
 All notable changes to `gloop` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.4.0]
 
 ### Added
 - **Safety settings**, from flags, an optional per-project `.gloop/config.json`, or defaults (flag > file > default; unknown keys ignored with a debug-log note; invalid values stop startup with a message naming the flag or key). One module, `src/core/config.ts`, used by the interactive CLI, headless mode and `--task`:

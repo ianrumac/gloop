@@ -2,7 +2,7 @@
 
 All notable changes to `@hypen-space/gloop-loop` are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.5.0]
 
 ### Changed
 - **`maxTokens` has no default.** `max_tokens` is only sent when the host sets `maxTokens` (the previous 262144 default was rejected by low-balance OpenRouter accounts and some OpenAI-compatible servers). `AIConversation.setMaxTokens` accepts `undefined`.
