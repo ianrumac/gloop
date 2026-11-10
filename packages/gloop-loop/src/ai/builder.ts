@@ -30,6 +30,7 @@ export class AIBuilder {
     toolChoice: Lazy<ToolChoice>;
   }> = {};
   private _messages: (Message | Lazy<Message[]>)[] = [];
+  private _signal?: AbortSignal;
 
   constructor(provider: AIProvider, defaultModel?: string) {
     this.provider = provider;
@@ -78,6 +79,12 @@ export class AIBuilder {
 
   toolChoice(value: Lazy<ToolChoice>): this {
     this.config.toolChoice = value;
+    return this;
+  }
+
+  /** Abort the request when `value` fires (see `AIRequestConfig.signal`). */
+  signal(value: AbortSignal | undefined): this {
+    this._signal = value;
     return this;
   }
 
@@ -135,6 +142,7 @@ export class AIBuilder {
 
     const toolCalls = await result.toolCalls;
     const finishReason = await result.finishReason;
+    const usage = await result.usage;
     const model = this.config.model ? resolve(this.config.model) : "";
 
     return {
@@ -143,6 +151,7 @@ export class AIBuilder {
       content: fullContent || null,
       finishReason: finishReason ?? (toolCalls.length > 0 ? "tool_calls" : "stop"),
       ...(toolCalls.length > 0 && { toolCalls }),
+      ...(usage && { usage }),
     };
   }
 
@@ -174,7 +183,10 @@ export class AIBuilder {
     const tools = this.config.tools !== undefined ? resolve(this.config.tools) : undefined;
     const toolChoice = this.config.toolChoice !== undefined ? resolve(this.config.toolChoice) : undefined;
 
-    return { model, messages, temperature, maxTokens, topP, frequencyPenalty, presencePenalty, stop, seed, provider, tools, toolChoice };
+    return {
+      model, messages, temperature, maxTokens, topP, frequencyPenalty, presencePenalty, stop, seed, provider, tools, toolChoice,
+      ...(this._signal && { signal: this._signal }),
+    };
   }
 }
 
@@ -260,9 +272,11 @@ export class AIConversation {
    * is appended and the assistant's reply is not recorded.  The caller owns
    * every history write (the event-sourced interpreter uses this together
    * with `append` so each mutation is paired with a logged event).
+   * `signal` aborts the underlying HTTP request.
    */
-  request(): StreamResult {
+  request(options?: { signal?: AbortSignal }): StreamResult {
     const builder = new AIBuilder(this._provider, this._modelId);
+    if (options?.signal) builder.signal(options.signal);
     if (this.systemPrompt) builder.system(this.systemPrompt);
     if (this.routing) builder.providerRouting(this.routing);
     if (this.jsonTools) builder.tools(this.jsonTools);
@@ -313,6 +327,7 @@ export class AIConversation {
       textStream: wrappedTextStream,
       toolCalls: result.toolCalls,
       finishReason: result.finishReason,
+      ...(result.usage && { usage: result.usage }),
       cancel: () => result.cancel(),
     };
   }
@@ -353,8 +368,8 @@ export class AIConversation {
     return this;
   }
 
-  /** Cap completion tokens for every request on this conversation. */
-  setMaxTokens(n: number): this {
+  /** Cap completion tokens for every request on this conversation.  `undefined` sends no cap. */
+  setMaxTokens(n: number | undefined): this {
     this._maxTokens = n;
     return this;
   }

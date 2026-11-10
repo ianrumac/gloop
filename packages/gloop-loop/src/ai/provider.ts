@@ -8,6 +8,7 @@ import type {
   JsonTool,
   JsonToolCall,
   StreamResult,
+  Usage,
 } from "./types.ts";
 
 const FINISH_REASONS: ReadonlySet<string> = new Set([
@@ -40,40 +41,57 @@ export class OpenRouterProvider implements AIProvider {
   }
 
   async complete(config: AIRequestConfig): Promise<AIResponse> {
-    const response: any = await this.client.chat.send({
-      ...(this.httpReferer && { httpReferer: this.httpReferer }),
-      ...(this.xTitle && { xTitle: this.xTitle }),
-      chatGenerationParams: buildChatParams(config),
-    });
+    const response: any = await this.client.chat.send(
+      {
+        ...(this.httpReferer && { httpReferer: this.httpReferer }),
+        ...(this.xTitle && { xTitle: this.xTitle }),
+        chatGenerationParams: buildChatParams(config),
+      },
+      config.signal ? { signal: config.signal } : undefined,
+    );
 
     const choice = response.choices?.[0];
     const text = typeof choice?.message?.content === "string" ? choice.message.content : null;
     const toolCalls = extractChatToolCalls(choice?.message?.toolCalls);
 
     const apiFinish = coerceFinishReason(choice?.finishReason);
+    const usage = toUsage(response.usage);
     return {
       id: response.id ?? "",
       model: response.model ?? config.model,
       content: text,
       finishReason: apiFinish ?? (toolCalls.length > 0 ? "tool_calls" : "stop"),
       ...(toolCalls.length > 0 && { toolCalls }),
-      ...(response.usage && {
-        usage: {
-          promptTokens: response.usage.promptTokens ?? 0,
-          completionTokens: response.usage.completionTokens ?? 0,
-          totalTokens: response.usage.totalTokens ?? 0,
-        },
-      }),
+      ...(usage && { usage }),
     };
   }
 
   stream(config: AIRequestConfig): StreamResult {
+    // One controller per request: `cancel()` aborts it, which also unblocks
+    // a request the server never answered.  A caller's signal is linked in.
+    const controller = new AbortController();
+    const onCallerAbort = () => controller.abort();
+    if (config.signal?.aborted) controller.abort();
+    else config.signal?.addEventListener("abort", onCallerAbort, { once: true });
+
     // Request a streaming response from the Chat Completions API
-    const streamPromise: Promise<AsyncIterable<any>> = this.client.chat.send({
-      ...(this.httpReferer && { httpReferer: this.httpReferer }),
-      ...(this.xTitle && { xTitle: this.xTitle }),
-      chatGenerationParams: { ...buildChatParams(config), stream: true },
-    }) as any;
+    const streamPromise: Promise<AsyncIterable<any>> = this.client.chat.send(
+      {
+        ...(this.httpReferer && { httpReferer: this.httpReferer }),
+        ...(this.xTitle && { xTitle: this.xTitle }),
+        chatGenerationParams: {
+          ...buildChatParams(config),
+          stream: true,
+          // OpenRouter always reports usage; OpenAI-compatible servers only
+          // put it on the final chunk when asked.
+          streamOptions: { includeUsage: true },
+        },
+      },
+      { signal: controller.signal },
+    ) as any;
+    // Errors surface through `textStream.next()`; this only keeps a request
+    // that is cancelled before anyone iterates from becoming unhandled.
+    streamPromise.catch(() => {});
 
     // Accumulate tool call deltas across chunks
     const toolCallAcc = new Map<number, { id: string; name: string; arguments: string }>();
@@ -90,6 +108,13 @@ export class OpenRouterProvider implements AIProvider {
       resolveFinishReason = resolve;
     });
 
+    // Usage arrives on the last chunk (often one with no choices).
+    let lastUsage: Usage | undefined;
+    let resolveUsage: (u: Usage | undefined) => void;
+    const usagePromise = new Promise<Usage | undefined>((resolve) => {
+      resolveUsage = resolve;
+    });
+
     // Get the underlying async iterator once and reuse across next() calls
     let iteratorPromise: Promise<AsyncIterator<any>> | null = null;
     function getIterator() {
@@ -101,7 +126,13 @@ export class OpenRouterProvider implements AIProvider {
       return iteratorPromise;
     }
 
+    // Settle the side promises exactly once — on completion, error or
+    // cancel — so nothing awaiting them can hang.
+    let finalized = false;
     function finalize() {
+      if (finalized) return;
+      finalized = true;
+      config.signal?.removeEventListener("abort", onCallerAbort);
       const calls: JsonToolCall[] = [];
       for (const [, tc] of toolCallAcc) {
         if (tc.name) {
@@ -118,14 +149,14 @@ export class OpenRouterProvider implements AIProvider {
       // the non-streaming path's fallback.
       const finish = lastFinishReason ?? (calls.length > 0 ? "tool_calls" : null);
       resolveFinishReason(finish);
+      resolveUsage(lastUsage);
     }
 
     const textStream: AsyncIterableIterator<string> = {
       [Symbol.asyncIterator]() { return textStream; },
       async next(): Promise<IteratorResult<string>> {
-        const iter = await getIterator();
-
-        while (true) {
+        try {
+          const iter = await getIterator();
           const result = await iter.next();
           if (result.done) {
             finalize();
@@ -133,11 +164,12 @@ export class OpenRouterProvider implements AIProvider {
           }
 
           const chunk = result.value;
+          const usage = toUsage(chunk?.usage);
+          if (usage) lastUsage = usage;
           const choice = chunk?.choices?.[0];
-          if (!choice) continue;
-          const reason = coerceFinishReason(choice.finishReason);
+          const reason = coerceFinishReason(choice?.finishReason);
           if (reason !== null) lastFinishReason = reason;
-          const delta = choice.delta;
+          const delta = choice?.delta;
 
           // Accumulate tool call deltas
           if (delta?.toolCalls) {
@@ -158,11 +190,14 @@ export class OpenRouterProvider implements AIProvider {
             }
           }
 
-          // Yield text content
+          // Yield text content — or "" as a heartbeat for a chunk without
+          // text (tool-call / reasoning deltas, usage), so an idle timeout
+          // can tell an active stream from a silent one.
           const text = delta?.content;
-          if (typeof text === "string" && text.length > 0) {
-            return { value: text, done: false };
-          }
+          return { value: typeof text === "string" ? text : "", done: false };
+        } catch (err) {
+          finalize();
+          throw err;
         }
       },
       async return() {
@@ -176,15 +211,29 @@ export class OpenRouterProvider implements AIProvider {
       textStream,
       toolCalls: toolCallsPromise,
       finishReason: finishReasonPromise,
+      usage: usagePromise,
       cancel: async () => {
-        // EventStream extends ReadableStream, cancel it if possible
-        const es = await streamPromise;
-        if (es && typeof (es as any).cancel === "function") {
-          await (es as any).cancel();
-        }
+        // Never await the request: a server that never answered would
+        // block forever.  Aborting the fetch tears down the body stream too.
+        controller.abort();
+        finalize();
       },
     };
   }
+}
+
+/** Map the SDK's usage object onto `Usage`; undefined when absent. */
+function toUsage(raw: any): Usage | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const cached = raw.promptTokensDetails?.cachedTokens;
+  const reasoning = raw.completionTokensDetails?.reasoningTokens;
+  return {
+    promptTokens: raw.promptTokens ?? 0,
+    completionTokens: raw.completionTokens ?? 0,
+    totalTokens: raw.totalTokens ?? 0,
+    ...(typeof cached === "number" && { cachedTokens: cached }),
+    ...(typeof reasoning === "number" && { reasoningTokens: reasoning }),
+  };
 }
 
 /** Build ChatGenerationParams from AIRequestConfig */
@@ -213,6 +262,8 @@ function buildChatParams(config: AIRequestConfig) {
     ...(config.topP !== undefined && { topP: config.topP }),
     ...(config.frequencyPenalty !== undefined && { frequencyPenalty: config.frequencyPenalty }),
     ...(config.presencePenalty !== undefined && { presencePenalty: config.presencePenalty }),
+    ...(config.stop?.length && { stop: config.stop }),
+    ...(config.seed !== undefined && { seed: config.seed }),
     ...(config.provider && { provider: config.provider as any }),
     ...(config.toolChoice !== undefined && { toolChoice: config.toolChoice as any }),
   };

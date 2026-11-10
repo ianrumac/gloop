@@ -1064,3 +1064,87 @@ describe("AgentLoop — mutating the tool set between turns", () => {
     await agent.stop();
   });
 });
+
+// ===========================================================================
+// Review regressions — fatal errors, awaitIdle, interrupting tools
+// ===========================================================================
+
+describe("AgentLoop — fatal / stop settle everything", () => {
+  class RebootError extends Error {}
+
+  test("a fatal error thrown by a TOOL emits `fatal` and stops the loop", async () => {
+    const reboot = {
+      name: "Reboot", description: "r", arguments: [],
+      execute: async () => { throw new RebootError("new code"); },
+    };
+    const provider = new MockProvider([{ toolCalls: [tc("c1", "Reboot", {})] }, { text: "never" }]);
+    const agent = new AgentLoop({ provider, model: "m", tools: [reboot], isFatal: (e) => e instanceof RebootError });
+    const types: string[] = [];
+    agent.onEvent((e) => types.push(e.type));
+    await expect(agent.sendSync("go")).rejects.toBeInstanceOf(RebootError);
+    expect(types).toContain("fatal");
+    expect(types).not.toContain("error");
+    expect(agent.isRunning()).toBe(false);
+    await agent.stop();
+  });
+
+  test("queued sendSync calls reject when a fatal error stops the loop; awaitIdle resolves", async () => {
+    class Boom extends Error {}
+    const provider: AIProvider = {
+      name: "x",
+      complete: async () => { throw new Boom("b"); },
+      stream: () => { throw new Boom("b"); },
+    };
+    const agent = new AgentLoop({ provider, model: "m", tools: [], isFatal: (e) => e instanceof Boom });
+    const first = agent.sendSync("one").catch((e) => e);
+    const second = agent.sendSync("two").catch((e) => e);
+    const idle = agent.awaitIdle();
+    expect(await first).toBeInstanceOf(Boom);
+    expect(await second).toBeInstanceOf(Boom); // hung forever before
+    await idle; // would hang forever before
+    await agent.stop();
+  });
+
+  test("awaitIdle resolves when the actor is stopped mid-turn", async () => {
+    const agent = new AgentLoop({
+      provider: new MockProvider([{ text: "x".repeat(200), delayMs: 20 }]),
+      model: "m", tools: [],
+    });
+    agent.send("go").start();
+    await flush();
+    const idle = agent.awaitIdle();
+    await agent.stop();
+    await idle;
+  });
+});
+
+describe("AgentLoop — interrupt reaches running tools", () => {
+  test("interrupt aborts the tool's signal, settles promptly, and records what ran", async () => {
+    let signal: AbortSignal | undefined;
+    const slow = {
+      name: "Slow", description: "s", arguments: [],
+      execute: async (_a: Record<string, string>, ctx?: { signal?: AbortSignal }) => {
+        signal = ctx?.signal;
+        await new Promise((r) => setTimeout(r, 1500));
+        return "done";
+      },
+    };
+    const agent = new AgentLoop({
+      provider: new MockProvider([{ toolCalls: [tc("c1", "Slow", {})] }, { text: "x" }]),
+      model: "m", tools: [slow],
+    });
+    const t0 = Date.now();
+    const p = agent.sendSync("go").catch((e) => e);
+    await new Promise((r) => setTimeout(r, 50));
+    agent.interrupt();
+    expect((await p).name).toBe("AbortError");
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(signal?.aborted).toBe(true);
+    const h = agent.convo.getHistory();
+    expect(h[1]!.toolCalls?.[0]!.id).toBe("c1");
+    expect(h[2]).toEqual({ role: "tool", toolCallId: "c1", content: "Interrupted by the user before this tool call completed." });
+    // …and the log agrees.
+    expect(agent.snapshot().history).toEqual(h);
+    await agent.stop();
+  });
+});

@@ -14,7 +14,8 @@ export interface ToolLookup {
  * into the resulting `ToolCall.args` record, and values are coerced to
  * strings.  Unknown tools and tools missing from the registry yield
  * `args = {}` so callers see a clean "unknown tool" result rather than
- * a misordered / mis-coerced call.
+ * a misordered / mis-coerced call.  Arguments that are not valid JSON
+ * yield `args = {}` and `parseError` (the call must not be executed).
  */
 export function jsonToolCallsToToolCalls(
   jsonCalls: JsonToolCall[],
@@ -23,26 +24,33 @@ export function jsonToolCallsToToolCalls(
   return jsonCalls.map((jc) => {
     const args: Record<string, string> = {};
     const tool = registry.get(jc.function.name);
+    const raw = jc.function.arguments ?? "";
+    let parseError: string | undefined;
 
-    try {
-      const parsed = JSON.parse(jc.function.arguments);
-      if (tool && typeof parsed === "object" && parsed !== null) {
-        const obj = parsed as Record<string, unknown>;
-        for (const arg of tool.arguments) {
-          const v = obj[arg.name];
-          if (v !== undefined && v !== null) args[arg.name] = String(v);
+    // An empty string is how many providers spell "no arguments".
+    if (raw.trim()) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (tool && typeof parsed === "object" && parsed !== null) {
+          const obj = parsed as Record<string, unknown>;
+          for (const arg of tool.arguments) {
+            const v = obj[arg.name];
+            if (v !== undefined && v !== null) args[arg.name] = String(v);
+          }
         }
-      }
-    } catch {
-      // Arguments aren't valid JSON — treat the whole string as a single
-      // value bound to the tool's first declared argument, if any.  This
-      // preserves the "Bash with malformed json" fallback where the raw
-      // string becomes the command.
-      if (jc.function.arguments && tool && tool.arguments.length > 0) {
-        args[tool.arguments[0]!.name] = jc.function.arguments;
+      } catch (err) {
+        // Never guess: a response truncated mid-arguments could otherwise
+        // run half a JSON object as a shell command.  The interpreter
+        // answers a malformed call with an error instead of executing it.
+        parseError = err instanceof Error ? err.message : String(err);
       }
     }
 
-    return { name: jc.function.name, args, ...(jc.id && { id: jc.id }) };
+    return {
+      name: jc.function.name,
+      args,
+      ...(jc.id && { id: jc.id }),
+      ...(parseError !== undefined && { parseError }),
+    };
   });
 }

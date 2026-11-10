@@ -176,16 +176,27 @@ describe("jsonToolCallsToToolCalls", () => {
     expect(result[0]!.args).toEqual({ timeout: "5000", verbose: "true" });
   });
 
-  test("malformed JSON falls through to the tool's first declared arg", () => {
+  test("malformed JSON is flagged with parseError and never bound to an argument", () => {
     const result = jsonToolCallsToToolCalls(
       [{
         id: "c1",
         type: "function",
-        function: { name: "Bash", arguments: "not json" },
+        // e.g. a response cut off by max_tokens mid-arguments
+        function: { name: "Bash", arguments: '{"command":"rm -rf /tmp/x && echo' },
       }],
       makeRegistry(),
     );
-    expect(result[0]!.args).toEqual({ command: "not json" });
+    expect(result[0]!.args).toEqual({});
+    expect(result[0]!.parseError).toBeString();
+    expect(result[0]!.id).toBe("c1");
+  });
+
+  test("valid JSON carries no parseError", () => {
+    const result = jsonToolCallsToToolCalls(
+      [{ id: "c1", type: "function", function: { name: "Bash", arguments: '{"command":"ls"}' } }],
+      makeRegistry(),
+    );
+    expect(result[0]).toEqual({ name: "Bash", args: { command: "ls" }, id: "c1" });
   });
 
   test("empty arguments string yields empty args record", () => {

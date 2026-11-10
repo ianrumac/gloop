@@ -395,3 +395,63 @@ describe("resume — edge cases", () => {
     await a.stop();
   });
 });
+
+describe("resume honours the host's system prompt", () => {
+  test("system passed to resume wins over the logged one — convo, restored event and snapshot agree", async () => {
+    const store = new MemoryEventStore();
+    const a = new AgentLoop({ provider: new ScriptedProvider([{ text: "hi" }]), model: "m", tools: [], system: "OLD PROMPT", store });
+    await a.sendSync("hello");
+    await a.stop();
+
+    const provider = new ScriptedProvider([{ text: "again" }]);
+    const b = await AgentLoop.resume({ provider, model: "m", tools: [], system: "NEW PROMPT", store });
+    expect(b.convo.getSystem()).toBe("NEW PROMPT");
+    const restored = b.log.events().findLast((e) => e.type === "restored");
+    expect(restored?.type === "restored" && restored.system).toBe("NEW PROMPT");
+    await b.sendSync("second");
+    expect(provider.calls[0]!.messages[0]).toEqual({ role: "system", content: "NEW PROMPT" });
+    expectReplayMatches(b);
+    await b.stop();
+  });
+
+  test("without a system option the logged prompt is restored", async () => {
+    const store = new MemoryEventStore();
+    const a = new AgentLoop({ provider: new ScriptedProvider([{ text: "hi" }]), model: "m", tools: [], system: "LOGGED", store });
+    await a.sendSync("hello");
+    await a.stop();
+    const b = await AgentLoop.resume({ provider: new ScriptedProvider([]), model: "m", tools: [], store });
+    expect(b.convo.getSystem()).toBe("LOGGED");
+    expectReplayMatches(b);
+    await b.stop();
+  });
+});
+
+describe("token usage", () => {
+  test("llm_response carries usage; snapshot and agent.usage() total it (per turn too) and survive resume", async () => {
+    const store = new MemoryEventStore();
+    const agent = new AgentLoop({
+      provider: new ScriptedProvider([
+        { toolCalls: [tc("c1", "Echo", { text: "a" })], usage: { promptTokens: 10, completionTokens: 2, totalTokens: 12, cachedTokens: 4 } },
+        { text: "done", usage: { promptTokens: 20, completionTokens: 3, totalTokens: 23 } },
+        { text: "no usage reported" },
+      ]),
+      model: "m", tools: [echoTool], store,
+    });
+    const responses: LogEvent[] = [];
+    agent.on("llm_response", (e) => responses.push(e));
+    await agent.sendSync("one");
+    await agent.sendSync("two");
+    expect(responses[0]!.type === "llm_response" && responses[0]!.usage?.promptTokens).toBe(10);
+    const total = { promptTokens: 30, completionTokens: 5, totalTokens: 35, cachedTokens: 4 };
+    expect(agent.usage()).toEqual(total);
+    const state = agent.snapshot();
+    expect(state.usage).toEqual(total);
+    expect(state.turns[0]!.usage).toEqual(total);
+    expect(state.turns[1]!.usage).toBeUndefined();
+    await agent.stop();
+
+    const resumed = await AgentLoop.resume({ provider: new ScriptedProvider([]), model: "m", tools: [echoTool], store });
+    expect(resumed.usage()).toEqual(total);
+    await resumed.stop();
+  });
+});

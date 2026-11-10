@@ -76,7 +76,7 @@ Skills are markdown playbooks discovered by **your app** (the library does not r
 
 - Pass **`skills?: Skill[]`** on **`AgentLoop`**. Names and descriptions are merged into the system prompt so the model knows what exists; the full body is not inlined until invoked.
 - Optionally register **`createInvokeSkillTool(skills)`** so the model can call **`InvokeSkill(name, arguments)`** and receive the same rendered text as a slash invocation.
-- **`refreshSystem`** should return a base prompt string; the loop re-applies the skills block automatically when refreshing.
+- **`refreshSystem`** should return a base prompt string; the loop re-applies the skills block automatically when refreshing — as do `setSystem(prompt)` and `{ role: "system" }` inbox messages (a prompt that already contains the block is left alone).
 
 **REPL / `run()` DX** (when `LoopConfig.skills` is set — `AgentLoop` wires this for you)
 
@@ -85,7 +85,8 @@ Skills are markdown playbooks discovered by **your app** (the library does not r
 | `/skills` | Print a short list of skills (names + descriptions). |
 | `/skill <name> [args]` | Load that skill’s body with `$ARGUMENTS` / `$0`… substitutions (same as `/<name> [args]`). |
 | `/<name> [args]` | Same as above when `name` matches a skill (takes precedence over `/install` if a skill collides). |
-| Plain text | Normal user turn. |
+| `/tools`, `/install <src>` | Built-in commands. |
+| Plain text — or any other `/…` (e.g. `/etc/hosts looks wrong`) | Normal user turn. |
 
 Helpers (all exportable from the package): **`parseSkillMarkdown`**, **`mergeSkillsIntoSystem`**, **`formatSkillsListing`**, **`findSkill`**, **`applySkillSubstitutions`**, **`thinkInputFromSkillSubcommand`**, **`matchSkillSlash`**, **`skillInvocationToThinkInput`**, **`createInvokeSkillTool`**.
 
@@ -307,13 +308,24 @@ console.log(graphToMermaid(g));
 
 ### Context trimming — graph in, trimmed graph out
 
-When the model calls `ManageContext` (or `contextPruneInterval` fires), the agent projects its context into a graph and hands it to a `ContextStrategy`. Nodes are the messages of the live history, each tied to the log event and turn that wrote it; edges pair an assistant's tool calls with their `role: "tool"` responses. The strategy returns the trimmed graph — drop nodes, rewrite `node.message`, or add nodes with `contextNode` — and the result becomes the new history, logged as one `history_replaced` event. The log itself is never trimmed.
+When the model calls `ManageContext` (or an automatic trigger fires — see `context` below), the agent projects its context into a graph and hands it to a `ContextStrategy`. Nodes are the messages of the live history, each tied to the log event and turn that wrote it; edges pair an assistant's tool calls with their `role: "tool"` responses. The strategy returns the trimmed graph — drop nodes, rewrite `node.message`, or add nodes with `contextNode` — and the result becomes the new history, logged as one `history_replaced` event. The log itself is never trimmed.
 
 ```ts
-import { AgentLoop, contextGraph, contextNode, keepLastTurns, type ContextStrategy } from "@hypen-space/gloop-loop";
+import { AgentLoop, contextGraph, contextNode, foldTurns, keepLastTurns, type ContextStrategy } from "@hypen-space/gloop-loop";
 
 // Built-in, model-free: keep only what the last 5 turns wrote.
-new AgentLoop({ provider, model, contextStrategy: keepLastTurns(5) });
+new AgentLoop({ provider, model, context: { strategy: keepLastTurns(5) } });
+
+// Built-in, model-free: fold finished turns. Each turn older than the last
+// `keep` becomes its user message plus one assistant message holding the
+// highest-value lines of its tool output (errors, hashes, paths, test
+// summaries) and the turn's final reply. Folding happens in one batch once
+// the older turns pass `budget` tokens, so the prompt prefix — and the
+// provider's prompt cache — only changes at a fold.
+new AgentLoop({
+  provider, model,
+  context: { strategy: foldTurns({ keep: 3 }), compactAtTokens: 120_000 },
+});
 
 // Your own: elide big tool outputs from every turn but the current one.
 const elideOldToolOutput: ContextStrategy = (graph) => {
@@ -325,7 +337,51 @@ const elideOldToolOutput: ContextStrategy = (graph) => {
 };
 ```
 
-`ctx` carries `instructions`, `trigger` (`"tool"` | `"auto"`), the whole log as `events` (feed it to `projectGraph` — `node.turn` joins to `TurnNode.turn` — or `projectState`), `eventLog`, the agent's `provider` / `model`, and the turn's abort `signal`. A tool-call group the result only partly keeps is dropped as a unit, so a strategy can never leave an unanswered tool call behind. The default is `llmContextStrategy()`: a forked agent (`${id}/context` on the same log) marks stale messages and writes a summary. `projectContext(events, agent)` gives you the same graph outside a prune.
+`ctx` carries `instructions`, `trigger` (`"tool"` | `"auto"`), `tokens` (the current context size — see below), the whole log as `events` (feed it to `projectGraph` — `node.turn` joins to `TurnNode.turn` — or `projectState`), `eventLog`, the agent's `provider` / `model`, and the turn's abort `signal`. A tool-call group the result only partly keeps is dropped as a unit, so a strategy can never leave an unanswered tool call behind. The default is `llmContextStrategy()`: a forked agent (`${id}/context` on the same log) marks stale messages and writes a summary. `projectContext(events, agent)` gives you the same graph outside a prune.
+
+**When it runs automatically** — the `context` option groups the strategy with its triggers:
+
+```ts
+new AgentLoop({
+  provider, model,
+  context: {
+    strategy: llmContextStrategy(),   // default
+    compactAtTokens: 150_000,         // compact once the context reaches ~150k tokens
+    everyToolCalls: 0,                // …and/or every N tool calls (0 = off)
+  },
+});
+```
+
+`compactAtTokens` compares against the last request's `promptTokens` when the provider reports usage, and a chars/4 estimate of the history when it does not. Both triggers are checked after a batch of tool results is recorded, before the next model call. If a run leaves the history unchanged (the strategy could not shrink it), the token trigger waits until the context has dropped back under the threshold instead of re-running every iteration. A strategy that throws is reported as a failed `ManageContext` `tool_done` (or a failed tool result, when the model called it) and the turn goes on. `contextStrategy` and `contextPruneInterval` still work as deprecated aliases for `context.strategy` / `context.everyToolCalls`.
+
+### Token usage
+
+When the provider reports usage (`OpenRouterProvider` does, and asks OpenAI-compatible servers for it), every `llm_response` event carries `usage: { promptTokens, completionTokens, totalTokens, cachedTokens?, reasoningTokens? }`. The actor keeps running totals:
+
+```ts
+await agent.sendSync("Summarise the repo");
+agent.usage();                     // { promptTokens: 18210, completionTokens: 912, totalTokens: 19122 }
+agent.snapshot().turns.at(-1)?.usage;   // just that turn
+```
+
+Totals are folded from the log (`AgentState.usage`), so they survive `resume`. A provider that reports nothing leaves them at zero.
+
+### Tool output cap
+
+Every tool result is capped before the model sees it — built-ins and your own tools alike. Long output keeps its head and tail around a marker:
+
+```
+…first 25,000 characters…
+… [184211 characters omitted — output capped at 50000; narrow the command or read a range] …
+…last 25,000 characters…
+```
+
+```ts
+new AgentLoop({ provider, model, maxToolOutputChars: 20_000 });   // default 50_000; 0 disables
+agent.addTool({ name: "Dump", /* … */ maxOutputChars: 200_000, execute: dump });   // per-tool override
+```
+
+`truncateOutput(text, max)` is exported if you want the same policy elsewhere. Events (`tool_done`) and the log record the capped output.
 
 ### Hooks — attach behaviour (and other agents)
 
@@ -410,9 +466,11 @@ agent.on("fatal", async (e) => {
 When `isFatal` returns `true`, the actor:
 
 1. Stops the loop (no more turns)
-2. Clears the inbox
+2. Clears the inbox — queued `sendSync` calls reject with the fatal error, `awaitIdle()` resolves
 3. Emits `fatal` **instead of** `error`
 4. `sendSync` rejects with the fatal error
+
+This applies to errors thrown from a tool's `execute` too (the usual place for a `Reboot` tool): a fatal tool error is never turned into a failed tool result, and never retried.
 
 Non-fatal errors keep the loop alive — the next queued message is processed normally. This is the difference between "the current turn failed" and "the whole agent needs to die".
 
@@ -436,6 +494,13 @@ await agent.sendSync("Never mind, just a small refactor");
 
 `interrupt()` aborts the current turn; the loop keeps running. To tear everything down: `await agent.stop()`.
 
+What an interrupt reaches:
+
+- **The model request** — the HTTP request is aborted (`OpenRouterProvider` gives every stream its own `AbortController`), even when the server never answered. The `llmIdleTimeoutMs` timeout uses the same path.
+- **Tools** — `execute(args, { signal })` receives the turn's `AbortSignal`. The built-in `Bash` passes it to `io.exec(command, timeoutMs, signal)`, and `createNodeIO()` kills the command's whole process group. The turn unwinds immediately even for a tool that ignores the signal.
+- **Subagents** — `spawn(task, { cause, signal })`; kill the child when `signal` fires.
+- **History** — tools that already finished keep their results; the others are answered `Interrupted by the user before this tool call completed.`, so the next request is valid and the model knows what happened.
+
 ### Custom tools with permission prompts
 
 ```ts
@@ -449,6 +514,24 @@ agent.addTool({
 ```
 
 `askPermission` returning a string makes the loop emit a `confirm_request` event (or call your `confirm` option if you passed one). The tool's `execute` only runs after the user answers yes via `agent.respondToConfirm(id, ok)`.
+
+More `ToolDefinition` knobs:
+
+```ts
+agent.addTool({
+  name: "Search",
+  description: "Search the codebase.",
+  arguments: [
+    { name: "query", description: "What to look for" },
+    { name: "limit", description: "Max results", optional: true },   // not in the schema's `required`
+  ],
+  retryable: true,          // retried under `retry.tool`
+  maxOutputChars: 10_000,   // overrides `maxToolOutputChars`
+  execute: async (args, { signal } = {}) => search(args.query!, Number(args.limit ?? 20), signal),
+});
+```
+
+If the model sends arguments that are not valid JSON (typically a response cut off by `max_tokens`), the tool is **not** run; the model gets a failed result saying so (and that the response was truncated, when it was).
 
 ### Common one-liners
 
@@ -499,7 +582,7 @@ const agent = new AgentLoop({
     readFile:   async (path) => fetch(`/api/read?p=${path}`).then((r) => r.text()),
     fileExists: async (path) => true,
     writeFile:  async (path, content) => { /* POST to server */ },
-    exec:       async (command) => ({ stdout: "", stderr: "no shell here", exitCode: 1 }),
+    exec:       async (command, timeoutMs, signal) => ({ stdout: "", stderr: "no shell here", exitCode: 1 }),
   },
 });
 ```
@@ -539,6 +622,7 @@ A complete browser example lives in `examples/browser.html`.
 | `AgentLoop.resume(opts)` | `Promise<AgentLoop>` | — | no |
 | `.isRunning()` | `boolean` | — | — |
 | `.pending()` | `number` | — | — |
+| `.usage()` | `Usage` | — | — |
 
 Readable state: `agent.id`, `agent.log`, `agent.convo`, `agent.registry`, `agent.world`.
 
@@ -566,7 +650,7 @@ Discriminated union on `.type`. Every delivered event also carries the envelope 
 | `system_set` | `{ system }` | System prompt changed |
 | `tools_changed` | `{ names }` | Tool set changed |
 | `llm_request` | `{ model, input, historyLength, toolCount }` | About to call the model |
-| `llm_response` | `{ text, toolCalls, finishReason }` | Model responded |
+| `llm_response` | `{ text, toolCalls, finishReason, usage? }` | Model responded |
 | `llm_error` | `{ error, attempt }` | Model call failed |
 | `retry` | `{ boundary, name?, attempt, maxAttempts, delayMs, error }` | A boundary will be retried |
 | `memory` | `{ op, content }` | Agent called Remember / Forget |
@@ -600,29 +684,35 @@ Discriminated union on `.type`. Every delivered event also carries the envelope 
 | `refreshSystem` | no-op | Rebuild the system prompt on request |
 | `installTool` | not available stub | Runtime tool install |
 | `listTools` | registry names | Human-readable tool list |
-| `spawn` | not configured stub | `(task, { cause })` — delegate to a subagent; return `agent` / `log` to link its log |
-| `isFatal` | — | Classify an error as fatal (stops the loop) |
+| `spawn` | not configured stub | `(task, { cause, signal })` — delegate to a subagent; return `agent` / `log` to link its log; kill it on `signal` |
+| `isFatal` | — | Classify an error as fatal (stops the loop) — from the provider or a tool |
+| `maxTokens` | unset (no `max_tokens` sent) | Completion-token cap per request |
+| `maxToolOutputChars` | `50_000` | Cap on each tool result the model sees (head + tail kept); `0` disables |
+| `maxIterations` | 0 (off) | LLM calls per turn before `MaxIterationsError` |
+| `llmIdleTimeoutMs` | `120_000` | Cancel a stream that produces nothing (no text, tool-call or reasoning delta) for this long |
 | `id` | `"agent"` | Agent id stamped on every event |
 | `store` | — | `EventStore` to persist the log (see `createJsonlEventStore`) |
 | `eventLog` | fresh `EventLog` | Share a log with other agents |
 | `hooks` | — | `AgentHook[]` attached at construction |
 | `retry` | off | `{ llm?, tool? }` retry policies |
-| `contextPruneInterval` | 0 (off) | Tool-call count between auto-prunes |
-| `contextStrategy` | `llmContextStrategy()` | `(graph, ctx) => graph` — decides what stays in context on a prune |
+| `context` | — | `{ strategy?, compactAtTokens?, everyToolCalls? }` — see *Context trimming* |
+| `contextPruneInterval` | 0 (off) | *Deprecated* — `context.everyToolCalls` |
+| `contextStrategy` | `llmContextStrategy()` | *Deprecated* — `context.strategy` |
 | `classifySpawn` | — | Classify tool calls as spawn tasks |
 | `log` | — | Debug logger |
 
 ### Other exports
 
 - **Providers**: `OpenRouterProvider`, `AI`, `AIBuilder`, `AIConversation`
-- **Tools**: `ToolDefinition`, `ToolCall`, `ToolResult`, `ToolRegistry`, `primitiveTools`, `registerBuiltins`
+- **Tools**: `ToolDefinition`, `ToolContext`, `ToolCall`, `ToolResult`, `ToolRegistry`, `primitiveTools`, `registerBuiltins`, `truncateOutput`, `DEFAULT_MAX_TOOL_OUTPUT_CHARS`
+- **Usage**: `Usage`, `AgentState.usage`, `TurnRecord.usage`
 - **Memory**: `createFileMemory`, `FileMemory`, `FileMemoryOptions`, `appendMemory`, `removeMemory`, `readMemory`
 - **Event sourcing**: `EventLog`, `MemoryEventStore`, `createJsonlEventStore`, `parseJsonlEvents`, `EventStore`, `LogEvent`, `EventEnvelope`, `isEphemeralEvent`, `serializeEvent`, `toErrorInfo`
 - **State**: `projectState`, `reduce`, `initialState`, `messagesToRequeue`, `AgentState`, `TurnRecord`
 - **Hooks**: `AgentHook`, `bridgeAgents`, `HookTarget`, `SendOptions`
-- **Context**: `projectContext`, `contextFromHistory`, `contextGraph`, `contextNode`, `closeToolGroups`, `trimContext`, `describeTrim`, `keepLastTurns`, `llmContextStrategy`, `ContextStrategy`, `ContextStrategyContext`, `ContextGraph`, `ContextNode`, `ContextEdge`, `ContextTrim`, `ContextTrigger`
+- **Context**: `ContextOptions`, `projectContext`, `contextFromHistory`, `contextGraph`, `contextNode`, `closeToolGroups`, `trimContext`, `describeTrim`, `keepLastTurns`, `foldTurns`, `FoldTurnsOptions`, `scoreEvidenceLine`, `llmContextStrategy`, `ContextStrategy`, `ContextStrategyContext`, `ContextGraph`, `ContextNode`, `ContextEdge`, `ContextTrim`, `ContextTrigger`
 - **Graph**: `projectGraph`, `graphToMermaid`, `linkedLogs`, `mergeEvents`, `AgentGraph`, `TurnNode`, `MessageEdge`, `LinkedLog`
-- **Testing** (`@hypen-space/gloop-loop/testing`): `ScriptedProvider`, `tc`, `tcNoId`, `echoTool`, `completeTool`, `bashTool`, `spawnPrefixClassifier`
+- **Testing** (`@hypen-space/gloop-loop/testing`): `ScriptedProvider` (scripted responses may set `usage` / `finishReason`), `tc`, `tcNoId`, `echoTool`, `completeTool`, `bashTool`, `spawnPrefixClassifier`
 - **Retry**: `withRetry`, `RetryPolicy`, `RetryConfig`, `backoffDelay`, `defaultRetryIf`
 - **Errors**: `AbortError`
 - **Skills**: `Skill`, `parseSkillMarkdown`, `mergeSkillsIntoSystem`, `formatSkillsListing`, `findSkill`, `applySkillSubstitutions`, `thinkInputFromSkillSubcommand`, `matchSkillSlash`, `skillInvocationToThinkInput`, `createInvokeSkillTool`, `ParsedSkillMarkdown`, `SkillSlashMatch`

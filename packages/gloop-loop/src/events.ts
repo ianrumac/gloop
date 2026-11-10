@@ -21,7 +21,7 @@
  * always receive `LogEvent`s.
  */
 
-import type { FinishReason, JsonToolCall, Message } from "./ai/types.js";
+import type { FinishReason, JsonToolCall, Message, Usage } from "./ai/types.js";
 
 // ============================================================================
 // Messages sent INTO the actor
@@ -134,7 +134,7 @@ export type AgentEvent =
   /** The streaming assistant message finished (may be followed by tool calls). */
   | { type: "stream_done" }
   /** The model responded (full text, tool calls, finish reason). */
-  | { type: "llm_response"; text: string; toolCalls: JsonToolCall[]; finishReason: FinishReason }
+  | { type: "llm_response"; text: string; toolCalls: JsonToolCall[]; finishReason: FinishReason; usage?: Usage }
   /** The model call failed (before any retry decision). */
   | { type: "llm_error"; error: ErrorInfo; attempt: number }
 

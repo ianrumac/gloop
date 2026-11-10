@@ -7,6 +7,7 @@ import type {
   StreamResult,
 } from "../src/ai/types.js";
 import { AIConversation } from "../src/ai/builder.js";
+import { truncateOutput } from "../src/tools/output.js";
 import { ToolRegistry } from "../src/tools/registry.js";
 import {
   run,
@@ -361,10 +362,15 @@ describe("parseInput", () => {
     if (form.tag === "emit") expect(form.text).toContain("Usage");
   });
 
-  test("unknown /command becomes Emit", () => {
-    const form = parseInput("/foo");
-    expect(form.tag).toBe("emit");
-    if (form.tag === "emit") expect(form.text).toContain("Unknown command");
+  test("input starting with / that is not a command or skill becomes Think", () => {
+    for (const input of ["/foo", "/etc/hosts looks wrong, can you check it?", "/usr/bin/env node"]) {
+      const form = parseInput(input);
+      expect(form.tag).toBe("think");
+      if (form.tag === "think") expect(form.input).toBe(input);
+    }
+    // Known commands are still commands, with or without skills loaded.
+    expect(parseInput("/tools").tag).toBe("list-tools");
+    expect(parseInput("/install x").tag).toBe("install");
   });
 
   test("whitespace is trimmed", () => {
@@ -1060,5 +1066,203 @@ describe("evalInvoke — spawn-classified calls", () => {
     expect(toolMsg?.content).toContain("child says hi");
     // The next LLM call saw the subagent's result in history — no empty user turn.
     expect(h.some((m) => m.role === "user" && m.content === "")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review regressions — interpreter boundary
+// ---------------------------------------------------------------------------
+
+/** A recording fx that also keeps tool_start / tool_done with their order. */
+function toolTrace(fx: Effects): string[] {
+  const trace: string[] = [];
+  const start = fx.toolStart, done = fx.toolDone;
+  fx.toolStart = (name, ...rest) => { trace.push(`start:${name}`); start(name, ...rest); };
+  fx.toolDone = (name, ok, out) => { trace.push(`done:${name}:${ok}`); done(name, ok, out); };
+  return trace;
+}
+
+describe("truncateOutput", () => {
+  test("keeps head and tail around a marker; short text and max<=0 pass through", () => {
+    const text = "a".repeat(50) + "b".repeat(100) + "c".repeat(50);
+    const out = truncateOutput(text, 100);
+    expect(out.startsWith("a".repeat(50))).toBe(true);
+    expect(out.endsWith("c".repeat(50))).toBe(true);
+    expect(out).toContain("[100 characters omitted — output capped at 100; narrow the command or read a range]");
+    expect(truncateOutput("short", 100)).toBe("short");
+    expect(truncateOutput(text, 0)).toBe(text);
+  });
+});
+
+describe("tool boundary regressions", () => {
+  test("a tool error classified fatal propagates out of the turn and is not retried", async () => {
+    class Fatal extends Error {}
+    let runs = 0;
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "Boom", description: "", arguments: [], retryable: true,
+      execute: async () => { runs += 1; throw new Fatal("reboot"); },
+    });
+    const provider = new MockProvider([{ toolCalls: [tc("c1", "Boom", {})] }, { text: "never" }]);
+    const world = mkWorld(new AIConversation(provider, "m"), registry);
+    const { fx } = createRecordingFx();
+    const config: LoopConfig = { isFatal: (e) => e instanceof Fatal, retry: { tool: { attempts: 3, backoffMs: 1 } } };
+    await expect(run("go", world, fx, config)).rejects.toBeInstanceOf(Fatal);
+    expect(runs).toBe(1);
+    expect(provider.calls.length).toBe(1);
+    // History stays provider-valid: the call is answered.
+    const tool = world.convo.getHistory().find((m) => m.role === "tool");
+    expect(tool?.toolCallId).toBe("c1");
+  });
+
+  test("denied and unknown tools emit tool_start before tool_done", async () => {
+    const provider = new MockProvider([
+      { toolCalls: [tc("c1", "DangerTool", { action: "destroy" }), tc("c2", "Nope", {})] },
+      { text: "ok" },
+    ]);
+    const world = mkWorld(new AIConversation(provider, "m"), createTestRegistry());
+    const { fx } = createRecordingFx({ confirmResult: false });
+    const trace = toolTrace(fx);
+    await run("go", world, fx);
+    expect(trace).toEqual(["start:DangerTool", "done:DangerTool:false", "start:Nope", "done:Nope:false"]);
+  });
+
+  test("malformed tool-call JSON is not executed; the model is told why (and about truncation)", async () => {
+    let ran = false;
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "Bash", description: "", arguments: [{ name: "command", description: "" }],
+      execute: async () => { ran = true; return "ran"; },
+    });
+    const bad: JsonToolCall = { id: "c1", type: "function", function: { name: "Bash", arguments: '{"command":"echo hi' } };
+    const provider = new MockProvider([{ toolCalls: [bad] }, { text: "ok" }]);
+    // finishReason "length" — the response was cut off by max_tokens.
+    const orig = provider.stream.bind(provider);
+    let first = true;
+    provider.stream = (c) => {
+      const r = orig(c);
+      if (first) { first = false; return { ...r, finishReason: Promise.resolve("length" as const) }; }
+      return r;
+    };
+    const world = mkWorld(new AIConversation(provider, "m"), registry);
+    const { fx, events } = createRecordingFx();
+    await run("go", world, fx);
+    expect(ran).toBe(false);
+    const tool = world.convo.getHistory().find((m) => m.role === "tool")!;
+    expect(tool.content).toContain("not valid JSON");
+    expect(tool.content).toContain("max_tokens");
+    expect(events).toContainEqual(expect.objectContaining({ type: "tool_done", name: "Bash", success: false }));
+  });
+
+  test("tool output is capped centrally (head + tail), per-tool override and 0 disable it", async () => {
+    const big = "H".repeat(100) + "x".repeat(10_000) + "T".repeat(100);
+    const registry = new ToolRegistry();
+    registry.register({ name: "Big", description: "", arguments: [], execute: async () => big });
+    registry.register({ name: "Wide", description: "", arguments: [], maxOutputChars: 0, execute: async () => big });
+    const provider = new MockProvider([
+      { toolCalls: [tc("c1", "Big", {}), tc("c2", "Wide", {})] },
+      { text: "ok" },
+    ]);
+    const world = mkWorld(new AIConversation(provider, "m"), registry);
+    await run("go", world, createRecordingFx().fx, { maxToolOutputChars: 1000 });
+    const [capped, wide] = world.convo.getHistory().filter((m) => m.role === "tool");
+    expect(capped!.content.startsWith("H".repeat(100))).toBe(true);
+    expect(capped!.content.endsWith("T".repeat(100))).toBe(true);
+    expect(capped!.content).toContain("characters omitted — output capped at 1000");
+    expect(capped!.content.length).toBeLessThan(1200);
+    expect(wide!.content).toBe(big);
+  });
+
+  test("tools receive the turn's signal, and an interrupt unwinds a tool that ignores it", async () => {
+    let seen: AbortSignal | undefined;
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "Slow", description: "", arguments: [],
+      execute: async (_a, ctx) => { seen = ctx?.signal; await new Promise((r) => setTimeout(r, 2000)); return "late"; },
+    });
+    registry.register({ name: "Echo", description: "", arguments: [], execute: async () => "fast" });
+    const provider = new MockProvider([
+      { toolCalls: [tc("c1", "Echo", {}), tc("c2", "Slow", {}), tc("c3", "Echo", {})] },
+    ]);
+    const ac = new AbortController();
+    const world = mkWorld(new AIConversation(provider, "m"), registry, ac.signal);
+    const { fx } = createRecordingFx();
+    const trace = toolTrace(fx);
+    setTimeout(() => ac.abort(), 30);
+    const t0 = Date.now();
+    await expect(run("go", world, fx)).rejects.toBeInstanceOf(AbortError);
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(seen).toBe(ac.signal);
+    expect(trace).toEqual(["start:Echo", "done:Echo:true", "start:Slow", "done:Slow:false"]);
+    // The completed call keeps its result; the rest are answered "interrupted".
+    const tools = world.convo.getHistory().filter((m) => m.role === "tool");
+    expect(tools.map((m) => m.toolCallId)).toEqual(["c1", "c2", "c3"]);
+    expect(tools[0]!.content).toBe("fast");
+    expect(tools[1]!.content).toContain("Interrupted");
+    expect(tools[2]!.content).toContain("Interrupted");
+  });
+
+  test("spawn handlers receive the turn's signal", async () => {
+    let call: { signal?: AbortSignal } | undefined;
+    const provider = new MockProvider([{ toolCalls: [tc("c1", "Bash", { command: "spawn:job" })] }, { text: "ok" }]);
+    const registry = new ToolRegistry();
+    registry.register({ name: "Bash", description: "", arguments: [{ name: "command", description: "" }], execute: async () => "" });
+    const ac = new AbortController();
+    const world = mkWorld(new AIConversation(provider, "m"), registry, ac.signal);
+    const { fx } = createRecordingFx();
+    fx.spawn = async (_task, c) => { call = c; return { success: true, summary: "ok", exitCode: 0, stdout: "", stderr: "" }; };
+    await run("go", world, fx, { classifySpawn: testClassifySpawn });
+    expect(call?.signal).toBe(ac.signal);
+  });
+
+  test("a throwing remember / failing ManageContext become failed tool results, not failed turns", async () => {
+    const provider = new MockProvider([
+      { toolCalls: [tc("c1", "Remember", { content: "x" }), tc("c2", "ManageContext", { instructions: "prune" })] },
+      { text: "ok" },
+    ]);
+    const world = mkWorld(new AIConversation(provider, "m"), createTestRegistry());
+    const { fx } = createRecordingFx();
+    fx.remember = async () => { throw new Error("disk full"); };
+    fx.manageContext = async () => { throw new Error("strategy broke"); };
+    await run("go", world, fx);
+    const tools = world.convo.getHistory().filter((m) => m.role === "tool");
+    expect(tools[0]!.content).toContain("disk full");
+    expect(tools[1]!.content).toContain("strategy broke");
+    expect(provider.calls.length).toBe(2); // the turn went on
+  });
+
+  test("a failing auto-prune is reported and the turn continues", async () => {
+    const provider = new MockProvider([{ toolCalls: [tc("c1", "Echo", { text: "a" })] }, { text: "done" }]);
+    const world = mkWorld(new AIConversation(provider, "m"), createTestRegistry());
+    const { fx, events } = createRecordingFx();
+    fx.manageContext = async () => { throw new Error("strategy broke"); };
+    await run("go", world, fx, { contextPruneInterval: 1 });
+    expect(events).toContainEqual({ type: "tool_done", name: "ManageContext", success: false, output: "Context management failed: strategy broke" });
+    expect(provider.calls.length).toBe(2);
+  });
+});
+
+describe("streaming regressions", () => {
+  test('"" heartbeats keep the idle timer alive but are not output', async () => {
+    const provider: AIProvider = {
+      name: "hb",
+      complete: async () => { throw new Error("unused"); },
+      stream: () => ({
+        textStream: (async function* () {
+          for (let i = 0; i < 8; i++) { await new Promise((r) => setTimeout(r, 25)); yield ""; }
+          yield "hi";
+        })(),
+        toolCalls: Promise.resolve([]),
+        finishReason: Promise.resolve("stop"),
+        usage: Promise.resolve({ promptTokens: 7, completionTokens: 1, totalTokens: 8 }),
+        cancel: async () => {},
+      }),
+    };
+    const world = mkWorld(new AIConversation(provider, "m"), new ToolRegistry());
+    const { fx, events } = createRecordingFx();
+    await run("go", world, fx, { llmIdleTimeoutMs: 60 });
+    expect(events.filter((e) => e.type === "stream_chunk")).toEqual([{ type: "stream_chunk", text: "hi" }]);
+    expect(world.convo.getHistory().at(-1)).toEqual({ role: "assistant", content: "hi" });
+    expect(world.lastUsage).toEqual({ promptTokens: 7, completionTokens: 1, totalTokens: 8 });
   });
 });

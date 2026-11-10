@@ -65,7 +65,7 @@ export interface ContextGraph {
   edges: ContextEdge[];
 }
 
-/** What asked for the trim: the model's `ManageContext` call, or `contextPruneInterval`. */
+/** What asked for the trim: the model's `ManageContext` call, or an automatic trigger (`context.everyToolCalls` / `context.compactAtTokens`). */
 export type ContextTrigger = "tool" | "auto";
 
 export interface ContextStrategyContext {
@@ -85,6 +85,12 @@ export interface ContextStrategyContext {
   /** The agent's provider / model, for a strategy that asks a model. */
   provider: AIProvider;
   model: string;
+  /**
+   * Current context size in tokens — the last request's prompt tokens when
+   * the provider reports usage, else a chars/4 estimate.  Lets a strategy
+   * decide how much to drop (e.g. for `compactAtTokens`).
+   */
+  tokens?: number;
   /** Aborts when the turn is interrupted. */
   signal?: AbortSignal;
   /** Debug logger — `(label, content)` pairs. */

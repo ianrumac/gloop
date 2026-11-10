@@ -43,7 +43,7 @@ export class ToolRegistry {
           type: "string",
           description: arg.description,
         };
-        required.push(arg.name);
+        if (!arg.optional) required.push(arg.name);
       }
 
       return {

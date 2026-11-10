@@ -6,7 +6,10 @@
  * Each entry in `responses` is consumed by one `stream()` / `complete()`
  * call, in order.  An entry can stream text (in 10-char chunks, optionally
  * delayed), return tool calls, or fail — before the first chunk
- * (`failBefore`) or after `failAfterChunks` chunks.
+ * (`failBefore`) or after `failAfterChunks` chunks.  `usage` is reported
+ * through `StreamResult.usage` / `AIResponse.usage`; `finishReason`
+ * overrides the default (`"tool_calls"` when there are tool calls, else
+ * `"stop"`) — e.g. `"length"` to simulate a response cut off by max_tokens.
  */
 
 import type {
@@ -15,6 +18,8 @@ import type {
   AIResponse,
   StreamResult,
   JsonToolCall,
+  FinishReason,
+  Usage,
 } from "./ai/types.js";
 import type { ToolDefinition } from "./tools/types.js";
 
@@ -24,6 +29,8 @@ export interface ScriptedResponse {
   delayMs?: number;
   failBefore?: Error;
   failAfterChunks?: number;
+  usage?: Usage;
+  finishReason?: FinishReason;
 }
 
 export class ScriptedProvider implements AIProvider {
@@ -42,8 +49,9 @@ export class ScriptedProvider implements AIProvider {
       id: "scripted",
       model: config.model,
       content: resp.text ?? null,
-      finishReason: resp.toolCalls?.length ? "tool_calls" : "stop",
+      finishReason: resp.finishReason ?? (resp.toolCalls?.length ? "tool_calls" : "stop"),
       ...(resp.toolCalls && { toolCalls: resp.toolCalls }),
+      ...(resp.usage && { usage: resp.usage }),
     };
   }
 
@@ -71,7 +79,8 @@ export class ScriptedProvider implements AIProvider {
     return {
       textStream,
       toolCalls: Promise.resolve(resp.toolCalls ?? []),
-      finishReason: Promise.resolve(resp.toolCalls?.length ? "tool_calls" : "stop"),
+      finishReason: Promise.resolve(resp.finishReason ?? (resp.toolCalls?.length ? "tool_calls" : "stop")),
+      usage: Promise.resolve(resp.usage),
       cancel: async () => {},
     };
   }

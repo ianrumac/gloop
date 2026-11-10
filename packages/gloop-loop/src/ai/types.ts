@@ -72,6 +72,22 @@ export interface AIRequestConfig {
   provider?: ProviderRouting;
   tools?: JsonTool[];
   toolChoice?: ToolChoice;
+  /**
+   * Abort the HTTP request.  Honoured by `complete()`; `stream()` also links
+   * it to the stream's own controller (which `StreamResult.cancel()` aborts).
+   */
+  signal?: AbortSignal;
+}
+
+/** Token counts for one model call (or running totals across calls). */
+export interface Usage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  /** Prompt tokens served from the provider's cache, when reported. */
+  cachedTokens?: number;
+  /** Completion tokens spent on reasoning, when reported. */
+  reasoningTokens?: number;
 }
 
 export type FinishReason = "stop" | "length" | "content_filter" | "tool_calls" | null;
@@ -82,25 +98,39 @@ export interface AIResponse {
   content: string | null;
   finishReason: FinishReason;
   toolCalls?: JsonToolCall[];
-  usage?: {
-    promptTokens: number;
-    completionTokens: number;
-    totalTokens: number;
-  };
+  usage?: Usage;
 }
 
-/** Result of a streaming request — provides concurrent text + tool call streams */
+/**
+ * Result of a streaming request — provides concurrent text + tool call streams.
+ *
+ * Contract for providers:
+ *  - `textStream` yields text deltas.  It MAY yield an empty string `""` as
+ *    a heartbeat for a received chunk that carries no text (tool-call
+ *    argument deltas, reasoning, keep-alives) so consumers can tell an
+ *    active stream from a silent one — the interpreter's idle timeout counts
+ *    `""` as activity but never emits or records it.  Consumers that only
+ *    concatenate text are unaffected.
+ *  - `toolCalls`, `finishReason` and `usage` resolve once the stream ends —
+ *    and also after `cancel()` or a stream error (with whatever was
+ *    received); they never reject.
+ *  - `cancel()` aborts the underlying request and must never block, even
+ *    when the server has not responded at all.
+ */
 export interface StreamResult {
   textStream: AsyncIterableIterator<string>;
   toolCalls: Promise<JsonToolCall[]>;
   /** Resolves with the finish reason from the final chunk, or null if absent. */
   finishReason: Promise<FinishReason>;
+  /** Token usage for the request, if the provider reports it. */
+  usage?: Promise<Usage | undefined>;
   cancel(): Promise<void>;
 }
 
 export interface AIProvider {
   readonly name: string;
   complete(config: AIRequestConfig): Promise<AIResponse>;
+  /** See `StreamResult` for the streaming contract (heartbeats, cancel). */
   stream(config: AIRequestConfig): StreamResult;
 }
 
